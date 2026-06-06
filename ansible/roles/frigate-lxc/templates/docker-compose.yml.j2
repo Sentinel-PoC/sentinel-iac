@@ -1,0 +1,21 @@
+# docker-compose.yml — Frigate NVR LXC 203 on pve4-alienware
+# Managed by Ansible frigate-lxc role (sentinel-iac / OPS-840 / OPS-956)
+services:
+  frigate:
+    container_name: frigate
+    privileged: true
+    restart: unless-stopped
+    image: {{ frigate_image }}
+    shm_size: "{{ frigate_shm_size }}"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - {{ frigate_config_dir }}:/config
+      - {{ frigate_storage_dir }}:{{ frigate_media_dir }}
+    ports:
+      - "5000:5000"
+      - "8971:8971"
+      - "8554:8554"
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    environment:
+      FRIGATE_MQTT_PASSWORD: "${FRIGATE_MQTT_PASSWORD}"

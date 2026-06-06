@@ -1,0 +1,10 @@
+---
+# OPS-670: powerdns-auth handlers
+# Service restart is handled by PowerDNS.pdns Galaxy role handlers.
+# This file left intentionally minimal — add sentinel-iac-specific handlers here.
+
+- name: Restart pdns
+  ansible.builtin.service:
+    name: pdns
+    state: restarted
+  listen: restart pdns

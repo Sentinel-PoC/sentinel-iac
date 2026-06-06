@@ -1,0 +1,229 @@
+---
+# lxc_provision.yml — Create scanopy-daemon LXC on pve4-alienware (OPS-1123)
+# Pattern mirrors powerdns-lxc/tasks/provision.yml (OPS-673) and
+# ha-lxc/tasks/lxc_provision.yml (OPS-585).
+# Targets: pve4-alienware as root.
+#
+# Produces: LXC {{ scanopy_lxc_id }} ({{ scanopy_lxc_name }}) running at
+# {{ scanopy_lxc_ip }}/24 with ubuntu user SSH-accessible via id_sentinel key.
+
+# ── Download Ubuntu 24.04 LXC template ────────────────────────────────────────
+
+- name: Update Proxmox template list (pveam update)
+  ansible.builtin.command:
+    cmd: pveam update
+  register: pveam_update
+  changed_when: "'No updates available' not in pveam_update.stdout"
+  failed_when: false
+  tags: [scanopy-lxc, lxc, template]
+
+- name: Check if Ubuntu 24.04 template is already downloaded
+  ansible.builtin.command:
+    cmd: "pveam list {{ scanopy_lxc_template_storage }}"
+  register: pveam_list
+  changed_when: false
+  tags: [scanopy-lxc, lxc, template]
+
+- name: Download Ubuntu 24.04 LXC template if not present
+  ansible.builtin.command:
+    cmd: >
+      pveam download {{ scanopy_lxc_template_storage }}
+      {{ scanopy_lxc_ostemplate }}
+  when:
+    - scanopy_lxc_ostemplate not in pveam_list.stdout
+    - not ansible_check_mode
+  register: pveam_download
+  changed_when: true
+  async: 300
+  poll: 10
+  tags: [scanopy-lxc, lxc, template]
+
+# ── Create LXC (idempotent) ───────────────────────────────────────────────────
+
+- name: Check if scanopy-daemon LXC already exists
+  ansible.builtin.command:
+    cmd: "pct status {{ scanopy_lxc_id }}"
+  register: lxc_exists
+  failed_when: false
+  changed_when: false
+  tags: [scanopy-lxc, lxc, create]
+
+- name: Create scanopy-daemon LXC container
+  # Privileged LXC (unprivileged=0) is REQUIRED for NET_RAW capability.
+  # ARP scanning (scapy/raw socket) requires CAP_NET_RAW which is not available
+  # in unprivileged LXCs without explicit Proxmox AppArmor profile additions.
+  # features=nesting=1 allows podman-in-LXC for container-based daemon delivery.
+  # onboot=1 + startup order=3 ensures daemon restarts after PVE host reboot,
+  # after infrastructure LXCs (DNS order=1, auth order=2).
+  # mountoptions=discard (OPS-1009): enables TRIM/UNMAP passthrough to LVM-thin
+  # so guest fstrim calls reclaim blocks in the thinpool.
+  ansible.builtin.command:
+    cmd: >
+      pct create {{ scanopy_lxc_id }}
+      {{ scanopy_lxc_template_storage }}:vztmpl/{{ scanopy_lxc_ostemplate }}
+      --hostname {{ scanopy_lxc_name }}
+      --cores {{ scanopy_lxc_cores }}
+      --memory {{ scanopy_lxc_memory }}
+      --swap {{ scanopy_lxc_swap }}
+      --rootfs {{ scanopy_lxc_rootfs_storage }}:{{ scanopy_lxc_rootfs_size }},mountoptions={{ scanopy_lxc_rootfs_mountoptions }}
+      --net0 name=eth0,bridge={{ scanopy_lxc_bridge }},ip={{ scanopy_lxc_ip }}/{{ scanopy_lxc_cidr }},gw={{ scanopy_lxc_gateway }}
+      --nameserver {{ scanopy_lxc_nameserver }}
+      --searchdomain {{ scanopy_lxc_searchdomain }}
+      --unprivileged {{ scanopy_lxc_unprivileged }}
+      --features {{ scanopy_lxc_features }}
+      --onboot {{ scanopy_lxc_onboot }}
+      --startup {{ scanopy_lxc_startup }}
+      --start 0
+  when: lxc_exists.rc != 0
+  changed_when: lxc_exists.rc != 0
+  tags: [scanopy-lxc, lxc, create]
+
+- name: Ensure onboot and startup are set on existing LXC (idempotent)
+  ansible.builtin.command:
+    cmd: >
+      pct set {{ scanopy_lxc_id }}
+      -onboot {{ scanopy_lxc_onboot }}
+      -startup {{ scanopy_lxc_startup }}
+  changed_when: false
+  tags: [scanopy-lxc, lxc, create]
+
+- name: Ensure rootfs mountoptions=discard is set on LXC (idempotent)
+  # OPS-1009 pattern: Apply discard mountoption for LVM-thin thinpool reclamation.
+  # pct set writes a [pve:pending] delta — active after next container restart.
+  ansible.builtin.shell: |
+    current=$(pct config {{ scanopy_lxc_id }} | grep '^rootfs:' | grep -o 'mountoptions=[^ ,]*' || true)
+    if echo "$current" | grep -q 'discard'; then
+      echo "already_set"
+    else
+      pct set {{ scanopy_lxc_id }} \
+        -rootfs $(pct config {{ scanopy_lxc_id }} | grep '^rootfs:' | sed 's/rootfs: //' | sed 's/,mountoptions=[^ ,]*//'| tr -d '\n'),mountoptions={{ scanopy_lxc_rootfs_mountoptions }}
+      echo "applied"
+    fi
+  register: _discard_result
+  changed_when: "'applied' in _discard_result.stdout"
+  tags: [scanopy-lxc, lxc, create, discard]
+
+# ── Start the LXC ─────────────────────────────────────────────────────────────
+
+- name: Check scanopy-daemon LXC running status
+  ansible.builtin.command:
+    cmd: "pct status {{ scanopy_lxc_id }}"
+  register: lxc_status
+  changed_when: false
+  tags: [scanopy-lxc, lxc, start]
+
+- name: Start scanopy-daemon LXC if not running
+  ansible.builtin.command:
+    cmd: "pct start {{ scanopy_lxc_id }}"
+  when: "'running' not in lxc_status.stdout"
+  changed_when: "'running' not in lxc_status.stdout"
+  tags: [scanopy-lxc, lxc, start]
+
+- name: Wait for LXC networking to be ready (max 60s)
+  ansible.builtin.command:
+    cmd: "pct exec {{ scanopy_lxc_id }} -- ip route show default"
+  register: lxc_network_ready
+  until: lxc_network_ready.rc == 0 and lxc_network_ready.stdout != ""
+  retries: 12
+  delay: 5
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, start]
+
+# ── SSH bootstrap — enable Ansible access to the LXC ─────────────────────────
+# Creates ubuntu admin user, grants passwordless sudo, injects id_sentinel
+# public key. All via pct exec (no direct SSH to LXC required for bootstrap).
+# Skipped in check mode (LXC may not exist; pct exec would fail).
+
+- name: Read id_sentinel public key from Ansible controller (lookup)
+  ansible.builtin.set_fact:
+    _sentinel_pubkey_content: "{{ lookup('file', scanopy_lxc_admin_ssh_key_file) }}"
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Bootstrap base packages inside LXC (curl, openssh-server, ca-certificates, podman)
+  # podman: container runtime for daemon delivery.
+  # curl + ca-certificates: needed for Vault token fetch and TLS operations.
+  # skopeo: used for cosign-compatible image inspection.
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "apt-get update -qq &&
+       apt-get install -y --no-install-recommends
+       curl ca-certificates openssh-server podman skopeo"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Create ubuntu admin user inside LXC (idempotent)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "id ubuntu &>/dev/null || useradd -m -s /bin/bash -G sudo ubuntu"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Set up passwordless sudo for ubuntu inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "echo 'ubuntu ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/90-ubuntu-nopasswd &&
+       chmod 440 /etc/sudoers.d/90-ubuntu-nopasswd"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Create .ssh directory for ubuntu inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "mkdir -p /home/ubuntu/.ssh &&
+       chmod 700 /home/ubuntu/.ssh &&
+       chown ubuntu:ubuntu /home/ubuntu/.ssh"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Inject id_sentinel public key into ubuntu authorized_keys inside LXC
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ scanopy_lxc_id }}"
+      - "--"
+      - bash
+      - "-c"
+      - >-
+        grep -qF '{{ _sentinel_pubkey_content | trim }}' /home/ubuntu/.ssh/authorized_keys 2>/dev/null
+        || echo '{{ _sentinel_pubkey_content | trim }}' >> /home/ubuntu/.ssh/authorized_keys;
+        chmod 600 /home/ubuntu/.ssh/authorized_keys;
+        chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Enable and start openssh-server inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "systemctl enable ssh && systemctl start ssh"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]
+
+- name: Verify authorized_keys was written inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ scanopy_lxc_id }} -- test -s /home/ubuntu/.ssh/authorized_keys"
+  register: ssh_key_verify
+  changed_when: false
+  failed_when: ssh_key_verify.rc != 0
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap, verify]
+
+- name: Display SSH bootstrap status
+  ansible.builtin.debug:
+    msg: >-
+      LXC {{ scanopy_lxc_id }} ({{ scanopy_lxc_name }}) SSH bootstrap complete.
+      ubuntu@{{ scanopy_lxc_ip }} ready for Ansible (id_sentinel key installed).
+  when: not ansible_check_mode
+  tags: [scanopy-lxc, lxc, ssh-bootstrap]

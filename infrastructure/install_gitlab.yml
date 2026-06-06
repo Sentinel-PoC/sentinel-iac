@@ -1,0 +1,30 @@
+---
+- name: Install GitLab CE on Server
+  hosts: git_servers
+  become: yes
+  tasks:
+    - name: 1. Install Dependencies
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: yes
+
+    - name: 2. Add GitLab Repository Script
+      shell: curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+      args:
+        creates: /etc/apt/sources.list.d/gitlab_gitlab-ce.list
+
+    - name: 3. Install GitLab CE
+      apt:
+        name: gitlab-ce
+        state: present
+
+    - name: 4. Reconfigure GitLab (this can take a few minutes)
+      command: gitlab-ctl reconfigure
+      async: 300 # Run for up to 5 minutes
+      poll: 60   # Check status every 60 seconds
+      register: gitlab_reconfigure_status
+      changed_when: "'gitlab Reconfigured!' in gitlab_reconfigure_status.stdout"

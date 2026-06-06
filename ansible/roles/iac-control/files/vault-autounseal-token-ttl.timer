@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily Vault auto-unseal token TTL check (OPS-190)
+
+[Timer]
+# OnBootSec=2min — first check shortly after boot so a freshly-booted iac-control
+# emits a baseline reading before doing anything else.
+# OnCalendar=*-*-* 04:30:00 — daily at 04:30 UTC. TTL changes slowly; daily is
+# enough to give 7 alerts (WARN) before CRIT and 6 alerts (CRIT) before failure.
+# Persistent=true catches up on missed runs after host sleep / restart.
+# AccuracySec=15m intentionally loose to avoid waking other timers.
+OnBootSec=2min
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+AccuracySec=15min
+
+[Install]
+WantedBy=timers.target

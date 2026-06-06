@@ -1,0 +1,142 @@
+---
+# pve4-nvidia-gpu role defaults
+# OPS-564: NVIDIA RTX 3060 LXC cgroup-passthrough for Plan G' Tier-1 inference
+#
+# IMPORTANT — approach vs proxmox-gpu-passthrough role:
+#   proxmox-gpu-passthrough: BLACKLISTS nvidia drivers (VFIO-only host)
+#   pve4-nvidia-gpu:         INSTALLS nvidia drivers on host (LXC passthrough path)
+#
+# These roles must NOT both run with their respective flags enabled on the same host.
+# pve4-alienware: gpu_passthrough_enabled=false (host_vars) → VFIO role is safe.
+# This role: nvidia_lxc_enabled=true → driver installed, LXC gets device access.
+#
+# Hardware: NVIDIA GA106 GeForce RTX 3060 LHR, 12 GB GDDR6 VRAM
+# Compute capability: 8.6 (Ampere) — fully supported by NVIDIA open kernel modules
+# Open module support: driver >= 515.43.04 (RTX 30-series "Production Branch")
+
+# ── Toggle ─────────────────────────────────────────────────────────────────────
+nvidia_lxc_enabled: true
+
+# ── NVIDIA host driver ─────────────────────────────────────────────────────────
+# CUDA apt repository. OPS-733: switched from debian12 → debian13 (Trixie).
+# Reason: cuda-keyring_1.1-1_all.deb (debian12 variant) ships the cudatools key
+# (EB693B3035CD5710E231E123A4B469963BF863CC) with SHA-1 binding signatures
+# (digest algo 2). apt/sqv rejects SHA-1 binding sigs since 2026-02-01, so
+# `apt-get update` fails after keyring install on pve4-alienware (Proxmox 9.x /
+# Debian Trixie). The debian13 variant ships key 02182E60104FCDC26EAE1B8597A5D4CB8793F200
+# (Kitmaker, 2025-08-15) with SHA-256 binding signatures (digest algo 8) — accepted.
+# debian13 repo is architecturally correct for pve4-alienware (kernel 6.17.x-pve,
+# Debian 13 base), and NVIDIA published the official debian13 trixie keyring in 2025.
+nvidia_cuda_repo_debian: "debian13"
+nvidia_cuda_repo_arch: "x86_64"
+
+# Package list for the host (PVE bare metal).
+# cuda-drivers-open: installs NVIDIA open kernel modules via DKMS + userspace libs.
+# This package is the correct choice for RTX 30-series (GA10x, compute cap 8.x).
+# nvidia-container-toolkit: needed for container GPU scheduling support on host.
+nvidia_host_packages:
+  - cuda-drivers-open
+
+# nvidia-container-toolkit from NVIDIA's container toolkit repo
+nvidia_container_toolkit_packages:
+  - nvidia-container-toolkit
+
+# Kernel headers needed by DKMS to build nvidia-open kernel modules.
+# Pattern: pve-headers-<uname -r> (e.g., pve-headers-6.17.2-1-pve)
+# This task is best-effort — if the exact-version headers are not available
+# in the PVE no-subscription repo yet, DKMS falls back to available kernel-headers.
+nvidia_install_pve_headers: true
+nvidia_fallback_headers_package: "linux-headers-amd64"
+
+# ── Kernel modules to load after driver install ─────────────────────────────────
+nvidia_kernel_modules:
+  - nvidia
+  - nvidia_modeset
+  - nvidia_uvm
+  - nvidia_drm
+
+# ── ai-tier1 LXC ──────────────────────────────────────────────────────────────
+# Proxmox VMID for the ai-tier1 container. Unique per pve4-alienware.
+# pve4-alienware is standalone (not in the 3-node cluster), so VMIDs start fresh.
+ai_tier1_lxc_id: 200
+
+ai_tier1_lxc_name: "ai-tier1"
+
+# Ubuntu 24.04 LXC template — downloaded from Proxmox template mirrors.
+# pveam list proxmox to see available template IDs after 'pveam update'.
+ai_tier1_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+ai_tier1_lxc_template_storage: "local"
+
+# Resources
+ai_tier1_lxc_cores: 8
+ai_tier1_lxc_memory: 16384          # 16 GB RAM (MiB)
+ai_tier1_lxc_swap: 4096             # 4 GB swap (MiB)
+
+# Storage: local-lvm (PVE default LVM thin pool on pve4-alienware)
+# Format: <storage>:<size-in-GB>
+ai_tier1_lxc_rootfs: "local-lvm:64"
+
+# Network: bridged on vmbr0 (management network, accessible from 192.168.12.0/24)
+# IP must be available on the subnet. 192.168.12.80 is reserved for ai-tier1.
+ai_tier1_lxc_ip: "192.168.12.80"
+ai_tier1_lxc_cidr: "24"
+ai_tier1_lxc_gateway: "192.168.12.1"
+ai_tier1_lxc_bridge: "vmbr0"
+
+# DNS: iac-control (192.168.12.210) provides dnsmasq for internal hostnames.
+# Per feedback_iac_container_dns_dnsmasq: containers resolving *.haist.farm
+# need iac-control's dnsmasq, not the host resolver.
+ai_tier1_lxc_nameserver: "192.168.12.210"
+ai_tier1_lxc_searchdomain: "208.haist.farm"
+
+# Privileged container required for cgroup2 device passthrough.
+# 0 = privileged, 1 = unprivileged (standard PVE default).
+ai_tier1_lxc_unprivileged: 0
+
+# features: nesting not needed (Ollama runs native, no Docker-in-LXC).
+ai_tier1_lxc_features: ""
+
+# ── cgroup2 device passthrough ─────────────────────────────────────────────────
+# NVIDIA device major numbers on Linux:
+#   195  → /dev/nvidia0, /dev/nvidiactl, /dev/nvidia-modeset
+#   dynamic → /dev/nvidia-uvm, /dev/nvidia-uvm-tools (determined at module load)
+#
+# nvidia_cgroup_major_nvidia is stable across driver versions.
+# nvidia_cgroup_major_uvm is dynamically read from /proc/devices after module load.
+# Set these in host_vars to override if the live system reports different values.
+nvidia_cgroup_major_nvidia: 195
+
+# ── Ollama ─────────────────────────────────────────────────────────────────────
+ollama_install_url: "https://ollama.com/install.sh"
+
+ollama_models:
+  - llama3.2:3b
+  - nomic-embed-text
+
+# GPU overhead reservation for Ollama.
+# Per feedback_ollama_gpu_overhead_calibration:
+#   6800xt (16GB VRAM) needed OLLAMA_GPU_OVERHEAD=3GB to avoid CPU fallback.
+#   RTX 3060 has 12GB VRAM; llama3.2:3b is ~2GB quantized.
+#   1GiB overhead leaves ~11GB for model weights — sufficient for both models.
+ollama_gpu_overhead: "1GiB"
+
+# Context length — 8192 is sufficient for event classification prompts.
+# Per feedback_hermes_two_context_floors: Hermes enforces ≥64K minimum for
+# its own config, but native Ollama has no floor — 8192 is fine here.
+ollama_context_length: 8192
+
+# Ollama bind address — listen on all interfaces inside the LXC so the host
+# and management network can reach the inference endpoint.
+ollama_host: "0.0.0.0"
+ollama_port: 11434
+
+# Ollama user/service
+ollama_user: "ollama"
+ollama_service_name: "ollama"
+
+# ── Verification ───────────────────────────────────────────────────────────────
+# Latency target for 200-token classification prompt (milliseconds).
+ollama_latency_target_ms: 2000
+
+# Test prompt for latency verification. Kept short to stay within token budget.
+ollama_test_prompt: "Classify this network security event in one word: SSH brute-force 50 attempts from 185.220.101.45 in 10 seconds targeting root account."

@@ -1,0 +1,8 @@
+alloy_version: "1.8.3"
+alloy_enabled: true
+alloy_user: alloy
+alloy_group: alloy
+alloy_config_dir: /etc/alloy
+alloy_data_dir: /var/lib/alloy
+alloy_binary_path: /usr/local/bin/alloy
+alloy_victorialogs_url: "https://victorialogs.208.haist.farm/insert/loki/api/v1/push"

@@ -1,0 +1,247 @@
+http:
+  serversTransports:
+    transport-proxmox:
+      insecureSkipVerify: true
+
+  routers:
+    router-vault-208:
+      rule: "Host(`vault.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-vault-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-minio-208:
+      rule: "Host(`minio.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-minio-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-pve-208:
+      rule: "Host(`pve.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-pve-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-pve2-208:
+      rule: "Host(`pve2.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-pve2-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-pve3-208:
+      rule: "Host(`pve3.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-pve3-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-wazuh-208:
+      rule: "Host(`wazuh.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-wazuh-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-wazuh-api-208:
+      rule: "Host(`wazuh-api.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-wazuh-api-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-seedbox-208:
+      rule: "Host(`seedbox.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-seedbox-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-forgejo-208:
+      rule: "Host(`forgejo.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-forgejo-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-crowdsec-api-208:
+      rule: "Host(`crowdsec-api.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-crowdsec-api-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-wazuh-indexer-208:
+      rule: "Host(`wazuh-indexer.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-wazuh-indexer-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-ha-208:
+      rule: "Host(`ha.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-ha-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "oauth2-forward-auth@file"
+        - "security-headers@file"
+
+    # OPS-1067: TrueNAS SCALE reverse proxy — enables truenas_validate_certs: true
+    # Backend: TrueNAS SCALE at 192.168.12.205:443 (self-signed iXsystems cert;
+    # uses transport-proxmox insecureSkipVerify=true for backend connection).
+    # Frontend: Traefik presents *.haist.farm wildcard ACME cert to callers.
+    # After deploying: re-run iac-control + config-server ansible roles to push DNS,
+    # then flip truenas_validate_certs: true in truenas-zfs/truenas-iscsi defaults.
+    router-data-haist:
+      rule: "Host(`data.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-data-haist"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    # OPS-1123: scanopy-daemon health API (LXC 305, 192.168.12.93:60073).
+    # The scanopy server pod (in OKD on 10.0.0.0/24) cannot reach 192.168.12.0/24
+    # directly (cluster subnet isolation per reference_cluster_subnet_isolation.md).
+    # Pangolin proxies the server→daemon path so SCANOPY_INTEGRATED_DAEMON_URL
+    # can use https://scanopy-daemon-api.208.haist.farm (Pangolin TLS termination).
+    # internal-only@file ensures this is not externally reachable.
+    router-scanopy-daemon-api-208:
+      rule: "Host(`scanopy-daemon-api.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-scanopy-daemon-208"
+      tls: {}
+      middlewares:
+        - "internal-only@file"
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    # OPS-605 Phase 1: Authentik IdP (parallel to Keycloak at auth.208.haist.farm)
+    # Dual-running pattern (OPS-604): new auth path added before retiring old path.
+    # LXC 300 on pve4-alienware (192.168.12.83). Provisioned 2026-05-14 by team-lead
+    # (pve3/pve/208-pve2 SSH inaccessible per OPS-593 key drift; pve4 fallback).
+    # Route activates after pangolin-proxy.yml run.
+    router-authnext-208:
+      rule: "Host(`auth-next.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-authnext-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+  services:
+    service-vault-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.206:8200"
+    service-minio-208:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.58:9001"
+    service-pve-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.6:8006"
+    service-pve2-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.56:8006"
+    service-pve3-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.57:8006"
+    service-wazuh-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.100:443"
+    service-wazuh-api-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.100:55000"
+    service-seedbox-208:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.69:8080"
+    service-crowdsec-api-208:
+      loadBalancer:
+        servers:
+          - url: "http://172.18.0.1:8080"
+    service-forgejo-208:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.70:3000"
+    service-wazuh-indexer-208:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.100:9200"
+    service-ha-208:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.81:8123"
+    # OPS-605 Phase 1: Authentik IdP — HTTP (Pangolin terminates TLS)
+    # LXC 300 on pve4 at 192.168.12.83. Provisioned 2026-05-14 by team-lead.
+    service-authnext-208:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.83:9000"
+    # OPS-1067: TrueNAS SCALE — HTTPS with insecureSkipVerify (self-signed backend)
+    # Traefik presents wildcard ACME cert to callers; backend cert is internal.
+    service-data-haist:
+      loadBalancer:
+        serversTransport: "transport-proxmox"
+        servers:
+          - url: "https://192.168.12.205"
+    # OPS-1123: scanopy-daemon LXC health API proxy.
+    # Routes Pangolin HTTPS → plain HTTP on the daemon LXC (192.168.12.93:60073).
+    # Used by SCANOPY_INTEGRATED_DAEMON_URL=https://scanopy-daemon-api.208.haist.farm
+    # so the OKD scanopy-server pod can reach the out-of-cluster daemon.
+    service-scanopy-daemon-208:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.93:60073"

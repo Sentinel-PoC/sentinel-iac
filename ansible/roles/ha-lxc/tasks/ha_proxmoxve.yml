@@ -1,0 +1,178 @@
+---
+# ha_proxmoxve.yml — Reconfigure HA proxmoxve integration to use PVEAuditor token
+# OPS-847
+#
+# The proxmoxve core integration (config-flow only, no YAML) stores credentials
+# in HA's internal config store. This task uses the HA REST API to perform a
+# reconfigure flow on the 3-node cluster entry, replacing the previous full-root
+# token (root@pam!Claudette) with the PVEAuditor-scoped token (root@pam!ha-monitor).
+#
+# Prerequisites:
+#   - HA running and accessible at ha_url (http://192.168.12.81:8123)
+#   - VAULT_TOKEN in environment with read access to:
+#       secret/home-assistant/admin-token
+#       secret/proxmox-cluster
+#   - proxmoxve cluster config entry exists (entry_id: ha_proxmoxve_cluster_entry_id)
+#
+# Token source:
+#   - Vault path: secret/proxmox-cluster
+#   - Token ID: root@pam!ha-monitor (PVEAuditor, privsep=1)
+#   - Role: PVEAuditor at / (propagated) — read-only for HA monitoring
+#
+# This task is idempotent: re-running it reconfigures the entry to use the same
+# PVEAuditor token. The existing entry ID is preserved; no entities are removed.
+#
+# Ref: https://developers.home-assistant.io/docs/config_entries_config_flow_handler/
+# Ref: OPS-836 (original proxmoxve setup), OPS-847 (this token rotation)
+
+# ── 1. Fetch secrets from Vault ───────────────────────────────────────────────
+
+- name: Fetch HA admin token from Vault
+  ansible.builtin.set_fact:
+    ha_admin_token: "{{ lookup('community.hashi_vault.hashi_vault',
+      'secret/home-assistant/admin-token:token
+       url=' ~ vault_addr ~
+       ' token=' ~ lookup('env', 'VAULT_TOKEN') ~
+       ' validate_certs=false') }}"
+  no_log: true
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Fetch proxmox-cluster PVEAuditor token from Vault
+  ansible.builtin.set_fact:
+    proxmox_cluster_token_id: "{{ lookup('community.hashi_vault.hashi_vault',
+      'secret/proxmox-cluster:api_token_id
+       url=' ~ vault_addr ~
+       ' token=' ~ lookup('env', 'VAULT_TOKEN') ~
+       ' validate_certs=false') }}"
+    proxmox_cluster_token_secret: "{{ lookup('community.hashi_vault.hashi_vault',
+      'secret/proxmox-cluster:api_token_secret
+       url=' ~ vault_addr ~
+       ' token=' ~ lookup('env', 'VAULT_TOKEN') ~
+       ' validate_certs=false') }}"
+  no_log: true
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+# ── 2. Start reconfigure flow for the cluster proxmoxve entry ─────────────────
+# The proxmoxve config flow reconfigure endpoint expects:
+#   POST /api/config/config_entries/flow
+#   {"handler": "proxmoxve", "entry_id": "<entry_id>"}
+# Ref: HA config_entries REST API (developers.home-assistant.io)
+
+- name: Start proxmoxve cluster reconfigure flow
+  ansible.builtin.uri:
+    url: "{{ ha_url }}/api/config/config_entries/flow"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ ha_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      handler: "proxmoxve"
+      entry_id: "{{ ha_proxmoxve_cluster_entry_id }}"
+    status_code: [200, 201]
+  register: reconfigure_step1
+  no_log: true
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Assert reconfigure step 1 is the connection form
+  ansible.builtin.assert:
+    that:
+      - reconfigure_step1.json.type == "form"
+      - reconfigure_step1.json.step_id == "reconfigure"
+    fail_msg: >
+      Expected reconfigure form (step_id=reconfigure), got:
+      type={{ reconfigure_step1.json.type }} step_id={{ reconfigure_step1.json.step_id | default('?') }}
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+# ── 3. Submit step 1: connection parameters (unchanged from original) ─────────
+
+- name: Submit proxmoxve reconfigure step 1 (connection settings)
+  ansible.builtin.uri:
+    url: "{{ ha_url }}/api/config/config_entries/flow/{{ reconfigure_step1.json.flow_id }}"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ ha_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      auth_method: "pam"
+      host: "{{ ha_proxmoxve_cluster_host }}"
+      username: "root"
+      port: "{{ ha_proxmoxve_cluster_port }}"
+      token: true
+      verify_ssl: false
+    status_code: [200, 201]
+  register: reconfigure_step2
+  no_log: true
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Assert reconfigure step 2 is the auth form
+  ansible.builtin.assert:
+    that:
+      - reconfigure_step2.json.type == "form"
+      - reconfigure_step2.json.step_id == "reconfigure_auth"
+    fail_msg: >
+      Expected auth form (step_id=reconfigure_auth), got:
+      type={{ reconfigure_step2.json.type }} step_id={{ reconfigure_step2.json.step_id | default('?') }}
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+# ── 4. Submit step 2: PVEAuditor token credentials ───────────────────────────
+# token_id is the part after "!" in the full token ID (e.g., "ha-monitor")
+# token_value is the UUID secret.
+
+- name: Submit proxmoxve reconfigure step 2 (PVEAuditor token credentials)
+  ansible.builtin.uri:
+    url: "{{ ha_url }}/api/config/config_entries/flow/{{ reconfigure_step1.json.flow_id }}"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ ha_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      token_id: "{{ proxmox_cluster_token_id | regex_replace('^.*!', '') }}"
+      token_value: "{{ proxmox_cluster_token_secret }}"
+    status_code: [200, 201]
+  register: reconfigure_result
+  no_log: true
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Assert reconfigure completed successfully
+  ansible.builtin.assert:
+    that:
+      - reconfigure_result.json.type == "abort"
+      - reconfigure_result.json.reason == "reconfigure_successful"
+    fail_msg: >
+      proxmoxve reconfigure did not return reconfigure_successful.
+      Got type={{ reconfigure_result.json.type }} reason={{ reconfigure_result.json.reason | default('?') }}
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Display proxmoxve reconfigure result
+  ansible.builtin.debug:
+    msg: >-
+      proxmoxve cluster entry {{ ha_proxmoxve_cluster_entry_id }} reconfigured
+      to use PVEAuditor token ({{ proxmox_cluster_token_id | regex_replace('^.*!', '') }}).
+      Root token (Claudette) no longer in use by HA proxmoxve cluster integration.
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+# ── 5. Verify entry is still loaded ──────────────────────────────────────────
+
+- name: Verify proxmoxve cluster entry is still in loaded state
+  ansible.builtin.uri:
+    url: "{{ ha_url }}/api/config/config_entries/entry"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ ha_admin_token }}"
+    status_code: [200]
+  register: config_entries
+  no_log: true
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Assert proxmoxve cluster entry is loaded
+  ansible.builtin.assert:
+    that:
+      - config_entries.json | selectattr('entry_id', 'equalto', ha_proxmoxve_cluster_entry_id) | list | length == 1
+      - (config_entries.json | selectattr('entry_id', 'equalto', ha_proxmoxve_cluster_entry_id) | list)[0].state == 'loaded'
+    fail_msg: >
+      proxmoxve cluster entry {{ ha_proxmoxve_cluster_entry_id }} is not in loaded state
+      after reconfiguration. Check HA logs for errors.
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]

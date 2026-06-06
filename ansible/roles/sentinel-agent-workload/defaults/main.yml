@@ -1,0 +1,77 @@
+---
+# Default variables for the `sentinel-agent-workload` role.
+# OPS-545 / OPS-351 Phase 4.5 — sentinel-worker end-to-end migration.
+#
+# This role provisions the workload side of the SPIRE migration:
+#   1. Shared supplementary group `sentinel-agents` (plural — distinct from
+#      the pre-existing `sentinel-agent` singular SPIRE Agent service account).
+#   2. Per-role Linux users (Phase 4.5 ships sentinel-worker; Phase 4.6 reuses).
+#   3. spire-agent CLI host binary (1.14.6 tarball; installed only on hosts
+#      where the binary is not already present — workstation has it via OPS-533).
+#   4. sudoers entry letting the host's interactive user re-exec
+#      /usr/local/bin/agent-vault-auth.sh as the role user (no other commands).
+#
+# Mirror PR #186 (workstation/tasks/spire-agent.yml) for the tarball pattern.
+# Tarball URL + sha256 pinned identically to spire-agent role for fleet parity.
+
+# ── Group: sentinel-agents (PLURAL — see F3 in OPS-545 OBSERVATION) ─────────
+sentinel_workload_group: "sentinel-agents"
+sentinel_workload_group_gid: 1500  # regular UID/GID range; 1500 leaves room
+
+# Hard-guard against the singular pre-existing `sentinel-agent` (the SPIRE
+# Agent container's own service account at /opt/sentinel-agent). The guard
+# fails loud if the PLURAL group's GID collides with the SINGULAR's GID, OR
+# if the PLURAL group already exists at a GID different from our intended
+# value. Both indicate a typo-driven cross-wire. NIST CM-3(2).
+# The singular's actual GID varies by host (observed: 986 on iac-control).
+# Guard does NOT pin the singular's GID — only checks for collision.
+sentinel_workload_singular_group_name: "sentinel-agent"  # do NOT use this for workload
+
+# ── Per-role users ─────────────────────────────────────────────────────────
+# Each entry produces: a Linux user with that exact name (matching the SPIRE
+# workload entry's `unix:user:<name>` selector), primary group of the same
+# name, supplementary group sentinel-agents.
+#
+# Phase 4.5 (OPS-545) shipped `worker` only as end-to-end production proof.
+# Phase 4.6 (OPS-549) extends to all four agent roles. The UID/GID assignment
+# in user.yml is index-keyed off this exact list ordering, so order matters
+# for stable UID allocation: worker=1510, judge=1511, planner=1512, scribe=1513.
+# Do not reorder without an iac-control user-migration plan.
+sentinel_workload_roles:
+  - worker
+  - judge
+  - planner
+  - scribe
+
+# Per-role user defaults (see D2 in OPS-545 DESIGN-CALL).
+sentinel_workload_user_shell: "/usr/sbin/nologin"
+sentinel_workload_user_home_base: "/var/lib"  # full home = /var/lib/sentinel-<role>
+sentinel_workload_user_uid_base: 1510  # workers start at 1510; +1 per role index
+sentinel_workload_user_create_home: true
+sentinel_workload_user_home_mode: "0750"
+
+# ── spire-agent CLI host binary (mirrors PR #186 tarball pattern) ──────────
+# Same version + sha256 as workstation role; pin together on Server bumps.
+spire_agent_cli_version: "1.14.6"
+spire_agent_cli_release_arch: "linux-amd64-musl"
+spire_agent_cli_release_url: >-
+  https://github.com/spiffe/spire/releases/download/v{{ spire_agent_cli_version }}/spire-{{ spire_agent_cli_version }}-{{ spire_agent_cli_release_arch }}.tar.gz
+spire_agent_cli_release_sha256: "ddfcb70cd160869a9af2bc533e911f721a7ec4f76ab5b1573ad3658e1607f7dd"
+spire_agent_cli_bin_path: "/usr/local/bin/spire-agent"
+
+# ── sudoers entry ──────────────────────────────────────────────────────────
+# The script path is fixed at /usr/local/bin/agent-vault-auth.sh — that's the
+# STABLE deploy location that sudoers points at. Phase 4.5 testing copies the
+# script there manually; Phase 4.6+ may add an Ansible task to fetch it from
+# claude-config repo (tracked separately; see OPS-545 OBSERVATION).
+sentinel_workload_script_path: "/usr/local/bin/agent-vault-auth.sh"
+
+# Per-host invoking user — defaults to ansible_user (the host's SSH/connection
+# user from inventory). On iac-control this resolves to `ubuntu`; on
+# workstation (connection=local) it resolves to `koiakoia`. Override per host
+# in inventory or host_vars only if a different operator login should be the
+# sudo-source.
+sentinel_workload_invoking_user: "{{ ansible_user }}"
+
+# Sudoers file name (single fragment in /etc/sudoers.d/).
+sentinel_workload_sudoers_filename: "sentinel-agent-workload"

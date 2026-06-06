@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Forgejo backup to MinIO
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/forgejo-backup.sh
+StandardOutput=journal
+StandardError=journal

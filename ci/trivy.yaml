@@ -1,0 +1,42 @@
+# ci/trivy.yaml — shared Trivy configuration for sentinel-iac CI.
+#
+# Used by: ci/harbor-image-scan.sh (container sweep) and the trivy-vuln FS
+# scan in .forgejo/workflows/security-scan.yml. Centralising this config
+# avoids drift between jobs and keeps severity policy in one place.
+#
+# Filed by OPS-187. See the PLAN comment on that issue for the reasoning.
+
+# Severity levels to include in output. LOW and UNKNOWN are dropped to
+# avoid alert fatigue (industry consensus 2025). MEDIUM is uploaded to
+# DefectDojo but does NOT gate the pipeline.
+severity:
+  - CRITICAL
+  - HIGH
+  - MEDIUM
+
+# Drop vulnerabilities with no upstream fix. Tracked separately if we ever
+# decide to surface them (out of scope for OPS-187).
+vulnerability:
+  ignore-unfixed: true
+
+# Scan behaviour.
+scan:
+  scanners:
+    - vuln
+  # Suppress progress bars in CI logs.
+  show-suppressed: false
+
+# Exceptions live at repo root .trivyignore (format: AVD-XXX-XXXX / CVE-...).
+# Every entry there should carry a comment with rationale, approver, and
+# review-by date. Undocumented ignores are how scanners rot.
+
+# Cache — Forgejo Actions caches ~/.cache/trivy between runs to avoid
+# re-downloading the ~500MB vulnerability DB on every pipeline.
+cache:
+  dir: ""  # honour TRIVY_CACHE_DIR env set by workflow
+
+# Registry credentials are supplied via TRIVY_USERNAME / TRIVY_PASSWORD
+# env vars from the Harbor robot secret (set in the workflow job env).
+# Do NOT put credentials in this file.
+
+timeout: 5m

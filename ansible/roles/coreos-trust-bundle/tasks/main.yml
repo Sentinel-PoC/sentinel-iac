@@ -1,0 +1,199 @@
+---
+# ansible/roles/coreos-trust-bundle/tasks/main.yml
+#
+# OPS-238: Deploy Vault root CA trust bundle to OKD CoreOS nodes via MachineConfig.
+#
+# IMPORTANT: This role runs on iac-control (the control host), NOT on CoreOS nodes.
+# CoreOS has a read-only rootfs — trust bundles must be distributed via MCO
+# MachineConfig, not via direct file placement.
+#
+# Pre-requisites:
+#   - oc binary at {{ coreos_trust_bundle_oc_bin }}
+#   - Kubeconfig at {{ coreos_trust_bundle_kubeconfig }} with cluster-admin rights
+#   - Vault token in environment (VAULT_TOKEN) or ~/.vault-token on iac-control
+#   - Vault accessible at {{ vault_addr }}
+
+# --- Fetch Vault root CA certificate ---
+
+- name: Create work directory for trust bundle artifacts
+  ansible.builtin.file:
+    path: "{{ coreos_trust_bundle_workdir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags:
+    - coreos-trust-bundle
+
+- name: Fetch Vault root CA certificate from pki/cert/ca
+  ansible.builtin.uri:
+    url: "{{ vault_addr }}/v1/pki/cert/ca"
+    method: GET
+    return_content: true
+    headers:
+      Content-Type: "application/json"
+    validate_certs: false
+  register: vault_root_ca_response
+  no_log: false
+  tags:
+    - coreos-trust-bundle
+    - vault-pki
+
+- name: Set vault_root_ca_pem fact
+  ansible.builtin.set_fact:
+    vault_root_ca_pem: "{{ vault_root_ca_response.json.data.certificate }}"
+    vault_root_ca_serial: "{{ vault_root_ca_response.json.data.serial_number | default('UNKNOWN') }}"
+  tags:
+    - coreos-trust-bundle
+    - vault-pki
+
+- name: Fetch Vault intermediate CA certificate from pki_int/cert/ca
+  ansible.builtin.uri:
+    url: "{{ vault_addr }}/v1/pki_int/cert/ca"
+    method: GET
+    return_content: true
+    headers:
+      Content-Type: "application/json"
+    validate_certs: false
+  register: vault_int_ca_response
+  when: coreos_trust_bundle_include_intermediate | bool
+  no_log: false
+  tags:
+    - coreos-trust-bundle
+    - vault-pki
+
+- name: Set vault_int_ca_pem fact
+  ansible.builtin.set_fact:
+    vault_int_ca_pem: "{{ vault_int_ca_response.json.data.certificate }}"
+  when:
+    - coreos_trust_bundle_include_intermediate | bool
+    - vault_int_ca_response is not skipped
+  tags:
+    - coreos-trust-bundle
+    - vault-pki
+
+# --- Build CA bundle ---
+
+- name: Build combined CA bundle (root + intermediate)
+  ansible.builtin.set_fact:
+    vault_ca_bundle: "{{ vault_root_ca_pem }}\n{{ vault_int_ca_pem }}"
+  when:
+    - coreos_trust_bundle_include_intermediate | bool
+    - vault_int_ca_pem is defined
+  tags:
+    - coreos-trust-bundle
+
+- name: Build CA bundle (root only)
+  ansible.builtin.set_fact:
+    vault_ca_bundle: "{{ vault_root_ca_pem }}"
+  when: >
+    not (coreos_trust_bundle_include_intermediate | bool) or
+    vault_int_ca_pem is not defined
+  tags:
+    - coreos-trust-bundle
+
+- name: Base64-encode CA bundle for MachineConfig data URI
+  ansible.builtin.set_fact:
+    vault_ca_bundle_b64: "{{ vault_ca_bundle | b64encode }}"
+  tags:
+    - coreos-trust-bundle
+
+# --- Render and apply MachineConfig ---
+
+- name: Render MachineConfig YAML from template
+  ansible.builtin.template:
+    src: vault-trust-bundle-mc.yaml.j2
+    dest: "{{ coreos_trust_bundle_workdir }}/vault-trust-bundle-mc.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - coreos-trust-bundle
+
+- name: Validate MachineConfig YAML syntax (dry-run client-side)
+  ansible.builtin.command:
+    cmd: >
+      {{ coreos_trust_bundle_oc_bin }}
+      --kubeconfig={{ coreos_trust_bundle_kubeconfig }}
+      apply
+      --dry-run=client
+      -f {{ coreos_trust_bundle_workdir }}/vault-trust-bundle-mc.yaml
+  register: mc_dry_run
+  changed_when: false
+  tags:
+    - coreos-trust-bundle
+    - validate
+
+- name: Log dry-run output
+  ansible.builtin.debug:
+    msg: "MachineConfig dry-run: {{ mc_dry_run.stdout }}"
+  tags:
+    - coreos-trust-bundle
+    - validate
+
+- name: Apply MachineConfig to OKD cluster
+  ansible.builtin.command:
+    cmd: >
+      {{ coreos_trust_bundle_oc_bin }}
+      --kubeconfig={{ coreos_trust_bundle_kubeconfig }}
+      apply
+      -f {{ coreos_trust_bundle_workdir }}/vault-trust-bundle-mc.yaml
+  register: mc_apply
+  changed_when: "'configured' in mc_apply.stdout or 'created' in mc_apply.stdout"
+  when: not (coreos_trust_bundle_dry_run | bool)
+  tags:
+    - coreos-trust-bundle
+    - apply
+
+- name: Log MachineConfig apply output
+  ansible.builtin.debug:
+    msg: "oc apply result: {{ mc_apply.stdout | default('dry-run mode — not applied') }}"
+  tags:
+    - coreos-trust-bundle
+
+# --- Verify MachineConfig is present ---
+
+- name: Verify MachineConfig was created/updated in the cluster
+  ansible.builtin.command:
+    cmd: >
+      {{ coreos_trust_bundle_oc_bin }}
+      --kubeconfig={{ coreos_trust_bundle_kubeconfig }}
+      get machineconfig {{ coreos_trust_bundle_mc_name }}
+      -o jsonpath='{.metadata.name} created={.metadata.creationTimestamp}'
+  register: mc_verify
+  changed_when: false
+  when: not (coreos_trust_bundle_dry_run | bool)
+  tags:
+    - coreos-trust-bundle
+    - verify
+
+- name: Log MachineConfig verification
+  ansible.builtin.debug:
+    msg: "MC present: {{ mc_verify.stdout | default('dry-run — not checked') }}"
+  tags:
+    - coreos-trust-bundle
+    - verify
+
+- name: Check MachineConfigPool render status (post-apply)
+  ansible.builtin.command:
+    cmd: >
+      {{ coreos_trust_bundle_oc_bin }}
+      --kubeconfig={{ coreos_trust_bundle_kubeconfig }}
+      get mcp {{ coreos_trust_bundle_mcp_role }}
+      -o jsonpath='UPDATED={.status.updatedMachineCount} UPDATING={.status.updatingMachineCount} DEGRADED={.status.degradedMachineCount} TOTAL={.status.machineCount}'
+  register: mcp_status
+  changed_when: false
+  when: not (coreos_trust_bundle_dry_run | bool)
+  tags:
+    - coreos-trust-bundle
+    - verify
+
+- name: Log MachineConfigPool status
+  ansible.builtin.debug:
+    msg: >-
+      MCP {{ coreos_trust_bundle_mcp_role }} status: {{ mcp_status.stdout | default('dry-run — not checked') }}.
+      NOTE: MCO will perform a rolling node drain+reboot to apply the trust bundle.
+      Monitor with: oc get mcp {{ coreos_trust_bundle_mcp_role }} -w
+  tags:
+    - coreos-trust-bundle
+    - verify

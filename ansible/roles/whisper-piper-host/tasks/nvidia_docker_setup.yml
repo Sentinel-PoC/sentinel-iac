@@ -1,0 +1,99 @@
+---
+# nvidia_docker_setup.yml — Phase 2: NVIDIA container toolkit inside ai-tier1 LXC
+# OPS-586 Section B
+#
+# Installs nvidia-container-toolkit inside ai-tier1 LXC and configures Docker
+# to use the nvidia runtime. This enables 'runtime: nvidia' in Docker Compose.
+#
+# WHY INSIDE THE LXC (not just on the host):
+#   The pve4-nvidia-gpu role (OPS-564) installs nvidia-container-toolkit on the
+#   PVE host for potential host-level Docker workloads. Docker running INSIDE
+#   the LXC needs its own copy of the toolkit because the toolkit operates in
+#   the OS environment where Docker is running.
+#
+# COMPATIBILITY: ai-tier1 is a privileged LXC with cgroup2 device passthrough
+#   for /dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm (set by OPS-564).
+#   CUDA userspace libs (libcuda1, libnvidia-compute-570) already installed.
+#   nvidia-container-toolkit inside privileged LXC detects these devices and
+#   injects them into Docker containers via the nvidia runtime.
+#
+# Reference: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+
+# ── Check existing toolkit ────────────────────────────────────────────────────
+
+- name: Check if nvidia-container-toolkit is already installed in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- which nvidia-container-runtime"
+  register: nct_installed
+  failed_when: false
+  changed_when: false
+  tags: [whisper-piper, nvidia, install]
+
+# ── Add NVIDIA container toolkit apt repo ────────────────────────────────────
+# Official NVIDIA container toolkit repository for Ubuntu 24.04 (noble).
+# Source: https://nvidia.github.io/libnvidia-container/
+
+- name: Add NVIDIA container toolkit GPG key inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey |
+       gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+  when: nct_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, nvidia, install]
+
+- name: Add NVIDIA container toolkit apt repository inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list |
+       sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' |
+       tee /etc/apt/sources.list.d/nvidia-container-toolkit.list &&
+       apt-get update -qq"
+  when: nct_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, nvidia, install]
+
+- name: Install nvidia-container-toolkit inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      apt-get install -y nvidia-container-toolkit
+  when: nct_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, nvidia, install]
+
+# ── Configure Docker daemon to use NVIDIA runtime ─────────────────────────────
+# nvidia-ctk configures /etc/docker/daemon.json to register the nvidia runtime.
+# After this, 'runtime: nvidia' in Docker Compose works.
+#
+# nvidia-ctk runtime configure --runtime=docker writes:
+#   {"runtimes": {"nvidia": {"args": [], "path": "nvidia-container-runtime"}}}
+# If daemon.json already has nvidia runtime, nvidia-ctk is idempotent.
+
+- name: Configure NVIDIA runtime for Docker daemon inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      nvidia-ctk runtime configure --runtime=docker
+  register: nvidia_ctk_result
+  changed_when: "'Updated' in nvidia_ctk_result.stdout or nvidia_ctk_result.rc == 0"
+  notify: Restart Docker in ai-tier1 LXC
+  tags: [whisper-piper, nvidia, configure]
+
+# ── Flush handlers (restart Docker) before next phases ───────────────────────
+- name: Flush handlers to apply Docker daemon config
+  ansible.builtin.meta: flush_handlers
+  tags: [whisper-piper, nvidia, configure]
+
+# ── Verify NVIDIA runtime is available ───────────────────────────────────────
+- name: Verify NVIDIA runtime is registered in Docker
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      docker info --format '{{ "{{" }}.Runtimes{{ "}}" }}'
+  register: docker_runtimes
+  changed_when: false
+  failed_when: "'nvidia' not in docker_runtimes.stdout"
+  tags: [whisper-piper, nvidia, verify]

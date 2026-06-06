@@ -1,0 +1,19 @@
+---
+# TrueNAS backup role defaults (OPS-632 Layer 3)
+# Override in playbook or inventory as needed
+
+# TrueNAS Scale API endpoint
+truenas_url: "https://data.haist.farm"
+
+# ZFS dataset hosting the Keycloak postgres iSCSI LUN
+# IQN: iqn.2026-03.farm.haist:okd-keycloak-pg
+truenas_keycloak_dataset: "tank/iscsi/keycloak-pg"
+
+# Snapshot naming: backup-<timestamp>
+truenas_snapshot_prefix: "backup"
+
+# How many keycloak snapshots to retain on TrueNAS (older ones deleted)
+truenas_snapshot_retention_count: 14
+
+# TrueNAS API token — pulled from Vault at runtime (set by playbook)
+# truenas_api_token: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/truenas:api_token') }}"

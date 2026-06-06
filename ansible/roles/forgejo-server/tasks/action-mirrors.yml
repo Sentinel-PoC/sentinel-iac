@@ -1,0 +1,162 @@
+---
+# action-mirrors.yml — OPS-251
+# Creates the `actions` organisation on the local Forgejo instance and idempotently
+# provisions mirrors for the standard GitHub Actions repos used by platform workflows.
+#
+# Context:
+#   DEFAULT_ACTIONS_URL = self (app.ini) makes forgejo-runner resolve all unqualified
+#   `uses: org/repo/path@ref` from this Forgejo instance. That fixes cross-repo composites
+#   like `uses: sentinel-admin/sentinel-iac/.forgejo/actions/security-scan@main`, but
+#   requires standard `uses: actions/checkout@v4` etc. to be available locally as mirrors.
+#
+# Idempotency:
+#   - Org create: POST returns 201 (created) or 422 (already exists) — both handled OK.
+#   - Repo migrate: POST returns 201 (created) or 409 (already exists) — both handled OK.
+#   Running on every playbook invocation is safe; no changes occur if state is correct.
+#
+# Auth pattern: identical to repo-collaborators.yml — generates a short-lived admin token
+# via `docker exec`, uses it for API calls, then revokes it immediately.
+#
+# Refs:
+#   Forgejo API: POST /api/v1/orgs, POST /api/v1/repos/migrate
+#   DEFAULT_ACTIONS_URL docs: https://forgejo.org/docs/next/admin/actions/
+
+- name: Skip action mirror provisioning when disabled
+  when: not (forgejo_action_mirrors_enabled | default(true))
+  ansible.builtin.meta: end_play
+
+# ── Generate temporary admin token ────────────────────────────────────────────
+
+- name: Remove stale ansible-action-mirrors token if exists (OPS-251)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -u
+      - git
+      - forgejo
+      - forgejo
+      - admin
+      - user
+      - delete-access-token
+      - --username
+      - koiakoia
+      - --token-name
+      - ansible-action-mirrors
+  register: _forgejo_mirror_token_delete_pre
+  changed_when: false
+  failed_when: false
+  tags: [forgejo, actions, action-mirrors]
+
+- name: Generate temporary admin token for action mirror provisioning (OPS-251)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -u
+      - git
+      - forgejo
+      - forgejo
+      - admin
+      - user
+      - generate-access-token
+      - --username
+      - koiakoia
+      - --token-name
+      - ansible-action-mirrors
+      - --raw
+  register: _forgejo_mirror_token_result
+  changed_when: true
+  no_log: true
+  tags: [forgejo, actions, action-mirrors]
+
+- name: Set action mirror token fact (no_log)
+  ansible.builtin.set_fact:
+    _forgejo_mirror_api_token: "{{ _forgejo_mirror_token_result.stdout | trim }}"
+  no_log: true
+  tags: [forgejo, actions, action-mirrors]
+
+# ── Create `actions` organisation ────────────────────────────────────────────
+
+- name: Create `actions` organisation on local Forgejo (OPS-251)
+  # POST /api/v1/orgs: 201 = created, 422 = already exists (both OK).
+  # The `actions` org hosts mirrors of code.forgejo.org/actions/* repos
+  # required when DEFAULT_ACTIONS_URL = self is set in app.ini.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/v1/orgs"
+    method: POST
+    headers:
+      Authorization: "token {{ _forgejo_mirror_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      username: "{{ forgejo_action_mirrors_org }}"
+      visibility: "public"
+      description: "OPS-251: mirrors of standard CI actions from {{ forgejo_action_mirrors_source }}"
+    status_code: [201, 422]
+  register: _forgejo_mirror_org_result
+  changed_when: _forgejo_mirror_org_result.status == 201
+  no_log: true
+  tags: [forgejo, actions, action-mirrors]
+
+# ── Mirror standard actions repos ─────────────────────────────────────────────
+
+- name: Mirror actions repos onto local Forgejo (OPS-251)
+  # POST /api/v1/repos/migrate: 201 = created, 409 = already exists (both OK).
+  # mirror: true enables automatic sync from the upstream source.
+  # mirror_interval: "8h0m0s" — standard actions repos are stable; daily sync is sufficient.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/v1/repos/migrate"
+    method: POST
+    headers:
+      Authorization: "token {{ _forgejo_mirror_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      clone_addr: "{{ forgejo_action_mirrors_source }}/{{ forgejo_action_mirrors_org }}/{{ item.name }}"
+      description: "{{ item.description | default('OPS-251 mirror from ' + forgejo_action_mirrors_source) }}"
+      mirror: true
+      mirror_interval: "8h0m0s"
+      mirror_use_ssh: false
+      private: false
+      repo_name: "{{ item.name }}"
+      repo_owner: "{{ forgejo_action_mirrors_org }}"
+      service: "git"
+      wiki: false
+    status_code: [201, 409]
+  loop: "{{ forgejo_action_mirrors }}"
+  loop_control:
+    label: "{{ forgejo_action_mirrors_org }}/{{ item.name }}"
+  register: _forgejo_mirror_repo_results
+  changed_when: _forgejo_mirror_repo_results.status == 201
+  no_log: true
+  tags: [forgejo, actions, action-mirrors]
+
+- name: Report action mirror provisioning results (OPS-251)
+  ansible.builtin.debug:
+    msg: >-
+      {{ forgejo_action_mirrors_org }}/{{ item.item.name }}:
+      {% if item.status == 201 %}created{% else %}already exists{% endif %}
+  loop: "{{ _forgejo_mirror_repo_results.results }}"
+  loop_control:
+    label: "{{ forgejo_action_mirrors_org }}/{{ item.item.name }}"
+  tags: [forgejo, actions, action-mirrors]
+
+# ── Revoke temporary admin token ─────────────────────────────────────────────
+
+- name: Revoke temporary action mirror admin token (OPS-251)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/v1/users/koiakoia/tokens/ansible-action-mirrors"
+    method: DELETE
+    headers:
+      Authorization: "token {{ _forgejo_mirror_api_token }}"
+    status_code: [204, 404]
+  changed_when: false
+  no_log: true
+  tags: [forgejo, actions, action-mirrors]
+
+- name: Clear action mirror token from facts (no_log)
+  ansible.builtin.set_fact:
+    _forgejo_mirror_api_token: ""
+  no_log: true
+  tags: [forgejo, actions, action-mirrors]

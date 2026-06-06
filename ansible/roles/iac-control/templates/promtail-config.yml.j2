@@ -1,0 +1,65 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Kernel logs - includes iptables OKD-EGRESS-DENY and HAPROXY-BLOCK
+  - job_name: kernel
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: kernel
+          host: iac-control
+          __path__: /var/log/kern.log
+    pipeline_stages:
+      - regex:
+          expression: '(?P<timestamp>\S+\s+\S+)\s+(?P<host>\S+)\s+kernel:\s+(?P<rule>OKD-EGRESS-DENY|HAPROXY-BLOCK):?\s+(?P<message>.*)'
+      - labels:
+          rule:
+      - timestamp:
+          source: timestamp
+          format: '2006-01-02T15:04:05.999999-07:00'
+
+  # HAProxy logs
+  - job_name: haproxy
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: haproxy
+          host: iac-control
+          __path__: /var/log/haproxy.log
+    pipeline_stages:
+      - regex:
+          expression: '(?P<timestamp>\S+\s+\S+)\s+(?P<host>\S+)\s+haproxy\[\d+\]:\s+(?P<message>.*)'
+      - labels:
+          {}
+      - timestamp:
+          source: timestamp
+          format: '2006-01-02T15:04:05.999999-07:00'
+
+  # Squid access logs
+  - job_name: squid
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: squid
+          host: iac-control
+          __path__: /var/log/squid/access.log
+    pipeline_stages:
+      - regex:
+          expression: '^\s*(?P<timestamp>\d+\.\d+)\s+\d+\s+(?P<client>\S+)\s+(?P<status>\S+)/(?P<code>\d+)\s+.*'
+      - labels:
+          status:
+          code:
+      - timestamp:
+          source: timestamp
+          format: Unix

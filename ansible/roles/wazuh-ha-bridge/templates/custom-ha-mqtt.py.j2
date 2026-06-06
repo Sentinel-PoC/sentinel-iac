@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+# custom-ha-mqtt — Wazuh custom integration for Home Assistant via MQTT
+# Managed by Ansible (wazuh-ha-bridge role, OPS-586 Section C)
+# DO NOT EDIT DIRECTLY — changes will be overwritten on next role run.
+#
+# Upstream refs:
+#   Wazuh custom integration API:
+#     https://documentation.wazuh.com/current/user-manual/manager/integration-with-external-apis.html
+#     Script called by wazuh-integratord as:
+#       custom-ha-mqtt <alert_json_file> <api_key> <hook_url>
+#       argv[1] = path to JSON alert file
+#       argv[2] = api_key (unused here)
+#       argv[3] = hook_url (mqtt://host:port — our MQTT broker)
+#
+#   HA MQTT auto-discovery:
+#     https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery
+#     Topic: homeassistant/<component>/<object_id>/config (retained)
+#     State topic: wazuh/alerts (per alert JSON)
+#
+# MQTT credentials: /var/ossec/etc/ha-mqtt.conf (from Vault {{ wazuh_mqtt_vault_path }})
+# Mosquitto broker: {{ mqtt_host_ip }}:{{ mqtt_port }}
+# Alert topic: {{ mqtt_alert_topic }}
+# Status topic: {{ mqtt_status_topic }}
+
+import sys
+import json
+import os
+import configparser
+import time
+import logging
+from datetime import datetime, timezone
+
+# ── Logging setup ──────────────────────────────────────────────────────────────
+LOG_FILE = "/var/ossec/logs/integrations.log"
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s [wazuh-ha-mqtt] %(levelname)s %(message)s",
+)
+log = logging.getLogger("wazuh-ha-mqtt")
+
+# ── Credentials config ─────────────────────────────────────────────────────────
+CREDS_FILE = "/var/ossec/etc/ha-mqtt.conf"
+
+# ── MQTT configuration ─────────────────────────────────────────────────────────
+MQTT_BROKER   = "{{ mqtt_host_ip }}"
+MQTT_PORT     = {{ mqtt_port }}
+ALERT_TOPIC   = "{{ mqtt_alert_topic }}"
+STATUS_TOPIC  = "{{ mqtt_status_topic }}"
+DISCOVERY_PREFIX = "{{ mqtt_discovery_prefix }}"
+DEVICE_ID     = "wazuh_manager"
+
+# ── Discovery topic definitions ────────────────────────────────────────────────
+# Published as retained messages so HA creates sensors on connect/reconnect.
+# Ref: https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery
+DISCOVERY_DEVICE = {
+    "identifiers": [DEVICE_ID],
+    "name": "Wazuh Security Manager",
+    "model": "Wazuh SIEM",
+    "manufacturer": "Wazuh Inc.",
+    "sw_version": "4.x",
+}
+
+DISCOVERY_CONFIGS = [
+    # Last alert level (integer 1-16)
+    {
+        "topic": f"{DISCOVERY_PREFIX}/sensor/wazuh_last_alert_level/config",
+        "payload": {
+            "name": "Wazuh Last Alert Level",
+            "unique_id": "wazuh_last_alert_level",
+            "state_topic": f"{ALERT_TOPIC}/state",
+            "value_template": "{{ '{{' }} value_json.level | default(0) {{ '}}' }}",
+            "icon": "mdi:shield-alert-outline",
+            "unit_of_measurement": "",
+            "state_class": "measurement",
+            "device": DISCOVERY_DEVICE,
+        },
+    },
+    # Last alerting host
+    {
+        "topic": f"{DISCOVERY_PREFIX}/sensor/wazuh_last_alert_host/config",
+        "payload": {
+            "name": "Wazuh Last Alert Host",
+            "unique_id": "wazuh_last_alert_host",
+            "state_topic": f"{ALERT_TOPIC}/state",
+            "value_template": "{{ '{{' }} value_json.agent_name | default('unknown') {{ '}}' }}",
+            "icon": "mdi:server-security",
+            "device": DISCOVERY_DEVICE,
+        },
+    },
+    # Last alert description
+    {
+        "topic": f"{DISCOVERY_PREFIX}/sensor/wazuh_last_alert_desc/config",
+        "payload": {
+            "name": "Wazuh Last Alert Description",
+            "unique_id": "wazuh_last_alert_desc",
+            "state_topic": f"{ALERT_TOPIC}/state",
+            "value_template": "{{ '{{' }} value_json.description | default('none') | truncate(255) {{ '}}' }}",
+            "icon": "mdi:text-box-outline",
+            "device": DISCOVERY_DEVICE,
+        },
+    },
+    # Last alert timestamp
+    {
+        "topic": f"{DISCOVERY_PREFIX}/sensor/wazuh_last_alert_time/config",
+        "payload": {
+            "name": "Wazuh Last Alert Time",
+            "unique_id": "wazuh_last_alert_time",
+            "state_topic": f"{ALERT_TOPIC}/state",
+            "value_template": "{{ '{{' }} value_json.timestamp | default('') {{ '}}' }}",
+            "icon": "mdi:clock-alert-outline",
+            "device_class": "timestamp",
+            "device": DISCOVERY_DEVICE,
+        },
+    },
+    # Manager online/offline (binary sensor with LWT)
+    {
+        "topic": f"{DISCOVERY_PREFIX}/binary_sensor/wazuh_manager_online/config",
+        "payload": {
+            "name": "Wazuh Manager Online",
+            "unique_id": "wazuh_manager_online",
+            "state_topic": f"{STATUS_TOPIC}",
+            "value_template": "{{ '{{' }} value_json.manager_up {{ '}}' }}",
+            "payload_on": "true",
+            "payload_off": "false",
+            "device_class": "connectivity",
+            "icon": "mdi:shield-check",
+            "availability_topic": f"{STATUS_TOPIC}",
+            "availability_template": "{{ '{{' }} 'online' if value_json.manager_up else 'offline' {{ '}}' }}",
+            "device": DISCOVERY_DEVICE,
+        },
+    },
+]
+
+
+def load_creds():
+    """Load MQTT credentials from config file."""
+    config = configparser.ConfigParser()
+    config.read(CREDS_FILE)
+    try:
+        username = config["mqtt"]["username"]
+        password = config["mqtt"]["password"]
+        return username, password
+    except KeyError as exc:
+        log.error("Failed to read MQTT credentials from %s: %s", CREDS_FILE, exc)
+        sys.exit(1)
+
+
+def connect_mqtt(username, password):
+    """Connect to MQTT broker and return client."""
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        log.error("paho-mqtt library not installed. Install via: pip3 install paho-mqtt")
+        sys.exit(1)
+
+    client = mqtt.Client(client_id=f"wazuh-ha-bridge-{os.getpid()}", protocol=mqtt.MQTTv311)
+    client.username_pw_set(username, password)
+
+    # Last will: mark manager offline on unexpected disconnect
+    client.will_set(
+        STATUS_TOPIC,
+        json.dumps({"manager_up": False, "timestamp": datetime.now(timezone.utc).isoformat()}),
+        qos=1,
+        retain=True,
+    )
+
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, keepalive=30)
+    except Exception as exc:
+        log.error("MQTT connect failed to %s:%d — %s", MQTT_BROKER, MQTT_PORT, exc)
+        sys.exit(1)
+
+    return client
+
+
+def publish_discovery(client):
+    """Publish MQTT auto-discovery configs (retained) for HA sensor creation.
+
+    Ref: https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery
+    HA listens on homeassistant/<component>/<object_id>/config for retained msgs.
+    These are published with retain=True so HA picks them up on reconnect.
+    """
+    for cfg in DISCOVERY_CONFIGS:
+        payload = json.dumps(cfg["payload"], separators=(",", ":"))
+        rc = client.publish(cfg["topic"], payload, qos=1, retain=True)
+        if rc.rc != 0:
+            log.warning("Discovery publish failed for topic %s (rc=%d)", cfg["topic"], rc.rc)
+        else:
+            log.debug("Discovery published: %s", cfg["topic"])
+
+
+def parse_alert(alert_file):
+    """Parse Wazuh alert JSON file. Returns dict or None on error."""
+    try:
+        with open(alert_file, "r", encoding="utf-8") as fh:
+            alert = json.load(fh)
+        return alert
+    except (OSError, json.JSONDecodeError) as exc:
+        log.error("Failed to parse alert file %s: %s", alert_file, exc)
+        return None
+
+
+def extract_fields(alert):
+    """Extract key fields from alert JSON for MQTT state payload."""
+    rule = alert.get("rule", {})
+    agent = alert.get("agent", {})
+    return {
+        "level": rule.get("level", 0),
+        "rule_id": rule.get("id", ""),
+        "description": rule.get("description", ""),
+        "agent_name": agent.get("name", alert.get("manager", {}).get("name", "unknown")),
+        "agent_ip": agent.get("ip", ""),
+        "timestamp": alert.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "groups": rule.get("groups", []),
+        "full_log": alert.get("full_log", "")[:512],  # truncate for MQTT payload size
+    }
+
+
+def main():
+    if len(sys.argv) < 2:
+        log.error("Usage: custom-ha-mqtt <alert_file> [<api_key> [<hook_url>]]")
+        sys.exit(1)
+
+    alert_file = sys.argv[1]
+
+    # Parse alert
+    alert = parse_alert(alert_file)
+    if alert is None:
+        sys.exit(1)
+
+    fields = extract_fields(alert)
+    log.info(
+        "Processing alert: level=%d rule=%s agent=%s desc=%s",
+        fields["level"],
+        fields["rule_id"],
+        fields["agent_name"],
+        fields["description"][:80],
+    )
+
+    # Load credentials and connect
+    username, password = load_creds()
+    client = connect_mqtt(username, password)
+    client.loop_start()
+    time.sleep(0.5)  # brief settle for connection
+
+    # Publish MQTT auto-discovery configs (idempotent — retained)
+    publish_discovery(client)
+
+    # Publish per-alert state to alert state topic (non-retained — event stream)
+    alert_payload = json.dumps(fields, separators=(",", ":"))
+    rc_alert = client.publish(f"{ALERT_TOPIC}/state", alert_payload, qos=1, retain=False)
+    if rc_alert.rc != 0:
+        log.warning("Alert state publish failed (rc=%d)", rc_alert.rc)
+
+    # Publish raw alert to alert stream topic (non-retained)
+    # HA automations subscribe here to trigger on each new alert
+    rc_stream = client.publish(ALERT_TOPIC, alert_payload, qos=1, retain=False)
+    if rc_stream.rc != 0:
+        log.warning("Alert stream publish failed (rc=%d)", rc_stream.rc)
+
+    # Publish status heartbeat (retained)
+    status_payload = json.dumps(
+        {
+            "manager_up": True,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "last_alert_level": fields["level"],
+        },
+        separators=(",", ":"),
+    )
+    rc_status = client.publish(STATUS_TOPIC, status_payload, qos=1, retain=True)
+    if rc_status.rc != 0:
+        log.warning("Status publish failed (rc=%d)", rc_status.rc)
+
+    # Wait for messages to flush
+    client.loop_stop()
+    client.disconnect()
+
+    log.info("Alert published: level=%d agent=%s", fields["level"], fields["agent_name"])
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

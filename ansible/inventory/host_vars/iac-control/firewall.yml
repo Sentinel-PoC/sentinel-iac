@@ -1,0 +1,7 @@
+---
+# OPS-167: Enable UFW management via common role for iac-control
+# Previously firewall_enabled=False (stale exception — UFW is and was active)
+# Most iac-control UFW rules are in roles/iac-control/tasks/main.yml
+# Missing rules added to that file in this PR.
+
+firewall_enabled: true

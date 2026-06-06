@@ -1,0 +1,49 @@
+---
+# Declare the Forgejo OIDC client in Keycloak via the keycloak_client module.
+# Idempotent: re-runs are no-ops once the client exists.
+# Requires: community.general >= 8.0.0
+# Vars required at runtime (supplied via group_vars/vault — NOT in role defaults):
+#   keycloak_admin_user       — Keycloak admin username
+#   keycloak_admin_password   — Keycloak admin password (Vault-sourced)
+#
+# If either var is undefined (or empty), this task skips with a debug message
+# so the rest of the forgejo-server playbook still runs. Operator populates
+# KEYCLOAK_ADMIN_USER / KEYCLOAK_ADMIN_PASSWORD (Forgejo Actions secrets) or
+# passes -e on the command line, then re-runs to activate the declaration.
+# Tracking: OPS-188
+
+- name: Declare Keycloak OIDC client for Forgejo
+  community.general.keycloak_client:
+    auth_keycloak_url: "https://auth.208.haist.farm"
+    auth_realm: master
+    auth_username: "{{ keycloak_admin_user }}"
+    auth_password: "{{ keycloak_admin_password }}"
+    realm: sentinel
+    client_id: "{{ forgejo_oidc_client_id }}"
+    name: "{{ forgejo_oidc_client_id }}"
+    protocol: openid-connect
+    publicClient: false
+    standardFlowEnabled: true
+    directAccessGrantsEnabled: false
+    redirectUris:
+      - "{{ forgejo_root_url }}/user/oauth2/keycloak/callback"
+    webOrigins:
+      - "{{ forgejo_root_url }}"
+    state: present
+  when:
+    - forgejo_oidc_enabled | default(true)
+    - keycloak_admin_user | default('') | length > 0
+    - keycloak_admin_password | default('') | length > 0
+  tags: [forgejo, keycloak, oidc]
+
+- name: Skip Keycloak client declaration (admin credentials not configured)
+  ansible.builtin.debug:
+    msg: >-
+      keycloak_admin_user / keycloak_admin_password not set —
+      skipping declarative Keycloak client management for '{{ forgejo_oidc_client_id }}'.
+      Populate Forgejo secrets KEYCLOAK_ADMIN_USER + KEYCLOAK_ADMIN_PASSWORD (or pass
+      -e keycloak_admin_user=... -e keycloak_admin_password=...) and re-run to activate.
+  when:
+    - forgejo_oidc_enabled | default(true)
+    - (keycloak_admin_user | default('') | length == 0) or (keycloak_admin_password | default('') | length == 0)
+  tags: [forgejo, keycloak, oidc]

@@ -1,0 +1,84 @@
+---
+# suricata-nids/tasks/rules.yml — OPS-569
+# Configure ET Open ruleset via suricata-update with daily systemd timer
+
+- name: Enable ET Open source in suricata-update
+  ansible.builtin.command:
+    cmd: suricata-update enable-source et/open
+  register: suricata_enable_et_open
+  changed_when: "'Enabled' in suricata_enable_et_open.stdout"
+  tags:
+    - suricata
+    - rules
+
+- name: Run initial suricata-update to fetch ET Open rules
+  ansible.builtin.command:
+    cmd: suricata-update
+  register: suricata_update_initial
+  changed_when: "'Enabled rules' in suricata_update_initial.stdout or 'rules loaded' in suricata_update_initial.stdout"
+  notify: restart suricata
+  tags:
+    - suricata
+    - rules
+
+- name: Deploy suricata-update daily systemd service unit
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Update Suricata ET Open rules (OPS-569)
+      Documentation=https://suricata.io/
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/suricata-update
+      ExecStartPost=/bin/bash -c 'suricatasc -c reload-rules || systemctl reload suricata'
+      StandardOutput=journal
+      StandardError=journal
+    dest: /etc/systemd/system/suricata-update.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart suricata
+  tags:
+    - suricata
+    - rules
+
+- name: Deploy suricata-update daily systemd timer unit
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Daily Suricata rule update timer (OPS-569)
+      Requires=suricata-update.service
+
+      [Timer]
+      OnCalendar={{ suricata_update_timer_oncalendar }}
+      RandomizedDelaySec={{ suricata_update_timer_randomized_delay }}
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+    dest: /etc/systemd/system/suricata-update.timer
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - suricata
+    - rules
+
+- name: Reload systemd daemon for suricata-update units
+  ansible.builtin.systemd:
+    daemon_reload: true
+  tags:
+    - suricata
+    - rules
+
+- name: Enable and start suricata-update daily timer
+  ansible.builtin.systemd:
+    name: suricata-update.timer
+    enabled: true
+    state: started
+  tags:
+    - suricata
+    - rules

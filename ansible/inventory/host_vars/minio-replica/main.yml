@@ -1,0 +1,20 @@
+---
+# SEC-81: MinIO replica server (192.168.12.59 / LXC 302 on pve1)
+# Replicates data from minio-bootstrap; same root credentials (same cluster).
+# Credentials MUST be injected at runtime via -e extra-vars from Vault:
+#   minio_root_user     — vault kv get -field=access_key secret/minio/admin
+#   minio_root_password — vault kv get -field=secret_key secret/minio/admin
+# Credentials are NEVER committed to this file or any persistent file.
+
+minio_data_dir: "/opt/minio/data"
+minio_console_port: 9001
+minio_port: 9000
+
+# Replica does not run B2 backup (bootstrap handles backups)
+minio_skip_b2_backup: true
+
+# Replica has no OIDC (SSO managed at bootstrap level)
+minio_oidc_enabled: false
+
+# Replica mirrors bootstrap buckets; do not create independently
+minio_buckets: []

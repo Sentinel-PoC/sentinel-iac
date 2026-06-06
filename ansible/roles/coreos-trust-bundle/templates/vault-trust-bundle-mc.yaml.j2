@@ -1,0 +1,33 @@
+---
+# vault-trust-bundle-mc.yaml.j2
+# OPS-238: MachineConfig — distribute Vault CA trust bundle to OKD CoreOS nodes
+#
+# MCO applies this to all nodes in the {{ coreos_trust_bundle_mcp_role }} pool.
+# On apply, MCO drains and reboots each node one at a time (rolling update).
+# After reboot, CoreOS runs `update-ca-trust` automatically, which promotes
+# /etc/pki/ca-trust/source/anchors/vault-root-ca.pem into the system trust store.
+# CRI-O then trusts TLS certs signed by the Vault PKI chain (Harbor, etc.).
+#
+# Contents: {{ 'Root CA + Intermediate CA bundle' if coreos_trust_bundle_include_intermediate else 'Root CA only' }}
+# Root CA serial: {{ vault_root_ca_serial | default('UNKNOWN') }}
+# Generated: {{ ansible_date_time.iso8601 }}
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: {{ coreos_trust_bundle_mc_name }}
+  labels:
+    machineconfiguration.openshift.io/role: {{ coreos_trust_bundle_mcp_role }}
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - path: {{ coreos_trust_bundle_ca_dest }}
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,{{ vault_ca_bundle_b64 }}"
+  extensions: []
+  kernelArguments: []
+  osImageURL: ""

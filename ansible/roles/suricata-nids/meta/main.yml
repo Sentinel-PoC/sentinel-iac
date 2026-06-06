@@ -1,0 +1,23 @@
+---
+# suricata-nids role metadata — OPS-569
+galaxy_info:
+  role_name: suricata-nids
+  author: sentinel-worker
+  description: >
+    Suricata standalone NIDS deployment for the Overwatch platform.
+    Installs Suricata from OISF stable PPA, configures ET Open ruleset via
+    suricata-update with daily refresh, enables PCAP capture with size-based
+    rolling rotation (1GB/file, 10-file window), and configures Wazuh agent
+    to forward eve.json alerts.
+  license: Apache-2.0
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+dependencies: []
+# Note: wazuh-agent role should be applied before suricata-nids on NIDS hosts
+# so that ossec.conf exists when the Wazuh integration task runs.
+# See ansible/playbooks/suricata-nids.yml for the recommended play ordering.

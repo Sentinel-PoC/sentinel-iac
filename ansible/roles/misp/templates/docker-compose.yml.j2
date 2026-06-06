@@ -1,0 +1,119 @@
+# MISP Docker Compose — managed by Ansible (sentinel-iac roles/misp)
+# Based on upstream: https://github.com/MISP/misp-docker/blob/main/docker-compose.yml
+# Do not edit directly — changes will be overwritten.
+# Tracking: OPS-571
+
+# Architecture (per upstream MISP/misp-docker):
+#   - db:           MariaDB 10.11 (MySQL-compatible; Postgres explicitly unsupported upstream)
+#   - redis:        Valkey 7.2 (Redis fork used by upstream; NOT vanilla redis)
+#   - misp-modules: MISP enrichment modules (separate container, TCP port 6666)
+#   - misp-core:    Main MISP app; supervisord runs workers INSIDE this container
+# Note: upstream has NO separate misp-workers image/container.
+
+services:
+  db:
+    # Upstream (docker-compose.yml L60):
+    # "We use MariaDB because it supports ARM and has the expected collations"
+    # PostgreSQL is NOT supported by MISP's init scripts or ORM expectations.
+    image: {{ misp_db_image }}
+    container_name: misp-db
+    restart: always
+    environment:
+      - "MYSQL_USER={{ misp_db_user }}"
+      - "MYSQL_PASSWORD={{ misp_db_password }}"
+      - "MYSQL_ROOT_PASSWORD={{ misp_db_root_password }}"
+      - "MYSQL_DATABASE={{ misp_db_name }}"
+      - "TZ=UTC"
+    command: "\
+      --innodb-buffer-pool-size={{ misp_innodb_buffer_pool_size }} \
+      --innodb-change-buffering=none \
+      --innodb-io-capacity=1000 \
+      --innodb-io-capacity-max=2000 \
+      --innodb-read-io-threads=16 \
+      --innodb-stats-persistent=ON \
+      --innodb-write-io-threads=4"
+    volumes:
+      - {{ misp_db_dir }}:/var/lib/mysql:Z
+    cap_add:
+      - SYS_NICE
+    healthcheck:
+      test: mysqladmin --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD status
+      interval: 2s
+      timeout: 1s
+      retries: 3
+      start_period: 30s
+      start_interval: 5s
+
+  redis:
+    # Upstream uses Valkey (Redis fork) — NOT vanilla redis:alpine
+    image: {{ misp_redis_image }}
+    container_name: misp-redis
+    restart: always
+    command: |
+      sh -c 'exec valkey-server --requirepass "{{ misp_redis_password }}"'
+    environment:
+      - "REDIS_PASSWORD={{ misp_redis_password }}"
+      - "TZ=UTC"
+    volumes:
+      - {{ misp_redis_dir }}:/data:Z
+    healthcheck:
+      test: |
+        sh -c 'valkey-cli -a "{{ misp_redis_password }}" -p 6379 ping | grep -q PONG || exit 1'
+      interval: 2s
+      timeout: 1s
+      retries: 3
+      start_period: 5s
+      start_interval: 5s
+
+  misp-modules:
+    image: {{ misp_modules_image }}
+    container_name: misp-modules
+    restart: always
+    # Healthcheck: TCP probe to port 6666 (upstream pattern)
+    healthcheck:
+      test: "/bin/bash -c '</dev/tcp/localhost/6666'"
+      interval: 2s
+      timeout: 1s
+      retries: 3
+      start_period: 5s
+      start_interval: 5s
+    environment:
+      - "TZ=UTC"
+{% if misp_greynoise_api_key | default('') | length > 0 %}
+      - "GREYNOISE_API_KEY={{ misp_greynoise_api_key }}"
+{% endif %}
+{% if misp_abuseipdb_api_key | default('') | length > 0 %}
+      - "ABUSEIPDB_KEY={{ misp_abuseipdb_api_key }}"
+{% endif %}
+
+  misp-core:
+    image: {{ misp_core_image }}
+    container_name: misp-core
+    restart: always
+    cap_add:
+      - AUDIT_WRITE
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      misp-modules:
+        condition: service_healthy
+    healthcheck:
+      test: curl -ks {{ misp_base_url }}/users/heartbeat > /dev/null || exit 1
+      interval: 2s
+      timeout: 1s
+      retries: 3
+      start_period: 30s
+      start_interval: 30s
+    ports:
+      - "{{ misp_http_port }}:80"
+      - "{{ misp_https_port }}:443"
+    volumes:
+      - {{ misp_data_dir }}/configs:/var/www/MISP/app/Config/:Z
+      - {{ misp_data_dir }}/logs:/var/www/MISP/app/tmp/logs/:Z
+      - {{ misp_data_dir }}/files:/var/www/MISP/app/files/:Z
+      - {{ misp_data_dir }}/ssl:/etc/nginx/certs/:Z
+      - {{ misp_data_dir }}/gnupg:/var/www/MISP/.gnupg/:Z
+    env_file:
+      - .env

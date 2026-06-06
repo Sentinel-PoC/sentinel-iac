@@ -1,0 +1,26 @@
+---
+# OPS-635: MinIO host-level Ansible variables
+# MinIO bootstrap server (192.168.12.58)
+# Manages object storage for: terraform-state, vault-backups, forgejo-backups,
+# compliance-reports, langfuse-events, etc.
+
+# OPS-994: Override default minio_data_dir to use the 1TB TrueNAS-backed disk.
+# Default in roles/minio-server/defaults/main.yml is /data/minio (7.8G root disk —
+# too small for any backup workload). The 1TB iSCSI disk mounted at /mnt/minio-data
+# (/dev/sda, xfs, 1.0T total / 809G free) is the correct volume.
+#
+# OPERATOR NOTE: Before running Ansible with this change, decide what to do with
+# the objects currently in /data/minio (etcd-backups + forgejo-backups created
+# since 2026-05-25T17:51). See PR body for the safe-cutover checklist.
+minio_data_dir: "/mnt/minio-data"
+
+# Authentik OIDC — enabled; Authentik at auth-next.208.haist.farm
+# Vault: secret/authentik/clients/minio
+# Credentials injected at runtime via extra-vars (never committed):
+#   minio_oidc_client_id    — from Vault key: client_id
+#   minio_oidc_client_secret — from Vault key: client_secret
+minio_oidc_enabled: true
+minio_oidc_config_url: "https://auth-next.208.haist.farm/application/o/minio/.well-known/openid-configuration"
+minio_oidc_display_name: "Authentik"
+minio_oidc_scopes: "openid,profile,email,groups"
+minio_oidc_role_policy: "consoleAdmin"

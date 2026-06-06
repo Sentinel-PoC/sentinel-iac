@@ -1,0 +1,23 @@
+---
+# OPS-673: powerdns-lxc role metadata
+galaxy_info:
+  role_name: powerdns_lxc
+  author: sentinel-iac
+  description: >
+    Provision a PowerDNS nameserver LXC container on a Proxmox VE host.
+    Runs on the PVE host as root (pct commands), not on the LXC itself.
+    Mirrors ha-lxc role pattern (OPS-585) with PowerDNS-specific defaults.
+  min_ansible_version: "2.13"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm   # Proxmox 8.x
+
+dependencies: []
+
+# NIST controls supported by this role:
+#   CM-2  — Baseline Configuration (LXC spec codified in IaC)
+#   CM-3  — Configuration Change Control (changes via IaC + Plane issues)
+#   SC-20 — Secure Name/Address Resolution Service (auth information source)
+#   SC-21 — Secure Name/Address Resolution Service (recursive or caching resolver)
+#   SC-22 — Architecture and Provisioning for DNS (redundant servers on separate PVE nodes)

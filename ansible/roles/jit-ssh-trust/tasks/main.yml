@@ -1,0 +1,114 @@
+---
+# OPS-593: Minimal JIT SSH CA trust role for PVE bedrock hosts.
+#
+# Purpose: deploy /etc/ssh/trusted-ca.pem (Vault SSH CA public key) + set
+# TrustedUserCAKeys + deploy AuthorizedPrincipalsFile setup, so Vault-signed
+# JIT SSH certs are accepted on Proxmox hosts.
+#
+# TrustedUserCAKeys syntax (man sshd_config, OpenSSH 10.0p2 Debian-7):
+#   "Specifies a file containing public keys of certificate authorities that
+#    are trusted to sign user certificates for authentication, or none to not
+#    use one. Note that certificates that lack a list of principals will not
+#    be permitted for authentication using TrustedUserCAKeys."
+# Precedent: roles/common/tasks/main.yml line 104 uses identical directive.
+#
+# OPS-593 diagnostic finding (2026-05-13): JIT cert auth failed on pve4-alienware
+# because:
+#   1. Cert had empty principals (Vault sign invocation issue — separate fix)
+#   2. AuthorizedPrincipalsFile was missing entirely — this role now adds it
+# AuthorizedKeysFile is NOT changed — static key fallback preserved on PVE.
+#
+# Path A (append-safe) for trusted-ca.pem: lineinfile uses the first 40 chars
+# of the base64 key body as regexp (regex_escape'd — OPS-609) to detect whether
+# our JIT CA is already present. If present → idempotent. If absent → appends
+# our CA line without removing any other CA that may exist. Confirmed safe on
+# pve4-alienware: sha256 of existing trusted-ca.pem == sha256 of
+# infrastructure/vault-dr/ssh-ca-public-key.pub — same CA, not stale.
+#
+# Safety: sshd -t validates config. serial:1 in proxmox-host.yml limits
+# blast radius to one PVE node at a time.
+
+- name: Create auth_principals directory
+  ansible.builtin.file:
+    path: /etc/ssh/auth_principals
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - jit-ssh-trust
+    - ssh
+    - vault-ssh
+
+- name: Deploy per-user authorized principals files
+  ansible.builtin.copy:
+    content: "{{ item.value | join('\n') }}\n"
+    dest: "/etc/ssh/auth_principals/{{ item.key }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ jit_ssh_trust_principals | dict2items }}"
+  notify: Restart sshd
+  tags:
+    - jit-ssh-trust
+    - ssh
+    - vault-ssh
+
+- name: Set AuthorizedPrincipalsFile directive in sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?\s*AuthorizedPrincipalsFile\s'
+    line: "AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u"
+    state: present
+  notify: Restart sshd
+  tags:
+    - jit-ssh-trust
+    - ssh
+    - vault-ssh
+
+- name: Ensure Vault SSH CA public key is present in trusted-ca.pem
+  # Path A: append-safe. lineinfile matches on the first 40 chars of the
+  # base64 key body (unique fingerprint of this specific CA key). If the line
+  # is already present → idempotent. If not → appends without removing other
+  # CA keys that may coexist in the file. create: true handles the case where
+  # the file does not yet exist.
+  #
+  # OPS-609: regex_escape applied so that base64 special chars (+ / =) in the
+  # key body slice are treated as literals, not regex metacharacters. Without
+  # this, a future CA key whose first 40 base64 chars contain '+' would cause
+  # the regexp to mis-parse and append a duplicate line on every play run.
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/trusted-ca.pem
+    line: "{{ lookup('file', jit_ssh_trust_ca_pubkey_src) }}"
+    regexp: "{{ lookup('file', jit_ssh_trust_ca_pubkey_src).split()[1][:40] | regex_escape }}"
+    state: present
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart sshd
+  tags:
+    - jit-ssh-trust
+    - ssh
+    - vault-ssh
+
+- name: Set TrustedUserCAKeys directive in sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?\s*TrustedUserCAKeys\s'
+    line: "TrustedUserCAKeys /etc/ssh/trusted-ca.pem"
+    state: present
+  notify: Restart sshd
+  tags:
+    - jit-ssh-trust
+    - ssh
+    - vault-ssh
+
+- name: Validate sshd configuration
+  ansible.builtin.command:
+    cmd: sshd -t
+  changed_when: false
+  tags:
+    - jit-ssh-trust
+    - ssh
+    - vault-ssh

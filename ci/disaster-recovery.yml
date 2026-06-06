@@ -1,0 +1,244 @@
+# ci/disaster-recovery.yml - Disaster recovery automation jobs
+---
+
+# =============================================================================
+# Disaster Recovery Stage
+# Manual-only jobs for restoring infrastructure from backups
+# =============================================================================
+
+recover-minio-from-b2:
+  stage: disaster-recovery
+  tags:
+    - iac
+  variables:
+    B2_ACCOUNT_ID: "368fe76c3651"
+  before_script:
+    - echo "Retrieving B2 and encryption credentials from Vault..."
+    - export VAULT_ADDR=https://vault.208.haist.farm
+    - |
+      # Get Vault token from CI/CD variable or use root token
+      export VAULT_TOKEN="${VAULT_ROOT_TOKEN:-${VAULT_TOKEN}}"
+
+      # Retrieve B2 credentials from Vault
+      export B2_APP_KEY=$(vault kv get -field=application_key secret/backblaze)
+      export B2_BUCKET=$(vault kv get -field=bucket_name secret/backblaze)
+
+      # Retrieve rclone encryption keys from Vault
+      export RCLONE_CRYPT_PASS=$(vault kv get -field=password secret/minio-config/b2-encryption-keys)
+      export RCLONE_CRYPT_SALT=$(vault kv get -field=password2 secret/minio-config/b2-encryption-keys)
+  script:
+    - echo "Starting MinIO restoration from Backblaze B2..."
+    - cd infrastructure/recovery
+    - chmod +x restore-minio.sh
+    - ./restore-minio.sh
+  after_script:
+    - echo "MinIO restoration complete. Verify at http://192.168.12.58:9000"
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  timeout: 2h
+
+recover-vault:
+  stage: disaster-recovery
+  tags:
+    - iac
+  before_script:
+    - echo "Using MinIO credentials from CI/CD variables..."
+  script:
+    - echo "Starting Vault data restoration from MinIO..."
+    - cd infrastructure/recovery
+    - chmod +x restore-vault.sh
+    - |
+      export MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY}"
+      export MINIO_SECRET_KEY="${MINIO_SECRET_KEY}"
+      ./restore-vault.sh
+  after_script:
+    - |
+      echo "========================================"
+      echo "Vault restoration complete!"
+      echo ""
+      echo "CRITICAL: Vault is SEALED and requires manual unsealing"
+      echo ""
+      echo "To unseal Vault (requires 3 of 5 keys from Proton Pass):"
+      echo "  ssh root@192.168.12.206"
+      echo "  export VAULT_ADDR=http://localhost:8200"
+      echo "  vault operator unseal <key1>"
+      echo "  vault operator unseal <key2>"
+      echo "  vault operator unseal <key3>"
+      echo "  vault status"
+      echo "========================================"
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  timeout: 30m
+
+recover-gitlab:
+  stage: disaster-recovery
+  tags:
+    - iac
+  before_script:
+    - echo "Using MinIO credentials from CI/CD variables..."
+  script:
+    - echo "Starting GitLab restoration from MinIO..."
+    - cd infrastructure/recovery
+    - chmod +x restore-gitlab.sh
+    - |
+      export MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY}"
+      export MINIO_SECRET_KEY="${MINIO_SECRET_KEY}"
+      ./restore-gitlab.sh
+  after_script:
+    - |
+      echo "========================================"
+      echo "GitLab restoration complete!"
+      echo ""
+      echo "Verify GitLab health:"
+      echo "  ssh koiakoia@192.168.12.68"
+      echo "  sudo gitlab-rake gitlab:check SANITIZE=true"
+      echo ""
+      echo "GitLab UI: http://192.168.12.68"
+      echo "========================================"
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  timeout: 1h
+
+recover-etcd:
+  stage: disaster-recovery
+  tags:
+    - iac
+  before_script:
+    - echo "Using MinIO credentials from CI/CD variables..."
+    - |
+      # Verify kubeconfig exists on runner
+      if [ ! -f ~/.kube/config ]; then
+        echo "ERROR: kubeconfig not found at ~/.kube/config"
+        echo "Attempting to retrieve from Vault..."
+        export VAULT_ADDR=https://vault.208.haist.farm
+        export VAULT_TOKEN="${VAULT_ROOT_TOKEN:-${VAULT_TOKEN}}"
+        vault kv get -field=kubeconfig secret/iac-control/kubeconfig > ~/.kube/config
+        chmod 600 ~/.kube/config
+      fi
+  script:
+    - echo "⚠️ WARNING - This will restore etcd to a previous state"
+    - echo "All cluster changes after the backup will be LOST"
+    - echo ""
+    - echo "Starting OKD etcd restoration from MinIO..."
+    - cd infrastructure/recovery
+    - chmod +x restore-etcd.sh
+    - |
+      export MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY}"
+      export MINIO_SECRET_KEY="${MINIO_SECRET_KEY}"
+      export KUBECONFIG="$HOME/.kube/config"
+      # Skip interactive confirmation in CI
+      echo "yes" | ./restore-etcd.sh
+  after_script:
+    - |
+      echo "========================================"
+      echo "etcd restoration complete!"
+      echo ""
+      echo "Monitor cluster recovery (may take 10-20 minutes):"
+      echo "  oc get clusteroperators"
+      echo "  oc get nodes"
+      echo "  oc get pods -A"
+      echo "========================================"
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  timeout: 1h
+
+# =============================================================================
+# Complete DR: Full infrastructure recovery from B2
+# =============================================================================
+full-disaster-recovery:
+  stage: disaster-recovery
+  tags:
+    - iac
+  variables:
+    B2_ACCOUNT_ID: "368fe76c3651"
+  before_script:
+    - echo "Preparing for complete disaster recovery..."
+    - export VAULT_ADDR=https://vault.208.haist.farm
+    - export VAULT_TOKEN="${VAULT_ROOT_TOKEN:-${VAULT_TOKEN}}"
+    - |
+      # Retrieve all necessary credentials from Vault
+      export B2_APP_KEY=$(vault kv get -field=application_key secret/backblaze)
+      export B2_BUCKET=$(vault kv get -field=bucket_name secret/backblaze)
+      export RCLONE_CRYPT_PASS=$(vault kv get -field=password secret/minio-config/b2-encryption-keys)
+      export RCLONE_CRYPT_SALT=$(vault kv get -field=password2 secret/minio-config/b2-encryption-keys)
+      export MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY}"
+      export MINIO_SECRET_KEY="${MINIO_SECRET_KEY}"
+  script:
+    - |
+      echo "========================================"
+      echo "FULL DISASTER RECOVERY SEQUENCE"
+      echo "========================================"
+      echo ""
+      echo "This will restore ALL infrastructure in the correct order:"
+      echo "  1. MinIO (from B2)"
+      echo "  2. Vault (from MinIO)"
+      echo "  3. GitLab (from MinIO)"
+      echo ""
+      echo "NOTE: etcd recovery is excluded (run recover-etcd separately if needed)"
+      echo ""
+
+      cd infrastructure/recovery
+      chmod +x restore-*.sh
+
+      # Step 1: Restore MinIO
+      echo "========================================"
+      echo "Step 1/3: Restoring MinIO from B2..."
+      echo "========================================"
+      ./restore-minio.sh
+
+      # Wait for MinIO to stabilize
+      echo "Waiting for MinIO to stabilize..."
+      sleep 30
+
+      # Step 2: Restore Vault
+      echo "========================================"
+      echo "Step 2/3: Restoring Vault from MinIO..."
+      echo "========================================"
+      ./restore-vault.sh
+
+      # Step 3: Restore GitLab
+      echo "========================================"
+      echo "Step 3/3: Restoring GitLab from MinIO..."
+      echo "========================================"
+      ./restore-gitlab.sh
+
+      echo ""
+      echo "========================================"
+      echo "FULL DISASTER RECOVERY COMPLETE"
+      echo "========================================"
+  after_script:
+    - |
+      echo ""
+      echo "POST-RECOVERY ACTIONS REQUIRED:"
+      echo ""
+      echo "1. Unseal Vault (requires 3 of 5 keys from Proton Pass):"
+      echo "   ssh root@192.168.12.206"
+      echo "   vault operator unseal <key1>"
+      echo "   vault operator unseal <key2>"
+      echo "   vault operator unseal <key3>"
+      echo ""
+      echo "2. Verify GitLab health:"
+      echo "   ssh koiakoia@192.168.12.68"
+      echo "   sudo gitlab-rake gitlab:check"
+      echo ""
+      echo "3. Verify MinIO buckets:"
+      echo "   mc alias set minio http://192.168.12.58:9000 minio-admin <password>"
+      echo "   mc ls minio"
+      echo ""
+      echo "4. If OKD cluster needs recovery, run 'recover-etcd' job separately"
+      echo ""
+      echo "Recovery RTO: ~2-3 hours elapsed"
+      echo "========================================"
+  when: manual
+  allow_failure: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  timeout: 3h

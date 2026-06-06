@@ -1,0 +1,160 @@
+---
+# vault-jwt-authentik tasks
+# Tracking: OPS-656 (follow-up to OPS-630)
+#
+# Enables Vault JWT auth method at auth/jwt-authentik/ trusting Authentik
+# (auth-next.208.haist.farm) as the JWT issuer. Creates 4 per-agent JWT roles
+# bound to Authentik-issued JWTs via per-application client_id (bound_audiences)
+# and per-app issuer URL (bound_claims.iss).
+#
+# Reuses the per-agent Vault policies authored by OPS-345
+# (ansible/roles/vault-jwt-agents/files/policies/agent-*.hcl) — this role
+# creates NO policy files. Design: single source of truth per agent role;
+# jwt-authentik/ is a parallel identity source alongside jwt/ (Keycloak).
+#
+# Requires at runtime (pass via -e or environment — NOT in defaults):
+#   vault_token — Vault token with sys/auth + auth/jwt-authentik/* write scope
+#                 (operator-root for bootstrap; worker scope is insufficient)
+#
+# Idempotency:
+#   - auth enable: gated by existence check on sys/auth; POST only if
+#     jwt-authentik/ absent
+#   - auth/jwt-authentik/config write: naturally idempotent (same values →
+#     no functional change)
+#   - auth/jwt-authentik/role/<name>: idempotent upsert (same config =
+#     no effective change)
+#   NOTE: community.hashi_vault.vault_write may report changed=true on
+#   idempotent re-writes of config and role endpoints because Vault returns
+#   the written data back and the module has no diff comparison. This is a
+#   known quirk of vault_write on config endpoints (documented in OPS-345,
+#   OPS-536).
+
+# ─── Pre-flight ──────────────────────────────────────────────────────────────
+
+- name: Pre-flight | assert vault_token is provided
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<token>
+  no_log: false
+  tags: [vault-jwt-authentik, validation]
+
+- name: Pre-flight | assert vault_jwt_authentik_roles is non-empty
+  ansible.builtin.assert:
+    that:
+      - vault_jwt_authentik_roles is iterable
+      - vault_jwt_authentik_roles | length > 0
+    fail_msg: >-
+      vault_jwt_authentik_roles must be a non-empty list.
+      Defaults define the 4 canonical agent roles.
+  no_log: false
+  tags: [vault-jwt-authentik, validation]
+
+# ─── Task 1/4 — Read current auth method list ────────────────────────────────
+# Read sys/auth to determine whether jwt-authentik/ is already enabled.
+# Vault returns a dict keyed by mount path (e.g. "jwt/", "jwt-authentik/").
+
+- name: "Task 1/4 | Read sys/auth — detect existing mounts"
+  community.hashi_vault.vault_read:
+    path: "sys/auth"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: vault_auth_list
+  tags: [vault-jwt-authentik, enable]
+
+# ─── Task 2/4 — Enable JWT auth method (gated) ───────────────────────────────
+# POST to sys/auth/jwt-authentik only if jwt-authentik/ is absent from the
+# current mount list. Without this gate, re-running against an existing mount
+# returns 400 "path is already in use at jwt-authentik/" and vault_write does
+# not suppress 400 as changed=false — it would fail the play.
+
+- name: "Task 2/4 | Enable JWT auth method at auth/{{ vault_jwt_authentik_mount_path }}/"
+  community.hashi_vault.vault_write:
+    path: "sys/auth/{{ vault_jwt_authentik_mount_path }}"
+    data:
+      type: "jwt"
+      description: "{{ vault_jwt_authentik_mount_description }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  when: "(vault_jwt_authentik_mount_path + '/') not in vault_auth_list.data"
+  tags: [vault-jwt-authentik, enable]
+
+# ─── Task 3/4 — Configure JWT method ─────────────────────────────────────────
+# Configure jwks_url and default_role for the Authentik JWT mount.
+#
+# DESIGN NOTE: The live mount (captured 2026-05-22) uses a JWKS URL pointing
+# to the Authentik internal address (http://192.168.12.83:9000/...) rather
+# than oidc_discovery_url. This avoids TLS issues between Vault and Authentik
+# and is idiomatic for Authentik-backed Vault JWT mounts (the JWKS endpoint
+# is stable and key-rotation-safe). bound_issuer is intentionally empty — the
+# per-role bound_claims.iss discriminates by Authentik application issuer,
+# which is more granular than mount-level bound_issuer.
+#
+# This write IS idempotent in effect — same values → no functional change.
+# vault_write may still report changed=true due to response-echo quirk.
+
+- name: "Task 3/4 | Configure JWT method — Authentik JWKS URL"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_jwt_authentik_mount_path }}/config"
+    data:
+      jwks_url: "{{ vault_jwt_authentik_jwks_url }}"
+      bound_issuer: ""
+      default_role: "{{ vault_jwt_authentik_default_role }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-jwt-authentik, configure]
+
+# ─── Task 4/4 — Per-agent JWT roles ──────────────────────────────────────────
+# Create Vault JWT roles at auth/jwt-authentik/role/sentinel-{role}.
+#
+# Key binding decisions (from live role captures 2026-05-22):
+#   bound_audiences: [<client_id>]  — Authentik per-app OAuth client_id;
+#                                     locks token to the matching Authentik
+#                                     provider; prevents cross-application
+#                                     JWT replay
+#   bound_claims: {iss: <app-url>}  — per-application issuer URL;
+#                                     prevents cross-role login across
+#                                     different Authentik providers
+#   bound_claims_type: "string"     — mirrors OPS-345 / OPS-536 pattern
+#   user_claim: "azp"               — Vault audit log attribution;
+#                                     matches Authentik JWT claim layout
+#   token_policies: ["agent-{R}"]  — reuses OPS-345 per-agent policies
+#   token_ttl / token_max_ttl: 1h     — hard cap at 1h
+#   token_explicit_max_ttl: 1h        — closes renewal-stacking loophole
+#   token_no_default_policy: true     — drops auto-attached default policy;
+#                                       per-role agent-* policies are sufficient
+#
+# OPS-853: added token_explicit_max_ttl and token_no_default_policy to align
+# with vault-jwt-agents (OPS-345) and vault-jwt-spire (OPS-536). Applying
+# this playbook against the live mount will harden it from the 2026-05-22
+# baseline (token_no_default_policy=false, token_explicit_max_ttl not set).
+
+- name: "Task 4/4 | Write JWT role | sentinel-{{ role_item.name }}"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_jwt_authentik_mount_path }}/role/sentinel-{{ role_item.name }}"
+    data:
+      role_type: "jwt"
+      user_claim: "azp"
+      bound_audiences:
+        - "{{ role_item.bound_audience }}"
+      bound_claims:
+        iss: "{{ role_item.iss }}"
+      bound_claims_type: "string"
+      token_policies:
+        - "{{ role_item.policy }}"
+      token_ttl: "{{ vault_jwt_authentik_token_ttl }}"
+      token_max_ttl: "{{ vault_jwt_authentik_token_max_ttl }}"
+      token_explicit_max_ttl: "{{ vault_jwt_authentik_token_explicit_max_ttl }}"
+      token_no_default_policy: "{{ vault_jwt_authentik_token_no_default_policy }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ vault_jwt_authentik_roles }}"
+  loop_control:
+    loop_var: role_item
+  tags: [vault-jwt-authentik, roles]

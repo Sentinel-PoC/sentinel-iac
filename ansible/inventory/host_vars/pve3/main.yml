@@ -1,0 +1,8 @@
+---
+# pve3 (192.168.12.57)
+# NIC topology:
+#   eno1 (b8:ca:3a:f5:04:b9): 10GbE SFP+ DAC → UCG-Fiber port 6 (SFP+1) — management VLAN
+#   eno2 (b8:ca:3a:f5:04:bb): 10GbE SFP+ DAC → USW Pro 48 port 50 (SFP+2) — storage VLAN
+# OPS-1125 Phase 1: VLAN 30 storage bridge
+# OPS-1127: corrected uplink from eno1 to eno2 (was pointing at UCG, not USW)
+pve_vlan30_storage_cfg: vlan30-storage-pve3.cfg

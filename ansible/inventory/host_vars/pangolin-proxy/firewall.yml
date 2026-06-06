@@ -1,0 +1,19 @@
+---
+# OPS-167: Codify manual UFW rules for pangolin-proxy
+# Live state verified 2026-04-09 via: ssh ubuntu@192.168.12.168 sudo ufw status numbered
+
+firewall_extra_rules:
+  - port: "8080"
+    proto: tcp
+    from_ip: "172.16.0.0/12"
+    comment: "Docker bridge to CrowdSec LAPI"
+
+  # OPS-731: OKD API port 6443 TCP passthrough
+  # Kubeconfig (secret/okd-prod) points to api.overwatch.haist.farm:6443.
+  # Traefik 'okdapi' entrypoint (added OPS-731) proxies this port with TLS
+  # passthrough to iac-control:6443 (OKD API server).
+  # Expose to internet: OKD API uses bearer token auth — acceptable exposure.
+  - port: "6443"
+    proto: tcp
+    from_ip: "any"
+    comment: "OKD API server TCP passthrough (OPS-731)"

@@ -1,0 +1,38 @@
+# {{ ansible_managed }}
+# Chrony NTP server configuration — OPS-288
+# Role: internal NTP server (iac-control / vault-server)
+# Upstream: NIST authoritative → Cloudflare → pool fallback
+# AU-8 / AU-8(1) / SC-45 compliance: synchronized from authoritative source
+
+# --- Upstream NTP sources ---
+{% for entry in chrony_upstream_servers %}
+server {{ entry.server }} {{ entry.options }}
+{% endfor %}
+
+{% if chrony_peer | length > 0 %}
+# Mutual peer — cross-check against the other internal NTP server
+peer {{ chrony_peer }} iburst
+{% endif %}
+
+# --- Drift and RTC ---
+driftfile /var/lib/chrony/chrony.drift
+
+# Step clock if offset exceeds threshold — defeats "active but never stepping" failure mode
+makestep {{ chrony_makestep_threshold }} {{ chrony_makestep_limit }}
+
+# Synchronise hardware (RTC) clock
+rtcsync
+
+# --- Server mode: serve time to LAN ---
+allow {{ chrony_allow_network }}
+
+# --- Logging ---
+logdir /var/log/chrony
+log measurements statistics tracking
+
+# --- Operational safety ---
+# Reject sources that differ by more than 1000ms from median
+maxdistance 1.0
+
+# Prefer sources with fewer hops (lower stratum)
+stratumweight 0.001

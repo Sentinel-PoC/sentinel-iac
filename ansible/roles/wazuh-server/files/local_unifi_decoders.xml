@@ -1,0 +1,254 @@
+<!--
+  - UniFi UDM Pro CEF decoder
+  -
+  - Decodes ArcSight CEF (Common Event Format) syslog from UniFi UDM Pro
+  - firmware 5.1.11+. UDM forwards CEF + plaintext syslog; never Suricata
+  - eve.json (proven by capture in OPS-544; OPS-543 closure investigation).
+  -
+  - Anchor: predecoder.program_name="CEF" (extracted by Wazuh's syslog
+  - predecoder) + prematch on "^CEF:0|Ubiquiti|". Other vendors using CEF
+  - (F5 BIG-IP, FireEye, McAfee, Cisco eStreamer) match their own decoders.
+  -
+  - Reference event (live IPS threat block captured 2026-05-12T19:42:50Z):
+  -   CEF:0|Ubiquiti|UniFi Network|10.3.58|201|Threat Detected and Blocked|7|
+  -   UNIFIcategory=Security proto=TCP spt=54892 dpt=8443 act=blocked
+  -   app=Other UNIFIrisk=medium UNIFIpolicyName=CINS Army Reputation List
+  -   UNIFIpolicyType=IDS/IPS UNIFIdirection=incoming src=78.128.114.42
+  -   dst=192.168.50.130 UNIFIsrcRegion=BG UNIFIipsSignature=ET CINS Active
+  -   Threat Intelligence Poor Reputation IP group 127
+  -   UNIFIipsSignatureId=2403426 msg=A network intrusion attempt from
+  -   78.128.114.42 to 192.168.50.130 has been detected and blocked.
+  -
+  - REGEX PATTERN — WHY PCRE2 LOOKAHEAD (DO NOT "SIMPLIFY"):
+  -   key=(.*?)(?=\s\S+=|$)
+  -   Wazuh's F5 BIG-IP CEF decoder uses key=(\S+)?\s which TRUNCATES values
+  -   containing spaces. UDM CEF routinely emits values with spaces:
+  -     UNIFIcategory=Client Devices
+  -     UNIFIpolicyName=CINS Army Reputation List
+  -     UNIFIipsSignature=ET CINS Active Threat Intelligence Poor Reputation IP group 127
+  -     msg=A network intrusion attempt from ... has been detected and blocked.
+  -   The lookahead "(?=\s\S+=|$)" terminates the capture only at the next
+  -   "<whitespace><key>=" boundary, or end-of-string. Captures the WHOLE
+  -   value including embedded spaces. Critical for IPS signature names and
+  -   policy names — truncated names break threat-classification rules.
+  -
+  - File path: /var/ossec/etc/decoders/local_unifi_decoders.xml (upgrade-safe)
+  - Plane: OPS-544
+-->
+
+<!-- ============================================================
+     PARENT DECODER — gates on Ubiquiti CEF events
+     Note: Wazuh's syslog predecoder treats "CEF" as program_name
+     (because the syslog separator ":" follows it as "CEF:0|..."),
+     so the decoder regex sees the body STRIPPED of the "CEF:" prefix:
+       full_log body = "0|Ubiquiti|UniFi Network|..."
+     The regex/prematch anchor accordingly, NOT on "^CEF:".
+     ============================================================ -->
+<decoder name="ubiquiti-cef">
+  <type>syslog</type>
+  <program_name>CEF</program_name>
+  <prematch type="pcre2">^0\|Ubiquiti\|</prematch>
+</decoder>
+
+<!-- ============================================================
+     HEADER EXTRACTOR — pipe-delimited CEF prefix fields
+     Body format: 0|Vendor|Product|Version|EventClassID|Name|Severity|
+     ============================================================ -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">^0\|Ubiquiti\|([^\|]+)\|([^\|]+)\|([^\|]+)\|([^\|]+)\|(\d+)\|</regex>
+  <order>unifi_product, unifi_product_version, unifi_event_class_id, unifi_event_name, unifi_severity</order>
+</decoder>
+
+<!-- ============================================================
+     EXTENSION FIELD EXTRACTORS — one decoder per load-bearing field
+     All share name "ubiquiti-cef-fields" so all matching siblings fire.
+     Standard CEF keys map to canonical Wazuh field names where possible
+     (src->srcip, dst->dstip, spt->srcport, dpt->dstport).
+     ============================================================ -->
+
+<!-- Standard CEF transport fields (map to canonical Wazuh names) -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bsrc=(.*?)(?=\s\S+=|$)</regex>
+  <order>srcip</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bdst=(.*?)(?=\s\S+=|$)</regex>
+  <order>dstip</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bspt=(.*?)(?=\s\S+=|$)</regex>
+  <order>srcport</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bdpt=(.*?)(?=\s\S+=|$)</regex>
+  <order>dstport</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bproto=(.*?)(?=\s\S+=|$)</regex>
+  <order>protocol</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bact=(.*?)(?=\s\S+=|$)</regex>
+  <order>action</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bapp=(.*?)(?=\s\S+=|$)</regex>
+  <order>app</order>
+</decoder>
+
+<!-- IPS-specific UniFi extension fields (load-bearing for threat dashboard) -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIipsSignature=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_ips_signature</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIipsSignatureId=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_ips_signature_id</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIipsSessionId=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_ips_session_id</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIpolicyName=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_policy_name</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIpolicyType=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_policy_type</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIrisk=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_risk</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdirection=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_direction</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIsrcRegion=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_src_region</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdstZone=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_dst_zone</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIcategory=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_category</order>
+</decoder>
+
+<!-- UniFi device-identity fields (asset tracking + correlation) -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdeviceName=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_device_name</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdeviceIp=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_device_ip</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdeviceMac=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_device_mac</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdeviceModel=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_device_model</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIdeviceVersion=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_device_version</order>
+</decoder>
+
+<!-- UniFi Protect event fields (physical security correlation) -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\beventId=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_event_id</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\beventType=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_event_type</order>
+</decoder>
+
+<!-- UniFi Network client-device fields (asset tracking, low rule priority) -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIclientIp=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_client_ip</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIclientMac=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_client_mac</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFIclientHostname=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_client_hostname</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFInetworkName=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_network_name</order>
+</decoder>
+
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bUNIFInetworkVlan=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_network_vlan</order>
+</decoder>
+
+<!-- Human-readable summary (always last field in UDM CEF events) -->
+<decoder name="ubiquiti-cef-fields">
+  <parent>ubiquiti-cef</parent>
+  <regex type="pcre2">\bmsg=(.*?)(?=\s\S+=|$)</regex>
+  <order>unifi_msg</order>
+</decoder>

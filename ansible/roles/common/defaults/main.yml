@@ -1,0 +1,82 @@
+---
+# Existing
+vault_ssh_ca_public_key: ""
+session_timeout: 900
+log_retention_days: 14
+aide_enabled: true
+# OPS-514: parametrize AIDE boot-watch path. Default /boot is correct for
+# x86 hosts (GRUB layout). Pi-class hosts override to /boot/firmware in
+# host_vars (the vfat partition where cmdline.txt, kernel*.img, config.txt
+# actually live on Ubuntu/Raspberry Pi OS). Without this override, AIDE
+# watches an effectively-empty mount point on Pi and Pi's boot files lose
+# file-integrity coverage.
+aide_boot_path: "/boot"
+is_lxc: "{{ ansible_virtualization_type == 'lxc' }}"
+
+# SSH hardening (Task 1)
+sshd_permit_root_login: "no"
+sshd_max_auth_tries: 4
+sshd_client_alive_interval: 300
+sshd_client_alive_count_max: 3
+sshd_max_sessions: 10
+
+# PAM hardening (Task 2)
+pam_faillock_deny: 5
+pam_faillock_unlock_time: 900
+pam_pwhistory_remember: 24
+password_max_days: 365
+password_min_days: 1
+password_warn_age: 7
+password_min_length: 14
+
+# OS hardening (Task 3)
+sysctl_hardening_enabled: true
+remove_insecure_packages: true
+
+# Auditd (Task 4)
+auditd_enabled: true
+audit_backlog_limit: 8192
+# OPS-778: rotate audit logs to prevent unbounded growth (keep_logs caused 6GB accumulation)
+# 10 files × 50MB = 500MB max retention; satisfies AU-11 on hosts with moderate audit load
+auditd_max_log_file: 50
+auditd_num_logs: 10
+auditd_max_log_file_action: rotate
+
+# Firewall (Task 5)
+firewall_enabled: true
+firewall_allowed_ports:
+  - 22
+
+# Extra firewall rules with source IP restriction or FORWARD rules
+# Each item: port, proto (default tcp), from_ip, comment, route (bool, optional)
+# For FORWARD rules: set route: true, from_ip and/or to_ip, port, proto
+firewall_extra_rules: []
+
+# NTP time synchronization
+ntp_servers:
+  - pool.ntp.org
+
+# Remote syslog forwarding
+rsyslog_remote_enabled: true
+rsyslog_remote_server: "192.168.12.100"
+rsyslog_remote_port: 514
+
+# SSH access control
+sshd_allow_groups: "sudo"
+
+# AuthorizedPrincipalsFile — map Vault SSH CA principals to local users
+# Each key is a local username, value is a list of allowed principals
+sshd_auth_principals:
+  ubuntu:
+    - ubuntu
+  root:
+    - root
+  koiakoia:
+    - koiakoia
+
+# OPS-125: Break-glass authorized-keys — Vault-independent fallback SSH keys.
+# Deployed to /etc/ssh/break-glass-authorized-keys/%u (root-owned).
+# Override in group_vars/all/vault-ssh.yml with operator hardware keys.
+# Empty default = directory created but no keys deployed (safe no-op).
+# Each key: local username → list of authorized_keys-format public key strings.
+sshd_break_glass_authorized_keys: {}

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Managed by Ansible (jellyfin-lxc role) — OPS-1030
+     Manual edits will be overwritten on next ansible-playbook run.
+     PublishedServerUriBySubnet is intentionally empty — Jellyfin is LAN-only.
+     The previous entries pointed to Pangolin VIP 192.168.12.168 (decommissioned
+     OPS-974, 2026-05-26). Removing them lets Jellyfin advertise its own LAN IP.
+-->
+<NetworkConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <BaseUrl />
+  <EnableHttps>{{ jellyfin_enable_https | lower }}</EnableHttps>
+  <RequireHttps>{{ jellyfin_require_https | lower }}</RequireHttps>
+  <CertificatePath>{{ jellyfin_certificate_path }}</CertificatePath>
+  <CertificatePassword>{{ jellyfin_certificate_password }}</CertificatePassword>
+  <InternalHttpPort>{{ jellyfin_internal_http_port }}</InternalHttpPort>
+  <InternalHttpsPort>{{ jellyfin_internal_https_port }}</InternalHttpsPort>
+  <PublicHttpPort>{{ jellyfin_public_http_port }}</PublicHttpPort>
+  <PublicHttpsPort>{{ jellyfin_public_https_port }}</PublicHttpsPort>
+  <AutoDiscovery>{{ jellyfin_auto_discovery | lower }}</AutoDiscovery>
+  <EnableUPnP>{{ jellyfin_enable_upnp | lower }}</EnableUPnP>
+  <EnableIPv4>{{ jellyfin_enable_ipv4 | lower }}</EnableIPv4>
+  <EnableIPv6>{{ jellyfin_enable_ipv6 | lower }}</EnableIPv6>
+  <EnableRemoteAccess>{{ jellyfin_enable_remote_access | lower }}</EnableRemoteAccess>
+  <LocalNetworkSubnets>
+{% for subnet in jellyfin_local_network_subnets %}
+    <string>{{ subnet }}</string>
+{% endfor %}
+  </LocalNetworkSubnets>
+  <LocalNetworkAddresses />
+  <KnownProxies>
+{% for proxy in jellyfin_known_proxies %}
+    <string>{{ proxy }}</string>
+{% endfor %}
+  </KnownProxies>
+  <IgnoreVirtualInterfaces>{{ jellyfin_ignore_virtual_interfaces | lower }}</IgnoreVirtualInterfaces>
+  <VirtualInterfaceNames>
+{% for iface in jellyfin_virtual_interface_names %}
+    <string>{{ iface }}</string>
+{% endfor %}
+  </VirtualInterfaceNames>
+  <EnablePublishedServerUriByRequest>{{ jellyfin_enable_published_server_uri_by_request | lower }}</EnablePublishedServerUriByRequest>
+{% if jellyfin_published_server_uri_by_subnet | length > 0 %}
+  <PublishedServerUriBySubnet>
+{% for entry in jellyfin_published_server_uri_by_subnet %}
+    <string>{{ entry }}</string>
+{% endfor %}
+  </PublishedServerUriBySubnet>
+{% else %}
+  <PublishedServerUriBySubnet />
+{% endif %}
+  <RemoteIPFilter />
+  <IsRemoteIPFilterBlacklist>false</IsRemoteIPFilterBlacklist>
+</NetworkConfiguration>

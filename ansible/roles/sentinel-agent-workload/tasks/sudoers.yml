@@ -1,0 +1,28 @@
+---
+# Sudoers entry: invoking user → sentinel-<role> for the auth script.
+# OPS-545 / OPS-351 Phase 4.5 D3 (process invocation pattern).
+#
+# Single scoped NOPASSWD entry per role. Scoped to the EXACT script path so no
+# other commands can be executed via this sudo grant. Adding `setenv` so the
+# script's re-exec can preserve VAULT_ADDR / VAULT_SKIP_VERIFY / VAULT_TOKEN /
+# SESSION_ID — without setenv, sudo strips most env vars and the inner script
+# would have to re-derive them.
+
+- name: "Render sudoers fragment for role: {{ workload_role }}"
+  ansible.builtin.copy:
+    # validate ensures the file parses as valid sudoers — visudo -cf rejects
+    # syntax errors atomically (Ansible reverts on failure). Same hardening
+    # pattern as roles/common/tasks/sudoers tasks across the fleet.
+    dest: "/etc/sudoers.d/{{ sentinel_workload_sudoers_filename }}-{{ workload_role }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+    content: |
+      # sentinel-agent-workload role — OPS-545 / Phase 4.5
+      # Grants the host's interactive user permission to re-exec
+      # agent-vault-auth.sh as sentinel-{{ workload_role }} (no other commands).
+      # Required so SPIRE Unix attestor (SO_PEERCRED) sees the sentinel-{{ workload_role }} UID
+      # on the Workload API socket, matching the role's workload entry selector.
+      Defaults!{{ sentinel_workload_script_path }} setenv
+      {{ sentinel_workload_invoking_user }} ALL=(sentinel-{{ workload_role }}) NOPASSWD: {{ sentinel_workload_script_path }}

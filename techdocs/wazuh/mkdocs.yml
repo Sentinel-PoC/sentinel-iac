@@ -1,0 +1,13 @@
+site_name: Wazuh SIEM Operations
+site_description: Operational runbook for Project Sentinel Wazuh SIEM
+nav:
+  - Overview: index.md
+  - Deployment: deployment.md
+  - Agents: agents.md
+  - Custom Rules: custom-rules.md
+  - Drift Detection: drift-detection.md
+  - Vulnerability Detection: vulnerability-detection.md
+  - Integrations: integrations.md
+  - Compliance: compliance.md
+plugins:
+  - techdocs-core

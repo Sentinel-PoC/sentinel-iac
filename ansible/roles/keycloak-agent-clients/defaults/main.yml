@@ -1,0 +1,19 @@
+---
+# Keycloak service-account clients for Overwatch agent roles.
+# Tracking: OPS-335 Phase 2
+#
+# Defaults — non-sensitive values only.
+# Sensitive vars (keycloak_admin_user, keycloak_admin_password, vault_token)
+# MUST be supplied via -e or environment — never stored here.
+
+agent_roles:
+  - worker
+  - planner
+  - judge
+  - scribe
+
+keycloak_url: "https://auth.208.haist.farm"
+keycloak_realm_workload: sentinel
+keycloak_realm_admin: master
+
+vault_addr: "https://vault.208.haist.farm"

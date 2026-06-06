@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily NIST Compliance Check
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,57 @@
+---
+# Variables for config-server configuration
+# Mirrors OKD cluster vars from iac-control for HA failover
+
+# Required packages (apt)
+required_packages:
+  - haproxy
+  - dnsmasq
+  - dnsmasq-base
+  - nginx
+  - keepalived
+  - rsync
+  - jq
+  - curl
+  - qemu-guest-agent
+
+# Network
+okd_gateway_ip: "10.0.0.1"
+okd_dhcp_ip: "10.0.0.2"  # config-server listens instead of .10
+okd_network: "10.0.0.0/24"
+management_network: "192.168.12.0/24"
+
+# OKD Cluster nodes (used by HAProxy, dnsmasq templates)
+okd_bootstrap_node:
+  mac: "bc:24:11:d8:cf:14"
+  ip: "10.0.0.220"
+  hostname: "bootstrap"
+
+okd_master_nodes:
+  - name: master-1
+    mac: "BC:24:11:F1:90:7A"
+    ip: "10.0.0.221"
+  - name: master-2
+    mac: "BC:24:11:54:EF:CF"
+    ip: "10.0.0.222"
+  - name: master-3
+    mac: "BC:24:11:EC:8C:91"
+    ip: "10.0.0.223"
+
+# HAProxy backend ports
+haproxy_api_port: 6443
+haproxy_machine_config_port: 22623
+haproxy_http_port: 80
+haproxy_https_port: 443
+
+# HAProxy
+haproxy_stats_bind: "127.0.0.1:9000"
+
+# DNS upstream servers
+dns_upstream_servers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# Nginx PXE directories
+nginx_pxe_dirs:
+  - /var/www/html/ignition
+  - /var/www/html/scos

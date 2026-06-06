@@ -1,0 +1,8 @@
+---
+galaxy_info:
+  role_name: truenas_backup
+  author: sentinel-worker
+  description: Create ZFS snapshots on TrueNAS Scale for Keycloak postgres iSCSI LUN (OPS-632 Layer 3)
+  min_ansible_version: "2.14"
+
+dependencies: []

@@ -1,0 +1,38 @@
+[Unit]
+Description=Harbor→mirror-registry sync — daily at 04:00 UTC (OPS-624)
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/src/branch/main/docs/runbooks/18-harbor-mirror-sync.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/harbor-to-mirror-sync.sh
+ConditionPathExists=/etc/harbor-mirror-sync/env
+
+[Service]
+Type=oneshot
+User=root
+Environment=HARBOR_REGISTRY=harbor.208.haist.farm
+Environment=HARBOR_PROJECT=sentinel
+Environment=MIRROR_REGISTRY=mirror.208.haist.farm:8443
+Environment=HARBOR_ROBOT_USER=robot$ci-system
+
+# Source Harbor robot password + mirror admin password from operator-deployed env file.
+# File is NOT Ansible-managed — deploy out-of-band (mode 0400 root:root):
+#   /etc/harbor-mirror-sync/env
+#   HARBOR_ROBOT_PASSWORD=<robot$ci-system password from Vault secret/harbor/robot>
+#   MIRROR_ADMIN_PASSWORD=<admin password from Vault secret/mirror-registry/admin>
+EnvironmentFile=/etc/harbor-mirror-sync/env
+
+ExecStart=/usr/local/bin/harbor-to-mirror-sync.sh
+
+# First sync is slow (~45 repos, multi-GB). Allow 2 hours.
+# Subsequent syncs are incremental and typically finish in <10 minutes.
+TimeoutStartSec=7200
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=harbor-mirror-sync
+
+# Do not restart on failure — alert-on-failure handled by wazuh log monitor
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

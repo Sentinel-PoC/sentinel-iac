@@ -1,0 +1,31 @@
+---
+# OPS-940: vault-agent now populates /run/minio-secrets at boot via AppRole auth.
+# minio_root_user / minio_root_password are no longer required as Ansible vars
+# for the main minio service — vault-agent fetches them from Vault autonomously.
+#
+# Usage (full deploy, vault-agent provision + minio start):
+#   ansible-playbook ansible/playbooks/minio-bootstrap.yml
+#
+# Usage (vault-agent only — re-provision or rotate credentials):
+#   ansible-playbook ansible/playbooks/minio-bootstrap.yml --tags minio-approle
+#
+# Usage (with optional mc setup):
+#   ansible-playbook ansible/playbooks/minio-bootstrap.yml \
+#     -e "minio_root_user=$(vault kv get -tls-skip-verify -field=access_key secret/minio/admin)" \
+#     -e "minio_root_password=$(vault kv get -tls-skip-verify -field=secret_key secret/minio/admin)" \
+#     -e minio_skip_b2_backup=true
+- name: Configure MinIO bootstrap server
+  hosts: minio-bootstrap
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: minio-server
+      tags: [minio]
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Tag-gated; --tags jit-ssh-trust runs only this.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

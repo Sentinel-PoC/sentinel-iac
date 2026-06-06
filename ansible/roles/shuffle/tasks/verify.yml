@@ -1,0 +1,66 @@
+---
+# verify.yml — OPS-573
+# Verification checks: Shuffle stack health + OIDC config + workflow count.
+
+- name: Check Shuffle frontend is reachable
+  ansible.builtin.uri:
+    url: "http://localhost:{{ shuffle_frontend_port }}"
+    method: GET
+    status_code: 200
+    validate_certs: false
+    follow_redirects: all
+  register: shuffle_frontend_check
+  when: not ansible_check_mode
+  tags: [shuffle, verify]
+
+- name: Check Shuffle backend health endpoint
+  ansible.builtin.uri:
+    url: "http://localhost:{{ shuffle_backend_port }}/api/v1/healthz"
+    method: GET
+    status_code: 200
+    validate_certs: false
+  register: shuffle_backend_check
+  when: not ansible_check_mode
+  tags: [shuffle, verify]
+
+- name: Check workflow count via API
+  ansible.builtin.uri:
+    url: "http://localhost:{{ shuffle_backend_port }}/api/v1/workflows"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ shuffle_api_token }}"
+    status_code: 200
+    validate_certs: false
+    return_content: true
+  register: shuffle_workflow_list
+  when:
+    - not ansible_check_mode
+    - shuffle_api_token | length > 0
+  tags: [shuffle, verify]
+
+- name: Assert at least 5 workflows are present
+  ansible.builtin.assert:
+    that:
+      - shuffle_workflow_list.json | length >= 5
+    fail_msg: >-
+      Expected >= 5 workflows in Shuffle, found {{ shuffle_workflow_list.json | length }}.
+      Check ansible/shuffle-workflows/*.json and re-run with --tags configure.
+    success_msg: >-
+      Shuffle has {{ shuffle_workflow_list.json | length }} workflows (expected >= 5).
+  when:
+    - not ansible_check_mode
+    - shuffle_api_token | length > 0
+  tags: [shuffle, verify]
+
+- name: Report Shuffle service status
+  ansible.builtin.command:
+    cmd: docker compose ps
+    chdir: "{{ shuffle_dir }}"
+  register: shuffle_ps_result
+  changed_when: false
+  tags: [shuffle, verify]
+
+- name: Display Shuffle service status
+  ansible.builtin.debug:
+    var: shuffle_ps_result.stdout_lines
+  tags: [shuffle, verify]

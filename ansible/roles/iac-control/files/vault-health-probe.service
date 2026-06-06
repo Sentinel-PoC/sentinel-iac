@@ -1,0 +1,9 @@
+[Unit]
+Description=External Vault sealed-state probe (OPS-143)
+# Runs FROM iac-control — probes the external Vault endpoint via pangolin.
+# No dependency on local Vault; the point is to detect when Vault is down.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vault-health-probe.sh
+User=root

@@ -1,0 +1,92 @@
+---
+# docker_install.yml — Phase 1: Install Docker CE inside ai-tier1 LXC
+# OPS-586 Section B
+#
+# ai-tier1 runs Ollama natively (not in Docker). This phase adds Docker CE
+# so Wyoming Whisper + Piper can run as containers alongside Ollama.
+#
+# Pattern mirrors ha-lxc/tasks/docker_install.yml exactly (OPS-585).
+# Using pct exec <vmid> -- to execute commands inside LXC from PVE host.
+#
+# Docker source: official apt repo (Docker Engine >= 23.0.0).
+# Reference: https://docs.docker.com/engine/install/ubuntu/
+
+# ── Check existing install ────────────────────────────────────────────────────
+
+- name: Check if Docker is already installed inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- docker --version"
+  register: docker_installed
+  failed_when: false
+  changed_when: false
+  tags: [whisper-piper, docker, install]
+
+# ── Install Docker CE via official apt repo ───────────────────────────────────
+
+- name: Update apt cache inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      apt-get update -qq
+  when: docker_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, docker, install]
+
+- name: Install prerequisite packages inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      apt-get install -y ca-certificates curl gnupg
+  when: docker_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, docker, install]
+
+- name: Add Docker GPG key inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "install -m 0755 -d /etc/apt/keyrings &&
+       curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
+       gpg --dearmor -o /etc/apt/keyrings/docker.gpg &&
+       chmod a+r /etc/apt/keyrings/docker.gpg"
+  when: docker_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, docker, install]
+
+- name: Add Docker apt repository inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg]
+      https://download.docker.com/linux/ubuntu noble stable'
+      > /etc/apt/sources.list.d/docker.list"
+  when: docker_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, docker, install]
+
+- name: Install Docker CE inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "apt-get update -qq &&
+       apt-get install -y
+       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+  when: docker_installed.rc != 0
+  changed_when: true
+  tags: [whisper-piper, docker, install]
+
+# ── Enable and start Docker ───────────────────────────────────────────────────
+
+- name: Enable and start Docker service inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- systemctl enable --now docker"
+  changed_when: false
+  tags: [whisper-piper, docker, service]
+
+- name: Verify Docker is running inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- docker info"
+  register: docker_info
+  changed_when: false
+  failed_when: docker_info.rc != 0
+  tags: [whisper-piper, docker, verify]

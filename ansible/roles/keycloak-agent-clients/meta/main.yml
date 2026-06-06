@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: keycloak_agent_clients
+  author: sentinel-iac
+  description: >-
+    Provisions Keycloak service-account OAuth2 clients for Overwatch agent roles
+    (sentinel-worker, sentinel-planner, sentinel-judge, sentinel-scribe) and
+    extends each agent's Vault credential path with keycloak_client_id and
+    keycloak_client_secret fields.
+  license: proprietary
+  min_ansible_version: "2.15"
+
+dependencies: []
+
+# Collection name strings (version requirements declared in ansible/requirements.yml)
+collections:
+  - community.general
+  - community.hashi_vault

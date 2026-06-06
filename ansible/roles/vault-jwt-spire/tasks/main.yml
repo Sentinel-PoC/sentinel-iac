@@ -1,0 +1,329 @@
+---
+# vault-jwt-spire tasks
+# Tracking: OPS-536 / OPS-351 Phase 4.4b
+#
+# Enables Vault JWT auth method trusting SPIRE-issued JWT-SVIDs (via the
+# spire-oidc-discovery-provider deployed in OPS-537 / Phase 4.4a), and
+# creates per-agent JWT roles bound to SPIFFE IDs.
+#
+# Reuses the per-agent Vault policies authored by OPS-345
+# (ansible/roles/vault-jwt-agents/files/policies/agent-*.hcl) — this role
+# creates NO policy files. Operator-approved design simplification: single
+# source of truth per agent role; Phase 4.5 becomes a true drop-in
+# identity-source swap with zero policy maintenance fork.
+#
+# Requires at runtime (pass via -e or environment — NOT in defaults):
+#   vault_token — Vault token with sys/auth + auth/jwt-spire/* +
+#                 pki_int/cert/ca_chain read+write scope (operator-root)
+#
+# Idempotency:
+#   - auth enable: gated by existence check on sys/auth; POST only if
+#     jwt-spire/ absent
+#   - PKI CA chain read: pure read, no state mutation
+#   - auth/jwt-spire/config write: naturally idempotent (same values →
+#     no functional change)
+#   - auth/jwt-spire/role/<name>: idempotent upsert (same config = no
+#     effective change)
+#   NOTE: community.hashi_vault.vault_write may report changed=true on
+#   idempotent re-writes of config and role endpoints because Vault
+#   returns the written data back and the module has no diff comparison.
+#   Same quirk documented in OPS-345's role.
+#
+# Phase-4.4b scope: BACKEND ONLY. No workload consumes this mount until
+# Phase 4.5 (OPS-NNN) migrates agent-vault-auth.sh.
+#
+# Layer-bug risk noted for Judge-apply time (tracked in OPS-541):
+# the FQDN spire-oidc.208.haist.farm currently resolves to the Pangolin
+# VIP (192.168.12.168) from clients in the 192.168.12.0/24 subnet; the
+# Vault server (192.168.12.206) likely faces the same lookup. If Vault's
+# OIDC discovery fetch fails ("error checking oidc discovery URL"), the
+# fix is at the Vault host's resolver-priority layer (OPS-541), NOT in
+# this role.
+
+# ─── Pre-flight ──────────────────────────────────────────────────────────────
+
+- name: Pre-flight | assert vault_token is provided
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<token>
+  no_log: false
+  tags: [vault-jwt-spire, validation]
+
+- name: Pre-flight | assert agent_roles is a non-empty list
+  ansible.builtin.assert:
+    that:
+      - agent_roles is iterable
+      - agent_roles | length > 0
+    fail_msg: >-
+      agent_roles must be a non-empty list. Defaults define the canonical
+      4 roles (worker, planner, judge, scribe).
+  no_log: false
+  tags: [vault-jwt-spire, validation]
+
+# ─── Task 1/8 — Read current auth method list ────────────────────────────────
+# Read sys/auth to determine whether jwt-spire/ is already enabled.
+# Vault returns a dict keyed by mount path (e.g. "jwt/", "jwt-spire/").
+
+- name: "Task 1/8 | Read sys/auth — detect existing mounts"
+  community.hashi_vault.vault_read:
+    path: "sys/auth"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: vault_auth_list
+  tags: [vault-jwt-spire, enable]
+
+# ─── Task 2/8 — Enable JWT auth method (gated) ───────────────────────────────
+# POST to sys/auth/jwt-spire only if jwt-spire/ is absent from the current
+# mount list. Without this gate, re-running against an existing mount
+# returns 400 "path is already in use at jwt-spire/" and vault_write does
+# not suppress 400 as changed=false — it would fail the play.
+
+- name: "Task 2/8 | Enable JWT auth method at auth/{{ vault_jwt_spire_mount_path }}/"
+  community.hashi_vault.vault_write:
+    path: "sys/auth/{{ vault_jwt_spire_mount_path }}"
+    data:
+      type: "jwt"
+      description: "SPIRE trust-domain JWT-SVID auth for Overwatch agents — OPS-536"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  when: "(vault_jwt_spire_mount_path + '/') not in vault_auth_list.data"
+  tags: [vault-jwt-spire, enable]
+
+# ─── Task 3/8 — Read Vault PKI CA chain ──────────────────────────────────────
+# Read pki_int/cert/ca_chain to obtain the PEM-encoded chain that signs the
+# spire-oidc-discovery-provider serving cert. The chain (intermediate +
+# root) is inlined into auth/jwt-spire/config.oidc_discovery_ca_pem so
+# Vault validates the OIDC discovery TLS handshake.
+#
+# community.hashi_vault.vault_read wraps Vault's HTTP response in an extra
+# `.data` envelope, so the module's `register:` variable is shaped:
+#   { data: { data: { ca_chain: "...", certificate: "...", ... } } }
+# (Vault's own response payload is `.data.X`; the Ansible module wraps that
+# at `result.data`, putting Vault's data at `result.data.data.X`.)
+#
+# We use `ca_chain` (intermediate + root concatenated) rather than
+# `certificate` (just the intermediate). The endpoint name `cert/ca_chain`
+# advertises the chain semantic; the full chain is more robust against TLS
+# handshake variation when Vault validates spire-oidc's serving cert during
+# OIDC discovery. Empirical (judge-019 review 370): both fields present,
+# ca_chain length 4236 in current state.
+#
+# Design rationale: dynamic read of PKI source-of-truth avoids hand-maintained
+# CA bundle files on disk and is rotation-safe by construction.
+
+- name: "Task 3/8 | Read Vault PKI CA chain for OIDC discovery TLS trust"
+  community.hashi_vault.vault_read:
+    path: "{{ vault_jwt_spire_pki_ca_chain_path }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: pki_ca_chain
+  tags: [vault-jwt-spire, configure]
+
+- name: "Task 3/8 | Assert PKI CA chain PEM is non-empty"
+  ansible.builtin.assert:
+    that:
+      - pki_ca_chain.data is defined
+      - pki_ca_chain.data.data is defined
+      - pki_ca_chain.data.data.ca_chain is defined
+      - pki_ca_chain.data.data.ca_chain | length > 0
+    fail_msg: >-
+      Vault PKI read returned empty CA chain. Check that the mount
+      '{{ vault_jwt_spire_pki_mount }}' exists and has an issued
+      intermediate. Path: {{ vault_jwt_spire_pki_ca_chain_path }}.
+      Note: community.hashi_vault.vault_read wraps Vault's response in
+      an extra .data envelope — access path is .data.data.ca_chain.
+  tags: [vault-jwt-spire, configure]
+
+# ─── Task 4/8 — Configure JWT method ─────────────────────────────────────────
+# Configure oidc_discovery_url + inlined CA + leave bound_issuer empty
+# (SPIRE 1.14.6 JWT-SVID has no `iss` claim; mint-and-decode evidence in
+# OPS-536 DESIGN-CALL comment 387be538-697c-4a11-b60d-6a9117257028).
+#
+# Vault validates the discovery doc's own `issuer` field against
+# oidc_discovery_url — that chain-of-trust check is preserved. Then the
+# inlined CA chain validates the TLS handshake when Vault fetches /keys.
+# Then bound_audiences on each role enforces audience-binding for
+# replay protection. Three-layer guarantee, no `iss` needed.
+#
+# This write IS idempotent in effect — same values → no functional change.
+# vault_write may still report changed=true due to response-echo quirk.
+
+- name: "Task 4/8 | Configure JWT method — SPIRE OIDC discovery"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_jwt_spire_mount_path }}/config"
+    data:
+      oidc_discovery_url: "{{ vault_jwt_spire_oidc_discovery_url }}"
+      oidc_discovery_ca_pem: "{{ pki_ca_chain.data.data.ca_chain }}"
+      bound_issuer: "{{ vault_jwt_spire_bound_issuer }}"
+      default_role: ""
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-jwt-spire, configure]
+
+# ─── Task 5/8 — Per-agent JWT roles ──────────────────────────────────────────
+# Create Vault JWT roles at auth/jwt-spire/role/sentinel-{role}.
+#
+# Key binding decisions (confirmed against real JWT-SVID decode in
+# OPS-536 DESIGN-CALL evidence E1):
+#   bound_audiences: ["vault.208.haist.farm"] — locked operator-author
+#                                               contract; SPIRE workload
+#                                               requests this audience
+#                                               via -audience flag
+#   bound_claims: {sub: spiffe://.../sentinel/R} — SPIFFE-ID discriminator;
+#                                                  prevents cross-role login
+#   bound_claims_type: "string"               — mirrors OPS-345 pattern
+#   user_claim: "sub"                         — Vault audit log attributes
+#                                               by SPIFFE ID
+#   token_policies: ["agent-R"]               — reuses OPS-345 per-agent
+#                                               policies (Simplification 1)
+#   token_no_default_policy: true             — drops auto-attached
+#                                               'default' policy
+#   token_explicit_max_ttl: 1h                — closes renewal-stacking
+
+- name: "Task 5/8 | Write JWT role | sentinel-{{ role_item }}"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_jwt_spire_mount_path }}/role/sentinel-{{ role_item }}"
+    data:
+      role_type: "jwt"
+      user_claim: "sub"
+      bound_audiences:
+        - "{{ vault_jwt_spire_bound_audience }}"
+      bound_claims:
+        sub: "spiffe://{{ spire_trust_domain }}/sentinel/{{ role_item }}"
+      bound_claims_type: "string"
+      token_policies:
+        - "agent-{{ role_item }}"
+      token_ttl: "{{ vault_jwt_spire_token_ttl }}"
+      token_max_ttl: "{{ vault_jwt_spire_token_max_ttl }}"
+      token_explicit_max_ttl: "{{ vault_jwt_spire_token_explicit_max_ttl }}"
+      token_no_default_policy: "{{ vault_jwt_spire_token_no_default_policy }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  tags: [vault-jwt-spire, roles]
+
+# ─── Tasks 6-8/8 — Stable entity + entity-alias registration (OPS-547) ───────
+#
+# Problem: every successful login on auth/jwt-spire/<role> emits
+#   auth.entity_created: true in the Vault audit log because the JWT subject
+#   (SPIFFE ID) has no alias on the jwt-spire accessor. Vault mints a new
+#   auto-named entity (entity_XXXXXXXX) per session — entity sprawl.
+#   Evidence: OPS-536 smoke-test 2026-05-12T12:01:31Z, OPS-547 discovery note.
+#
+# Fix: create one named entity per SPIFFE ID, then register an entity-alias
+#   mapping (jwt-spire-accessor, SPIFFE-ID) → stable entity. Subsequent logins
+#   resolve the existing entity; auth.entity_created will be false.
+#
+# Live registration was performed manually by worker-547 on 2026-05-22 before
+# this Ansible codification. These tasks are now the IaC source of truth for
+# the entity+alias state and run idempotently on re-apply.
+#
+# Idempotency:
+#   Task 6/8 (accessor read + fact): pure read + in-memory fact; no state change.
+#   Task 7/8 (entity upsert): vault_write to identity/entity returns the new
+#     entity (with id) on first run, or an EMPTY body on idempotent re-runs.
+#     Vault treats this as "name already exists → update in place". The follow-up
+#     vault_read (Task 7b) always returns the entity, giving a stable entity_id
+#     regardless of whether the write created or updated the entity.
+#   Task 8/8 (alias upsert): vault_write to identity/entity-alias upserts by
+#     (name, mount_accessor) — creates on first run, EMPTY body on re-runs.
+#     Vault guarantees uniqueness of the (name, accessor) pair; no duplicate
+#     aliases are created.
+#   Both write tasks show changed=true on re-runs due to vault_write's
+#   response-echo quirk (no diff comparison). Safe to ignore.
+#
+# accessor is read dynamically from sys/auth (re-using the mount data already
+# fetched by Task 1) to avoid hardcoding the accessor UUID (auth_jwt_8580ab2f).
+
+# ─── Task 6/8 — Retrieve jwt-spire mount accessor ────────────────────────────
+
+- name: "Task 6/8 | Read sys/auth — get jwt-spire accessor"
+  community.hashi_vault.vault_read:
+    path: "sys/auth"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: vault_auth_mounts_spire
+  tags: [vault-jwt-spire, entity-alias]
+
+- name: "Task 6/8 | Set vault_jwt_spire_accessor fact"
+  ansible.builtin.set_fact:
+    vault_jwt_spire_accessor: >-
+      {{ vault_auth_mounts_spire.data[(vault_jwt_spire_mount_path + '/')].accessor }}
+  tags: [vault-jwt-spire, entity-alias]
+
+# ─── Task 7/8 — Upsert stable named entity per SPIFFE ID ─────────────────────
+# vault_write to identity/entity is a name-keyed upsert:
+#   - First run → creates entity, returns { data: { id: "...", name: "..." } }
+#   - Subsequent runs → updates entity in place, returns EMPTY body
+# Because the write response is unreliable on re-runs, a follow-up vault_read
+# (Task 7b) fetches the entity by name to get a stable entity_id for Task 8.
+
+- name: "Task 7/8 | Upsert stable entity — spire-sentinel-{{ role_item }}"
+  community.hashi_vault.vault_write:
+    path: "identity/entity"
+    data:
+      name: "spire-sentinel-{{ role_item }}"
+      policies:
+        - "agent-{{ role_item }}"
+      metadata:
+        spiffe_id: "spiffe://{{ spire_trust_domain }}/sentinel/{{ role_item }}"
+        managed_by: "vault-jwt-spire Ansible role"
+        tracking: "OPS-547"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  tags: [vault-jwt-spire, entity-alias]
+
+# Task 7b: read entity by name to obtain stable entity_id.
+# community.hashi_vault.vault_read wraps Vault's HTTP response in an extra
+# .data envelope: result.data = full Vault response; result.data.data = Vault's
+# own .data field (the entity attributes, including .id).
+# Mirrors the wrapping documented for Task 3/8 (PKI CA chain read).
+
+- name: "Task 7b/8 | Read entity by name — spire-sentinel-{{ role_item }}"
+  community.hashi_vault.vault_read:
+    path: "identity/entity/name/spire-sentinel-{{ role_item }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: spire_entity_read
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  tags: [vault-jwt-spire, entity-alias]
+
+# ─── Task 8/8 — Register entity-alias on jwt-spire accessor ──────────────────
+# Maps SPIFFE-ID → stable entity so future logins resolve instead of creating.
+# Upsert by (name, mount_accessor): idempotent, empty body on re-runs.
+# canonical_id comes from spire_entity_read.results[N].data.data.id
+# (vault_read double-wraps: .data = Vault response, .data.data = entity body).
+
+- name: "Task 8/8 | Register entity-alias — spiffe://.../sentinel/{{ role_item }}"
+  community.hashi_vault.vault_write:
+    path: "identity/entity-alias"
+    data:
+      name: "spiffe://{{ spire_trust_domain }}/sentinel/{{ role_item }}"
+      canonical_id: "{{ spire_entity_read.results[role_item_idx].data.data.id }}"
+      mount_accessor: "{{ vault_jwt_spire_accessor }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+    index_var: role_item_idx
+  tags: [vault-jwt-spire, entity-alias]

@@ -1,0 +1,24 @@
+---
+# authentik-host role — main task entry point — OPS-605
+# Phase 1: Deploy Authentik (Docker Compose) in parallel with existing Keycloak.
+# Dual-running pattern per OPS-604: new auth path added first, old path untouched.
+
+- name: Include vault-secrets tasks
+  ansible.builtin.include_tasks: vault-secrets.yml
+  tags: [authentik, vault]
+
+- name: Include deploy tasks
+  ansible.builtin.include_tasks: deploy.yml
+  tags: [authentik, deploy]
+
+- name: Include federation tasks (Phase 2 — Keycloak upstream OIDC source)
+  ansible.builtin.include_tasks: federation.yml
+  tags: [authentik, federation]
+
+- name: Include email scope fix tasks (OPS-684 — email_verified hardcode)
+  ansible.builtin.include_tasks: email-scope-fix.yml
+  tags: [authentik, email-scope-fix]
+
+- name: Include signing-key fix tasks (OPS-869 — RS256 JWKS for JWT validation)
+  ansible.builtin.include_tasks: signing-key.yml
+  tags: [authentik, signing-key]

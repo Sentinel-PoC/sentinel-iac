@@ -1,0 +1,81 @@
+---
+# [OPS-566] postgres-attacker-intel — backup setup tasks
+# Deploys nightly pg_dump → MinIO S3 backup via systemd timer.
+# Uses mc (MinIO client, /usr/local/bin/mc) — already present on iac-control.
+# Separate-hardware target: MinIO @ 192.168.12.58 vs host 192.168.12.210.
+
+- name: Ensure backup directory exists
+  ansible.builtin.file:
+    path: "{{ attacker_db_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [attacker-db, backup]
+
+- name: Verify mc (MinIO client) is present at /usr/local/bin/mc
+  ansible.builtin.stat:
+    path: /usr/local/bin/mc
+  register: mc_stat
+  failed_when: not mc_stat.stat.exists
+  tags: [attacker-db, backup]
+
+- name: Configure mc alias for attacker-intel S3 target
+  ansible.builtin.command:
+    cmd: >
+      mc alias set attacker-intel-s3
+      {{ attacker_db_s3_endpoint }}
+      {{ attacker_db_s3_access_key }}
+      {{ attacker_db_s3_secret_key }}
+      --insecure
+  changed_when: true
+  no_log: true
+  tags: [attacker-db, backup]
+
+- name: Ensure MinIO backup bucket exists
+  ansible.builtin.command:
+    cmd: mc mb --ignore-existing attacker-intel-s3/{{ attacker_db_s3_bucket }} --insecure
+  register: bucket_create
+  changed_when: "'Bucket created' in bucket_create.stdout"
+  failed_when:
+    - bucket_create.rc != 0
+    - "'already exists' not in bucket_create.stderr"
+  tags: [attacker-db, backup]
+
+- name: Deploy backup script
+  ansible.builtin.template:
+    src: attacker-intel-backup.sh.j2
+    dest: /usr/local/bin/attacker-intel-backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+  no_log: true
+  tags: [attacker-db, backup]
+
+- name: Deploy backup systemd service unit
+  ansible.builtin.template:
+    src: attacker-intel-backup.service.j2
+    dest: /etc/systemd/system/attacker-intel-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+  tags: [attacker-db, backup]
+
+- name: Deploy backup systemd timer unit
+  ansible.builtin.template:
+    src: attacker-intel-backup.timer.j2
+    dest: /etc/systemd/system/attacker-intel-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+  tags: [attacker-db, backup]
+
+- name: Enable and start backup timer
+  ansible.builtin.systemd:
+    name: attacker-intel-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [attacker-db, backup]

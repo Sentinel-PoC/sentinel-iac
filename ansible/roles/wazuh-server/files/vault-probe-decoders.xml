@@ -1,0 +1,44 @@
+<!-- Vault probe decoders (OPS-144 — SEC-44 follow-up #4) -->
+<!-- Matches JSON log lines emitted by vault-token-watchdog and vault-health-probe  -->
+<!-- Both services write to journal; Wazuh journald ingest sets program_name to     -->
+<!-- the systemd unit name. The JSON_Decoder plugin extracts fields from the body.  -->
+
+<!-- vault-token-watchdog parent decoder -->
+<decoder name="vault-token-watchdog">
+  <program_name>^vault-token-watchdog$</program_name>
+</decoder>
+
+<decoder name="vault-token-watchdog-json">
+  <parent>vault-token-watchdog</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<!-- vault-health-probe parent decoder -->
+<decoder name="vault-health-probe">
+  <program_name>^vault-health-probe$</program_name>
+</decoder>
+
+<decoder name="vault-health-probe-json">
+  <parent>vault-health-probe</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<!-- vault-autounseal-token-ttl parent decoder (OPS-190 — SEC-44 follow-up) -->
+<decoder name="vault-autounseal-token-ttl">
+  <program_name>^vault-autounseal-token-ttl$</program_name>
+</decoder>
+
+<decoder name="vault-autounseal-token-ttl-json">
+  <parent>vault-autounseal-token-ttl</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
+
+<!-- iac-drift-check parent decoder (OPS-193 — IaC vs live drift detection) -->
+<decoder name="iac-drift-check">
+  <program_name>^iac-drift-check$</program_name>
+</decoder>
+
+<decoder name="iac-drift-check-json">
+  <parent>iac-drift-check</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

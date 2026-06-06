@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily DefectDojo Trivy IaC import (SEC-50 Phase 1) — fires 30m after evidence-pipeline
+
+[Timer]
+# evidence-pipeline runs at 07:00 UTC daily; this fires at 07:30 to give it
+# time to commit the new trivy-iac-scan-YYYY-MM-DD.json into compliance-vault.
+OnCalendar=*-*-* 07:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

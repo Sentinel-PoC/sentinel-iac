@@ -1,0 +1,101 @@
+---
+# OPS-675: zone_apply.yml — Apply haist.farm zone records via PowerDNS API
+#
+# Runs ONLY on primary nameserver (pdns_auth_ns_mode == "primary").
+# Secondary receives records via AXFR (Phase 6).
+#
+# Prerequisites:
+#   - _pdns_auth_api_key must be set by earlier tasks in main.yml
+#   - PowerDNS auth webserver running at 127.0.0.1:{{ pdns_auth_webserver_port }}
+#   - Zone YAML at files/zones/haist.farm.yml in this role
+#
+# Idempotency:
+#   Zone creation (POST) is skipped if zone exists (200 → skip).
+#   Record apply (PATCH changetype:REPLACE) is always run — PowerDNS replaces
+#   the entire rrset, making it idempotent regardless of current state.
+#   Second run returns 204 No Content (same data) → no effective change.
+#
+# To update zone: edit haist.farm.yml, bump SOA serial, re-run --tags zone.
+
+- name: "Zone_apply | assert primary mode"
+  ansible.builtin.assert:
+    that:
+      - pdns_auth_ns_mode == "primary"
+    fail_msg: "zone_apply.yml must only run on primary (pdns_auth_ns_mode=primary). Got: {{ pdns_auth_ns_mode }}"
+    quiet: true
+  tags: [zone, pdns-zone]
+
+- name: "Zone_apply | assert API key is set"
+  ansible.builtin.assert:
+    that:
+      - _pdns_auth_api_key is defined
+      - _pdns_auth_api_key | length > 8
+      - _pdns_auth_api_key != "VAULT-SECRET-NOT-YET-PROVISIONED-SEE-PHASE-4"
+    fail_msg: >-
+      _pdns_auth_api_key is not set or is still the placeholder value.
+      Ensure Vault secret secret/infrastructure/powerdns-api-key exists with field api_key.
+    quiet: true
+  tags: [zone, pdns-zone]
+
+- name: "Zone_apply | load haist.farm zone definition from YAML"
+  ansible.builtin.set_fact:
+    _pdns_zone_def: "{{ lookup('file', role_path + '/files/zones/haist.farm.yml') | from_yaml }}"
+  tags: [zone, pdns-zone]
+
+- name: "Zone_apply | GET zone haist.farm. — check existence"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pdns_auth_webserver_port }}/api/v1/servers/localhost/zones/haist.farm."
+    method: GET
+    headers:
+      X-API-Key: "{{ _pdns_auth_api_key }}"
+    status_code: [200, 404, 422]
+    return_content: false
+    validate_certs: false
+  register: _pdns_zone_check
+  no_log: false
+  tags: [zone, pdns-zone]
+
+- name: "Zone_apply | POST — create zone haist.farm. (does not exist)"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pdns_auth_webserver_port }}/api/v1/servers/localhost/zones"
+    method: POST
+    headers:
+      X-API-Key: "{{ _pdns_auth_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "haist.farm."
+      kind: "Native"
+      nameservers: []
+      rrsets: []
+    status_code: [200, 201]
+    validate_certs: false
+  when: _pdns_zone_check.status != 200
+  register: _pdns_zone_create
+  changed_when: _pdns_zone_create.status in [200, 201]
+  tags: [zone, pdns-zone]
+
+- name: "Zone_apply | PATCH haist.farm. rrsets={{ _pdns_zone_def.rrsets | length }}"
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ pdns_auth_webserver_port }}/api/v1/servers/localhost/zones/haist.farm."
+    method: PATCH
+    headers:
+      X-API-Key: "{{ _pdns_auth_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      rrsets: "{{ _pdns_zone_def.rrsets | map('combine', {'changetype': 'REPLACE'}) | list }}"
+    status_code: [200, 204]
+    validate_certs: false
+  register: _pdns_zone_patch
+  changed_when: _pdns_zone_patch.status == 200
+  tags: [zone, pdns-zone]
+
+- name: "Zone_apply | report result"
+  ansible.builtin.debug:
+    msg: >-
+      haist.farm. zone applied on {{ inventory_hostname }}.
+      Zone existed: {{ _pdns_zone_check.status == 200 }}.
+      Records applied: {{ _pdns_zone_def.rrsets | length }} rrsets.
+      PATCH status: {{ _pdns_zone_patch.status }}.
+  tags: [zone, pdns-zone]

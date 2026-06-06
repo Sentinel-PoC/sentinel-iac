@@ -1,0 +1,66 @@
+---
+# [OPS-566] postgres-attacker-intel — schema migration tasks
+# Applies V001__init.sql via psql inside the container.
+# Idempotent: uses IF NOT EXISTS throughout.
+
+- name: Copy migration file to host
+  ansible.builtin.copy:
+    src: "{{ attacker_db_migration_src }}"
+    dest: "{{ attacker_db_compose_dir }}/V001__init.sql"
+    owner: root
+    group: root
+    mode: "0640"
+  tags: [attacker-db, migrate]
+
+- name: Copy migration file into container
+  ansible.builtin.command:
+    cmd: >
+      docker cp {{ attacker_db_compose_dir }}/V001__init.sql
+      {{ attacker_db_container_name }}:/tmp/V001__init.sql
+  changed_when: true
+  tags: [attacker-db, migrate]
+
+- name: Check if migration has been applied (vector extension check)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -tAc "SELECT count(*) FROM pg_extension WHERE extname='vector';"
+  register: vector_ext_check
+  changed_when: false
+  tags: [attacker-db, migrate]
+
+- name: Apply schema migration V001__init.sql
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -f /tmp/V001__init.sql
+  register: migration_result
+  when: vector_ext_check.stdout | trim == '0'
+  changed_when: migration_result.rc == 0
+  tags: [attacker-db, migrate]
+
+- name: Verify vector extension is present post-migration
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -tAc "SELECT extname FROM pg_extension WHERE extname='vector';"
+  register: vector_verify
+  changed_when: false
+  failed_when: vector_verify.stdout | trim != 'vector'
+  tags: [attacker-db, migrate]
+
+- name: Verify all 3 tables exist post-migration
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -tAc "SELECT count(*) FROM information_schema.tables
+            WHERE table_schema='public'
+            AND table_name IN ('attackers','observations','attacker_relationships');"
+  register: table_verify
+  changed_when: false
+  failed_when: table_verify.stdout | trim != '3'
+  tags: [attacker-db, migrate]

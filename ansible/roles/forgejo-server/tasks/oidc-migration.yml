@@ -1,0 +1,88 @@
+---
+# One-time canonicalisation of the Forgejo auth source Name from "Keycloak"
+# (capital K, UI typo) to "keycloak" (lowercase).
+#
+# OPERATOR RUNBOOK:
+#   Run during a maintenance window with:
+#     ansible-playbook <playbook> -e forgejo_oidc_migrate_capital_k=true --tags oidc-migration
+#
+#   After running and confirming SSO login still works, remove the interim
+#   capital-K redirectUri from the Keycloak client (step 1 interim fix,
+#   tracked by OPS-188) — the IaC declaration in keycloak-client.yml only
+#   registers the lowercase URI.
+#
+# This task is tagged 'never' so it does NOT run during normal playbook
+# invocations — even when no --tags argument is given. Opt-in only.
+#
+# Idempotent: safe to re-run. If the capital-K source no longer exists,
+# the tasks detect that and skip cleanly.
+#
+# Tracking: OPS-188
+
+- name: List current Forgejo auth sources (migration check)
+  ansible.builtin.command:
+    cmd: docker exec -u git forgejo forgejo admin auth list --vertical-bars
+  register: forgejo_migration_auth_list
+  changed_when: false
+  failed_when: forgejo_migration_auth_list.rc != 0
+  when: forgejo_oidc_migrate_capital_k | default(false)
+  tags: [forgejo, oidc, oidc-migration, never]
+
+- name: Rename capital-K auth source to lowercase when only capital-K exists
+  when:
+    - forgejo_oidc_migrate_capital_k | default(false)
+    - "'|Keycloak|' in forgejo_migration_auth_list.stdout"
+    - "'|keycloak|' not in forgejo_migration_auth_list.stdout"
+  tags: [forgejo, oidc, oidc-migration, never]
+  block:
+    - name: Extract capital-K auth source ID
+      ansible.builtin.set_fact:
+        forgejo_capital_k_id: >-
+          {{ forgejo_migration_auth_list.stdout_lines
+             | select('search', '\\|Keycloak\\|')
+             | first
+             | regex_search('^\\s*(\\d+)\\s*\\|', '\\1')
+             | first }}
+
+    - name: Rename "Keycloak" auth source to "keycloak"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec -u git forgejo forgejo admin auth update-oauth
+          --id "{{ forgejo_capital_k_id }}"
+          --name "keycloak"
+      register: forgejo_rename_result
+      changed_when: "'Authentication source updated' in forgejo_rename_result.stdout"
+      failed_when: forgejo_rename_result.rc != 0
+
+- name: Delete capital-K auth source when lowercase already exists
+  when:
+    - forgejo_oidc_migrate_capital_k | default(false)
+    - "'|Keycloak|' in forgejo_migration_auth_list.stdout"
+    - "'|keycloak|' in forgejo_migration_auth_list.stdout"
+  tags: [forgejo, oidc, oidc-migration, never]
+  block:
+    - name: Extract capital-K auth source ID (for deletion)
+      ansible.builtin.set_fact:
+        forgejo_capital_k_id: >-
+          {{ forgejo_migration_auth_list.stdout_lines
+             | select('search', '\\|Keycloak\\|')
+             | first
+             | regex_search('^\\s*(\\d+)\\s*\\|', '\\1')
+             | first }}
+
+    - name: Delete "Keycloak" (capital-K) auth source
+      ansible.builtin.command:
+        cmd: >-
+          docker exec -u git forgejo forgejo admin auth delete
+          --id "{{ forgejo_capital_k_id }}"
+      register: forgejo_delete_result
+      changed_when: "'Authentication source deleted' in forgejo_delete_result.stdout"
+      failed_when: forgejo_delete_result.rc != 0
+
+- name: No capital-K auth source found (migration is a no-op)
+  ansible.builtin.debug:
+    msg: "No 'Keycloak' (capital-K) auth source found — migration already complete or never needed."
+  when:
+    - forgejo_oidc_migrate_capital_k | default(false)
+    - "'|Keycloak|' not in forgejo_migration_auth_list.stdout"
+  tags: [forgejo, oidc, oidc-migration, never]

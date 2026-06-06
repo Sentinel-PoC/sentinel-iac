@@ -1,0 +1,78 @@
+---
+# proxmox-oidc-realms role defaults
+# OPS-657: IaC coverage for PVE OIDC realm config
+#
+# This role ensures PVE OIDC authentication realms are present and configured.
+# Tasks are IDEMPOTENT: pveum realm list is checked before add/modify.
+# Tasks run ON the PVE host (become: true); Vault fetch delegates to localhost.
+#
+# APPLY NOTE: This role codifies existing live config. The operator must
+# explicitly run the playbook with --tags oidc-realms to apply. Do NOT
+# apply without operator authorization — realm changes affect all PVE logins.
+
+# ---------------------------------------------------------------------------
+# Vault configuration (inherited from environment)
+# ---------------------------------------------------------------------------
+# VAULT_ADDR and VAULT_TOKEN are expected as environment variables on the
+# Ansible control node. The community.hashi_vault lookup reads them via:
+#   lookup('env', 'VAULT_ADDR') / lookup('env', 'VAULT_TOKEN')
+
+# ---------------------------------------------------------------------------
+# Authentik OIDC realm (OPS-634 — added live 2026-05-15, now codified)
+# ---------------------------------------------------------------------------
+# Realm name as it appears in PVE (pveum realm list)
+pve_oidc_authentik_realm_name: "authentik"
+
+# OIDC issuer URL — must match what Authentik reports at /.well-known/openid-configuration
+# Value confirmed from Vault secret/authentik/clients/pve issuer_url field
+pve_oidc_authentik_issuer_url: "https://auth-next.208.haist.farm/application/o/proxmox/"
+
+# Vault KV2 path for the authentik OIDC client credentials
+# Fields used: client_id, client_secret
+# Path is relative to the KV2 engine mount (secret/)
+pve_oidc_authentik_vault_path: "authentik/clients/pve"
+
+# PVE pveum --username-claim: which OIDC claim to use as PVE username
+pve_oidc_authentik_username_claim: "email"
+
+# pveum --autocreate: 1 = auto-create PVE users on first OIDC login
+pve_oidc_authentik_autocreate: true
+
+# pveum --default: 0 = do not set as default login realm (PAM remains default)
+pve_oidc_authentik_default: false
+
+# Comment written to PVE realm config
+pve_oidc_authentik_comment: "Authentik OIDC (OPS-634/OPS-657) — managed by Ansible"
+
+# ---------------------------------------------------------------------------
+# Legacy auth.haist.farm realm (BROKEN — Keycloak decommissioned)
+# ---------------------------------------------------------------------------
+# This realm was the old Keycloak OIDC integration. Keycloak has been
+# decommissioned (auth.haist.farm no longer resolves / serves OIDC).
+# The realm is codified here for completeness but is DISABLED BY DEFAULT.
+#
+# To codify the broken realm in PVE, set pve_oidc_legacy_realm_enabled: true
+# and run with --tags oidc-realms,oidc-legacy. This is NOT recommended
+# unless you are specifically remediating or cleaning up the legacy realm.
+#
+# If the realm needs to be REMOVED from PVE rather than codified, a
+# separate child issue should be opened (pveum realm delete auth.haist.farm).
+pve_oidc_legacy_realm_enabled: false
+
+# Realm name as it appeared in PVE
+pve_oidc_legacy_realm_name: "auth.haist.farm"
+
+# Issuer URL (was Keycloak; endpoint is now defunct)
+pve_oidc_legacy_issuer_url: "https://auth.haist.farm/realms/haist"
+
+# Vault path for legacy Keycloak OIDC client creds.
+# NOTE: This path may not exist. If Vault does not have these credentials,
+# the task will fail gracefully (ignore_errors: true on vault fetch).
+# Operator must provision the path or set pve_oidc_legacy_realm_enabled: false.
+pve_oidc_legacy_vault_path: "keycloak/clients/pve"
+
+# Username claim used by the legacy realm
+pve_oidc_legacy_username_claim: "email"
+
+# Comment written to PVE realm config
+pve_oidc_legacy_comment: "LEGACY Keycloak OIDC — BROKEN (decommissioned) — managed by Ansible"

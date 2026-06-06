@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# yk-ssh-renew — sign YubiKey PIV slot 9a pubkey via Vault SSH CA.
+#
+# Phase B2 hardware-key rollout (OPS-744, 2026-05-18).
+# Mirrors pattern from ansible/roles/iac-control/files/jit-ssh-cert-renew.
+#
+# Why: fleet uses AuthorizedKeysFile none (cert-only SSH auth).
+# ansible/roles/common/templates/sshd_hardening.conf.j2:33 → AuthorizedKeysFile none
+# ansible/inventory/group_vars/all/vault-ssh.yml → TrustedUserCAKeys /etc/ssh/trusted-ca.pem
+#
+# The PIV pubkey cannot be distributed via authorized_keys because static keys
+# are disabled fleet-wide. Instead we get the PIV pubkey signed by the Vault
+# SSH CA, which all managed hosts already trust via TrustedUserCAKeys. The
+# signed cert is valid for 8 hours (one workday). Run once per session.
+#
+# ~/.ssh/config setup (already in place post Phase B2):
+#   Host 192.168.12.*
+#     PKCS11Provider /usr/lib/opensc-pkcs11.so
+#     CertificateFile ~/.ssh/yubikey-piv-cert.pub
+#
+# Prereqs:
+#   - opensc installed: /usr/lib/opensc-pkcs11.so must exist
+#   - YubiKey inserted and PIV slot 9a provisioned with ECDSA key
+#   - VAULT_TOKEN set in env (operator's session token or periodic token)
+#   - VAULT_ADDR pointing at Vault (defaults to direct IP, bypasses Pangolin SSO)
+#
+# TODO(SEC-74): valid_principals="ubuntu" is a temporary principal. When
+# SEC-74 wogngqlu convergence lands (canonical fleet principal), update this
+# to the fleet-canonical principal. Tracked: OPS-744 / SEC-74.
+#
+# OPS-744 — [hardware-key] Phase B2: YubiKey PIV uses Vault SSH CA certs
+
+set -euo pipefail
+
+VAULT_ADDR="${VAULT_ADDR:-https://192.168.12.206:8200}"
+export VAULT_ADDR
+export VAULT_SKIP_VERIFY="${VAULT_SKIP_VERIFY:-true}"
+
+PKCS11_LIB="${PKCS11_LIB:-/usr/lib/opensc-pkcs11.so}"
+CERT_FILE="${CERT_FILE:-${HOME}/.ssh/yubikey-piv-cert.pub}"
+PRINCIPALS="${PRINCIPALS:-ubuntu}"
+TTL="${TTL:-8h}"
+VAULT_SSH_ROLE="${VAULT_SSH_ROLE:-admin}"
+
+# ── Preflight checks ──────────────────────────────────────────────────────────
+
+if [[ -z "${VAULT_TOKEN:-}" ]]; then
+  echo "ERROR: VAULT_TOKEN not set." >&2
+  echo "  Export your Vault session token and retry." >&2
+  echo "  Hint: source ~/.vault-env or VAULT_TOKEN=\$(vault login -method=... -token-only)" >&2
+  exit 1
+fi
+
+if [[ ! -e "$PKCS11_LIB" ]]; then
+  echo "ERROR: PKCS11 library not found at $PKCS11_LIB" >&2
+  echo "  Install opensc: sudo apt install opensc  (Ubuntu/Debian)" >&2
+  echo "  Or set PKCS11_LIB=/usr/lib64/opensc-pkcs11.so  (RHEL/Fedora)" >&2
+  exit 2
+fi
+
+# Check Vault reachable
+if ! vault status -format=json >/dev/null 2>&1; then
+  echo "WARN: vault status failed — Vault may be sealed or unreachable." >&2
+  echo "  Continuing anyway; signing will fail if Vault is down." >&2
+fi
+
+# ── Extract PIV pubkey from YubiKey ──────────────────────────────────────────
+
+echo "Reading PIV pubkey from YubiKey slot 9a via PKCS11..."
+PUBKEY=$(ssh-keygen -D "$PKCS11_LIB" 2>/dev/null | head -1)
+
+if [[ -z "$PUBKEY" ]]; then
+  echo "ERROR: No key returned from PKCS11. Is the YubiKey inserted?" >&2
+  echo "  Debug: ssh-keygen -D $PKCS11_LIB" >&2
+  echo "  If multiple keys are returned, check slot 9a is provisioned." >&2
+  exit 3
+fi
+
+echo "  Pubkey type: $(echo "$PUBKEY" | awk '{print $1}')"
+echo "  Pubkey: ${PUBKEY:0:60}..."
+
+# ── Sign via Vault SSH CA ─────────────────────────────────────────────────────
+
+echo "Requesting cert from Vault SSH CA (role=${VAULT_SSH_ROLE}, ttl=${TTL}, principals=${PRINCIPALS})..."
+SIGNED=$(vault write -field=signed_key "ssh/sign/${VAULT_SSH_ROLE}" \
+  public_key="${PUBKEY}" \
+  valid_principals="${PRINCIPALS}" \
+  ttl="${TTL}" \
+  cert_type="user" 2>&1) || {
+  echo "ERROR: Vault signing failed:" >&2
+  echo "$SIGNED" >&2
+  echo "" >&2
+  echo "  Check: vault token capabilities ssh/sign/${VAULT_SSH_ROLE}" >&2
+  exit 4
+}
+
+if [[ -z "$SIGNED" ]]; then
+  echo "ERROR: Vault returned empty signed_key." >&2
+  exit 5
+fi
+
+# ── Verify cert type before saving ───────────────────────────────────────────
+
+if ! echo "$SIGNED" | grep -qE "^ecdsa-sha2-|^sk-ecdsa-"; then
+  echo "WARN: signed_key does not look like an ECDSA cert: ${SIGNED:0:30}" >&2
+  echo "  Continuing — ssh-keygen -L will confirm." >&2
+fi
+
+# ── Save cert ─────────────────────────────────────────────────────────────────
+
+printf '%s\n' "$SIGNED" > "$CERT_FILE"
+chmod 644 "$CERT_FILE"
+
+VALID_LINE=$(ssh-keygen -L -f "$CERT_FILE" 2>/dev/null | grep -E 'Valid' | head -1 | tr -s ' ')
+PRINCIPALS_LINE=$(ssh-keygen -L -f "$CERT_FILE" 2>/dev/null | grep -E 'Principals' | head -1 | tr -s ' ')
+
+echo ""
+echo "ok: cert written to $CERT_FILE"
+echo "  ${VALID_LINE}"
+echo "  ${PRINCIPALS_LINE}"
+
+# ── Usage reminder ────────────────────────────────────────────────────────────
+
+echo ""
+echo "── Verify ────────────────────────────────────────────────────────────────"
+echo "  ssh-keygen -L -f ${CERT_FILE}"
+echo ""
+echo "── Connect (inline PKCS11) ───────────────────────────────────────────────"
+echo "  ssh -I ${PKCS11_LIB} -o CertificateFile=${CERT_FILE} ubuntu@192.168.12.210 'hostname'"
+echo ""
+echo "── Connect (via ~/.ssh/config PKCS11Provider + CertificateFile) ──────────"
+echo "  ssh ubuntu@192.168.12.210  # uses config automatically"
+echo ""
+echo "NOTE: cert expires in ${TTL}. Re-run this script at next session start."

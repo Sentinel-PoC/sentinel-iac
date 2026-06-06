@@ -1,0 +1,44 @@
+# {{ ansible_managed }}
+# config-server DNS Configuration (DNS-only, no DHCP)
+# HA failover for OKD cluster DNS
+# Network: {{ okd_network }}
+# Domain: overwatch.haist.farm
+
+log-queries
+
+# --- Interface Binding ---
+# Listen on config-server IP, LAN IP (for DNS HA), and localhost
+# bind-dynamic allows dnsmasq to also accept on VIP (10.0.0.1) when present
+listen-address={{ config_server_ip }}
+listen-address={{ config_server_lan_ip }}
+listen-address=127.0.0.1
+bind-dynamic
+except-interface=fan-*
+
+# --- DNS Configuration ---
+domain=overwatch.haist.farm
+# Answer queries for this domain from /etc/hosts or DHCP
+local=/overwatch.haist.farm/
+expand-hosts
+
+# --- Static DNS Records (Load Balancer) ---
+# These point to the VIP which floats between iac-control and config-server
+address=/api.overwatch.haist.farm/{{ okd_gateway_ip }}
+address=/api-int.overwatch.haist.farm/{{ okd_gateway_ip }}
+address=/.apps.overwatch.haist.farm/{{ okd_gateway_ip }}
+
+# --- External Service DNS Override ---
+# Resolve auth.haist.farm internally for OKD pod→Keycloak OIDC token exchange
+address=/auth.haist.farm/192.168.12.168
+
+# --- DNSSEC Validation (SC-20/SC-21/SC-22) ---
+# Validate DNSSEC signatures on responses from upstream resolvers
+dnssec
+# Root zone trust anchor (KSK tag 20326, algorithm 8, SHA-256)
+trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+# Do NOT enable dnssec-check-unsigned — would break resolution for unsigned domains
+
+# --- Upstream Forwarding ---
+{% for server in dns_upstream_servers %}
+server={{ server }}
+{% endfor %}

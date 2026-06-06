@@ -1,0 +1,43 @@
+---
+pangolin_dir: "/opt/pangolin"
+
+# Container images
+pangolin_traefik_image: "traefik:v2.11"
+pangolin_oauth2_proxy_image: "quay.io/oauth2-proxy/oauth2-proxy:v7.14.2"
+# OPS-685: Weekly oauth2-proxy restart forces OIDC discovery document re-fetch.
+# oauth2-proxy caches the discovery doc at boot only — no auto-refresh flag exists.
+# Sunday 04:00 UTC is lowest-traffic window; restart takes ~5s.
+pangolin_oauth2_proxy_restart_minute: "0"
+pangolin_oauth2_proxy_restart_hour: "4"
+pangolin_oauth2_proxy_restart_weekday: "0"  # 0 = Sunday
+
+# Traefik settings
+pangolin_acme_email: "admin@haist.farm"
+
+# oauth2-proxy settings — ACTIVE provider: Authentik (OPS-639)
+# Flipped from Keycloak 2026-05-15; live state verified on 192.168.12.168
+pangolin_oauth2_client_id: "hCqAHa4ZRPsiCLvwp7qaa8se5GiRLcHfqO4IzvaX"
+pangolin_oauth2_redirect_url: "https://oauth2.haist.farm/oauth2/callback"
+pangolin_oauth2_oidc_issuer_url: "https://auth-next.208.haist.farm/application/o/pangolin/"
+pangolin_oauth2_cookie_domain: ".haist.farm"
+pangolin_oauth2_cookie_name: "_oauth2_proxy"
+pangolin_oauth2_cookie_expire: "10h"
+pangolin_oauth2_cookie_refresh: "30m"
+pangolin_oauth2_allowed_groups: "admin,operator,viewer"
+pangolin_oauth2_whitelist_domain: ".haist.farm"
+
+# Secrets — populated at runtime by tasks/vault-secrets.yml (OPS-818).
+# These defaults MUST remain "" — they are overwritten by set_fact in vault-secrets.yml
+# after reading from Vault. If you see empty values deployed to .env.oauth2-proxy,
+# the playbook was run without -e vault_token=<token> (vault-secrets assert will catch this).
+# Vault paths:
+#   cookie_secret: secret/pangolin/oauth2-proxy → cookie_secret
+#   client_secret: secret/authentik/clients/pangolin → client_secret
+pangolin_oauth2_client_secret: ""
+pangolin_oauth2_cookie_secret: ""
+
+# extra_hosts for auth resolution (pangolin-proxy hosts both auth-next and legacy auth)
+pangolin_oauth2_extra_hosts:
+  - "auth.208.haist.farm:192.168.12.168"
+  - "auth-next.208.haist.farm:192.168.12.168"
+  - "auth.haist.farm:192.168.12.168"

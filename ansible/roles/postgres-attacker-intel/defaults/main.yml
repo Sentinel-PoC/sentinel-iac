@@ -1,0 +1,43 @@
+---
+# postgres-attacker-intel role defaults
+# [OPS-566] Attacker Intelligence DB — pgvector PostgreSQL deployment
+
+# --- Container image ---
+attacker_db_image: "pgvector/pgvector:pg16"
+attacker_db_container_name: "attacker-intel-db"
+
+# --- Deployment target ---
+attacker_db_data_dir: "/var/lib/attacker-intel-db/data"
+attacker_db_compose_dir: "/opt/attacker-intel-db"
+
+# --- PostgreSQL config ---
+attacker_db_name: "attacker_intel"
+attacker_db_superuser: "postgres"
+# attacker_db_superpass: ""  # Required — must be provided via vars (Vault: secret/attacker-db/superuser)
+attacker_db_port_internal: 5432
+# Bind only to localhost; downstream callers use Docker network or 127.0.0.1
+attacker_db_port_host: 5433
+attacker_db_host_bind: "127.0.0.1"
+
+# --- DB users (passwords must be provided via Vault lookup) ---
+# attacker_db_ro_password: ""      # Vault: secret/attacker-db/ro_user  .password
+# attacker_db_rw_password: ""      # Vault: secret/attacker-db/rw_user  .password
+# attacker_db_migrate_password: "" # Vault: secret/attacker-db/migrate_user .password
+
+# --- Migration file path (relative to playbook root) ---
+attacker_db_migration_src: "{{ playbook_dir }}/../migrations/attacker-intel/V001__init.sql"
+
+# --- Backup configuration ---
+attacker_db_backup_enabled: true
+attacker_db_backup_dir: "/var/lib/attacker-intel-db/backups"
+# MinIO / S3 — separate hardware target (192.168.12.58 vs iac-control 192.168.12.210)
+# SEC-88: S3 API now TLS-terminated; use FQDN so wildcard cert validates.
+attacker_db_s3_endpoint: "https://s3.208.haist.farm:9000"
+attacker_db_s3_bucket: "attacker-intel-backups"
+# attacker_db_s3_access_key: ""  # Vault: secret/minio  .access_key
+# attacker_db_s3_secret_key: ""  # Vault: secret/minio  .secret_key
+attacker_db_backup_schedule: "OnCalendar=*-*-* 02:00:00"
+attacker_db_backup_retention_days: 30
+
+# --- Vector dimension (must match embedding model) ---
+attacker_db_vector_dim: 768

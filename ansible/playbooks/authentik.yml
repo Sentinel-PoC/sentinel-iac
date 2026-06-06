@@ -1,0 +1,61 @@
+---
+# Authentik playbook — OPS-605
+# Phase 1: Deploys Authentik IdP via Docker Compose on a dedicated host.
+# Dual-running pattern (OPS-604): parallel to existing auth.208.haist.farm Keycloak.
+# This playbook does NOT touch Keycloak or existing auth configuration.
+#
+# ── Operator pre-requisites (before running) ────────────────────────────────
+# 1. Provision authentik-server VM/LXC:
+#      Recommend: 2 vCPU / 4 GB RAM / 40 GB disk, Ubuntu 24.04 LTS
+#      Update hosts.ini [authentik] group with the assigned IP.
+#      Ensure docker-host role prerequisites met (Docker engine).
+#
+# 2. Seed Vault secrets:
+#      VAULT_ADDR=https://192.168.12.206:8200 VAULT_SKIP_VERIFY=true \
+#      vault kv put secret/authentik \
+#        secret_key="$(openssl rand -base64 60 | tr -d '\n')" \
+#        postgresql_password="$(openssl rand -hex 32)" \
+#        admin_email="admin@haist.farm"
+#
+# 3. Add Pangolin route for auth-next.208.haist.farm:
+#      Update pangolin/dynamic/sentinel-vm-services.yml with the
+#      real IP of the authentik-server host (replace placeholder).
+#      Re-run pangolin-proxy.yml playbook to reload Traefik config.
+#
+# ── Post-deploy (operator) ──────────────────────────────────────────────────
+# 4. Browse to https://auth-next.208.haist.farm/if/flow/initial-setup/
+#      Complete first-run setup (set admin password, verify WebAuthn).
+#      WebAuthn/Passkeys: configure as default auth flow via Admin UI:
+#        Admin → Flows & Stages → Flows → default-authentication-flow
+#        Replace "Password Stage" with "WebAuthn Authenticator Validate Stage"
+#
+# ── Usage ───────────────────────────────────────────────────────────────────
+#   ansible-playbook -i inventory/hosts.ini playbooks/authentik.yml \
+#     -e vault_token=<scoped-vault-token>
+#
+# ── Tags ────────────────────────────────────────────────────────────────────
+#   authentik    — all tasks
+#   vault        — Vault secret fetch only
+#   deploy       — Docker Compose stack only
+#   verify       — readiness checks only
+
+- name: Deploy Authentik IdP (Phase 1 — OPS-605)
+  hosts: authentik
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: docker-host
+      tags: [docker]
+
+    - role: authentik-host
+      tags: [authentik]
+
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile.
+    # authentik.yml doesn't include common role; jit-ssh-trust adds both CA cert
+    # and principals file.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

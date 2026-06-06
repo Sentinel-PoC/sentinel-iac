@@ -1,0 +1,138 @@
+# Torrent Queue Manager (TQM) — qbit_manage configuration
+# OPS-356: Seedbox storage-overflow guard
+# OPS-1090: nohardlinks automation — remove non-Jellyfin torrents after H&R-safe floor
+# Deployed by Ansible; do NOT edit on host (changes will be overwritten).
+#
+# Purpose:
+#   1. Automatically remove freeleech torrents when disk pressure is high.
+#      Removal condition: torrent meets (Ratio > {{ tqm_max_ratio }} OR SeedingDays >= {{ tqm_max_seeding_days }})
+#        AND free space on /data drops below {{ tqm_min_free_space_gb }}GB.
+#   2. Automatically remove non-hardlinked torrents (not in Jellyfin library) after
+#      meeting the H&R-safe seed floor ({{ tqm_noHL_min_seeding_time }} min = {{ (tqm_noHL_min_seeding_time / 1440) | int }} days).
+#      These are safe to remove: a hardlinked Jellyfin media file survives its torrent data being deleted.
+#
+# Connection: http://gluetun:{{ qbittorrent_port }} (Docker DNS inside seedbox_default bridge).
+# Do NOT use 192.168.12.69 host IP — Docker bridge has no hairpin NAT. See feedback_seedbox_docker_dns_not_host_ip.
+# Auth: bypassed for 172.19.0.0/16 (Docker bridge subnet) via qBit AuthSubnetWhitelist.
+#
+# DiskUsagePercent > {{ tqm_max_disk_percent }}% condition: this is NOT a native qbit_manage field.
+# qbit_manage uses min_free_space (absolute GB) for the trigger condition.
+# The {{ tqm_max_disk_percent }}% threshold on the root partition (15G LV) is monitored separately
+# by Wazuh rule 101000 which emits an alert when any seedbox filesystem exceeds that threshold.
+# See ansible/roles/wazuh-server/files/local_rules.xml and ossec.conf.j2 (seedbox block).
+
+qbt:
+  host: "http://gluetun:{{ qbittorrent_port }}"
+  user: ""
+  pass: ""
+
+settings:
+  force_auto_tmm: false
+  tracker_error_tag: issue
+  nohardlinks_tag: noHL
+  share_limits_tag: ~share_limit
+  share_limits_min_seeding_time: 0
+  share_limits_min_num_seeds: 0
+  # OPS-1090: enable nohardlinks scan — qbit_manage will tag torrents whose data files
+  # have no other hardlinks (i.e. not present in Jellyfin library) with nohardlinks_tag (noHL).
+  check_nohardlinks: true
+  pr_limit_tags: false
+  pr_limit_count: 50
+  pr_ignore_global_limits: false
+  pr_limit_function: constant
+  notification_limit_per_run: 10
+  # Free-space trigger: run share_limits cleanup only when /data has less than
+  # {{ tqm_min_free_space_gb }}GB free. Protects NFS from being exhausted by
+  # unattended freeleech accumulation.
+  free_space:
+    - path: /data
+      min_free_space: {{ tqm_min_free_space_gb }}
+
+directory:
+  root_dir: /data/torrents
+  # save_torrents disabled — TQM does not need to copy .torrent files
+  save_torrents: false
+  remote_dir: ""
+
+# OPS-1091: mandatory cat: section — qbit_manage v4.7.0 aborts with
+# "Config Error: Category section is not completed and is mandatory"
+# if this block is absent. Map every qBittorrent category to its
+# container-internal save path (/mnt/data on host → /data in container).
+# Live categories confirmed via GET /api/v2/torrents/categories on 2026-05-30.
+# Categories with no explicit save path in qBit use the default (/data/torrents).
+cat:
+  tv-sonarr: /data/torrents
+  radarr: /data/torrents
+  freeleech: /data/torrents/freeleech
+  prowlarr: /data/torrents
+
+share_limits:
+  # OPS-356 guard: remove freeleech torrents that have seeded long enough
+  # when disk pressure exceeds the free-space threshold above.
+  # Priority 1 = evaluated first (only one rule group defined).
+  freeleech_overflow_guard:
+    priority: 1
+    include_all_tags: []
+    include_any_tags: []
+    exclude_all_tags: []
+    exclude_any_tags: []
+    categories:
+      - "{{ autobrr_freeleech_category }}"
+    # Ratio threshold: remove when upload ratio exceeds {{ tqm_max_ratio }}
+    max_ratio: {{ tqm_max_ratio }}
+    # Seeding time threshold: {{ tqm_max_seeding_days }} days in minutes
+    # ({{ tqm_max_seeding_days }} * 24 * 60 = {{ tqm_max_seeding_days * 24 * 60 }} min)
+    max_seeding_time: {{ tqm_max_seeding_days * 24 * 60 }}
+    # min_seeding_time: do not remove torrents that just started seeding
+    min_seeding_time: 0
+    # min_num_seeds: no floor on number of seeds required
+    min_num_seeds: 0
+    # cleanup: delete torrent AND data files when removing
+    cleanup: true
+    # resume_torrent_after_change: restart torrent if only category/tag was updated
+    resume_torrent_after_change: true
+    add_group_to_tag: true
+    # limit_upload_speed: -1 = no limit (rely on qBit global settings)
+    limit_upload_speed: -1
+
+  # OPS-1090: noHL cleanup — remove non-hardlinked torrents after H&R-safe seed floor.
+  # Triggered by check_nohardlinks: true above. qbit_manage tags non-hardlinked torrents
+  # with the noHL tag (nohardlinks_tag: noHL) before evaluating share_limits.
+  #
+  # H&R protection: min_seeding_time floor = {{ tqm_noHL_min_seeding_time }} min
+  # ({{ (tqm_noHL_min_seeding_time / 1440) | int }} days). Torrent is NOT eligible for
+  # removal until it has seeded at least this long, regardless of ratio.
+  # max_seeding_time == min_seeding_time: remove as soon as the floor is crossed.
+  #
+  # Priority 2 (lower than freeleech_overflow_guard at priority 1).
+  # The free_space trigger in settings still applies — cleanup only runs when
+  # /data is below {{ tqm_min_free_space_gb }}GB free.
+  #
+  # Hardlink safety: deleting torrent data for a noHL torrent cannot remove a Jellyfin
+  # media file — Jellyfin media is hardlinked (link count >= 2); noHL tag only appears
+  # on torrents whose data has link count == 1.
+  noHL_share_limits:
+    priority: 2
+    # Target ONLY torrents tagged noHL by the check_nohardlinks scan above.
+    include_any_tags:
+      - noHL
+    include_all_tags: []
+    exclude_all_tags: []
+    exclude_any_tags: []
+    categories: []
+    # H&R seed floor: torrent must have seeded at least {{ tqm_noHL_min_seeding_time }} min
+    # ({{ (tqm_noHL_min_seeding_time / 1440) | int }} days) before this rule will act.
+    # Private trackers typically require 72h–10d; 14 days covers all known requirements.
+    min_seeding_time: {{ tqm_noHL_min_seeding_time }}
+    # max_seeding_time == min_seeding_time: remove as soon as the floor is crossed.
+    max_seeding_time: {{ tqm_noHL_min_seeding_time }}
+    # min_ratio: no ratio floor — seeding-time floor alone is sufficient for H&R safety.
+    min_ratio: 0
+    # max_ratio: -1 = no ratio cap (removal is time-gated, not ratio-gated).
+    max_ratio: -1
+    min_num_seeds: 0
+    # cleanup: delete torrent AND data files on removal (disk reclaim intent).
+    cleanup: true
+    resume_torrent_after_change: true
+    add_group_to_tag: true
+    limit_upload_speed: -1

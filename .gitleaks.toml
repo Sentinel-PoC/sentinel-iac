@@ -1,0 +1,10 @@
+# Gitleaks configuration for sentinel-iac
+# Allowlist known rotated/test secrets in git history
+title = "sentinel-iac gitleaks config"
+
+[allowlist]
+  description = "Allowlisted items"
+  paths = [
+    '''\.trivyignore''',
+    '''compliance-report\.md''',
+  ]

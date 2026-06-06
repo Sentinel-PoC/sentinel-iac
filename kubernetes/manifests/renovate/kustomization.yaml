@@ -1,0 +1,14 @@
+# PLANNING ONLY — do not apply until OPS-866 runbook is operator-approved.
+# This kustomization.yaml is a planning skeleton.
+# Real manifests land in overwatch-gitops/apps/renovate/ as a Helm chart source.
+#
+# The files in this directory document the INTENDED shape:
+#   namespace.yaml      — OKD namespace for Renovate
+#   configmap-stub.yaml — ConfigMap shape; real values filled in execution child issue
+#
+# See: docs/runbooks/30-renovate-deployment.md §4 (architecture) and §6 (deployment)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - configmap-stub.yaml

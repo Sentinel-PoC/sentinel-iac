@@ -1,0 +1,164 @@
+---
+# vault-approle-agent-bootstrap tasks
+# Tracking: OPS-464 (Phase A + Phase B)
+#
+# Phase A: Write 4 narrow bootstrap Vault policies
+# Phase B: Create 4 bootstrap AppRoles + store role_ids in Vault KV
+#
+# Each bootstrap policy grants ONLY the read of that role's Keycloak client
+# credential path (secret/data/forgejo-<role>). This lets the agent call
+# Keycloak client_credentials, get a JWT, and exchange it for the runtime
+# scoped token — without ever holding a root Vault token.
+#
+# AppRole parameters per SEC-49 design doc §"What New Vault Objects Are Required":
+#   secret_id_num_uses=1  — single-use; leaked secret_id cannot be replayed
+#   secret_id_ttl=1h      — matches operator session start window
+#   token_ttl=5m          — bootstrap token lives only long enough to read KC creds
+#
+# Idempotency:
+#   - sys/policies/acl/<name>: idempotent upsert (same HCL → no effective change)
+#   - auth/approle/role/<name>: idempotent upsert (same config → no effective change)
+#   - vault_write may report changed=true on re-runs due to response-echo quirk
+#     (known behavior, documented in vault-jwt-agents role comments)
+#
+# Requires at runtime (pass via -e or environment — NOT in defaults):
+#   vault_token — Vault token with root or sys/policies/acl + auth/approle write scope
+
+# ─── Pre-flight ────────────────────────────────────────────────────────────────
+
+- name: Pre-flight | assert vault_token is provided
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<token>
+  no_log: false
+  tags: [vault-approle-bootstrap, validation]
+
+# ─── Phase A: Bootstrap Vault Policies ────────────────────────────────────────
+
+- name: "Phase A | Write bootstrap policy | agent-{{ role_item }}-bootstrap"
+  community.hashi_vault.vault_write:
+    path: "sys/policies/acl/agent-{{ role_item }}-bootstrap"
+    data:
+      policy: "{{ lookup('file', role_path + '/files/policies/agent-' + role_item + '-bootstrap.hcl') }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  tags: [vault-approle-bootstrap, policies]
+
+# ─── Phase B: Bootstrap AppRoles ──────────────────────────────────────────────
+
+- name: "Phase B | Create bootstrap AppRole | agent-{{ role_item }}-bootstrap"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_approle_mount_path }}/role/agent-{{ role_item }}-bootstrap"
+    data:
+      secret_id_num_uses: "{{ vault_bootstrap_secret_id_num_uses }}"
+      secret_id_ttl: "{{ vault_bootstrap_secret_id_ttl }}"
+      token_ttl: "{{ vault_bootstrap_token_ttl }}"
+      token_max_ttl: "{{ vault_bootstrap_token_max_ttl }}"
+      token_explicit_max_ttl: "{{ vault_bootstrap_token_explicit_max_ttl }}"
+      token_no_default_policy: "{{ vault_bootstrap_token_no_default_policy }}"
+      token_policies:
+        - "agent-{{ role_item }}-bootstrap"
+      bind_secret_id: true
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  tags: [vault-approle-bootstrap, approles]
+
+# ─── Phase B (continued): Store stable role_ids in Vault KV ──────────────────
+# The role_id is stable (like a username — not sensitive) and is needed by the
+# operator bootstrap script to mint secret_ids. Storing in Vault KV means the
+# operator bootstrap script can fetch it without hardcoding.
+#
+# Path: secret/vault/agent-<role>-bootstrap-role-id  (field: role_id)
+#
+# Each role is processed individually to avoid complex loop variable transforms.
+
+- name: "Phase B | Read role_id | agent-worker-bootstrap"
+  community.hashi_vault.vault_read:
+    path: "auth/{{ vault_approle_mount_path }}/role/agent-worker-bootstrap/role-id"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: _role_id_worker
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Store role_id | agent-worker-bootstrap"
+  community.hashi_vault.vault_write:
+    path: "secret/data/vault/agent-worker-bootstrap-role-id"
+    data:
+      data:
+        role_id: "{{ _role_id_worker.data.data.role_id }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Read role_id | agent-planner-bootstrap"
+  community.hashi_vault.vault_read:
+    path: "auth/{{ vault_approle_mount_path }}/role/agent-planner-bootstrap/role-id"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: _role_id_planner
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Store role_id | agent-planner-bootstrap"
+  community.hashi_vault.vault_write:
+    path: "secret/data/vault/agent-planner-bootstrap-role-id"
+    data:
+      data:
+        role_id: "{{ _role_id_planner.data.data.role_id }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Read role_id | agent-judge-bootstrap"
+  community.hashi_vault.vault_read:
+    path: "auth/{{ vault_approle_mount_path }}/role/agent-judge-bootstrap/role-id"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: _role_id_judge
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Store role_id | agent-judge-bootstrap"
+  community.hashi_vault.vault_write:
+    path: "secret/data/vault/agent-judge-bootstrap-role-id"
+    data:
+      data:
+        role_id: "{{ _role_id_judge.data.data.role_id }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Read role_id | agent-scribe-bootstrap"
+  community.hashi_vault.vault_read:
+    path: "auth/{{ vault_approle_mount_path }}/role/agent-scribe-bootstrap/role-id"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: _role_id_scribe
+  tags: [vault-approle-bootstrap, approles, role-ids]
+
+- name: "Phase B | Store role_id | agent-scribe-bootstrap"
+  community.hashi_vault.vault_write:
+    path: "secret/data/vault/agent-scribe-bootstrap-role-id"
+    data:
+      data:
+        role_id: "{{ _role_id_scribe.data.data.role_id }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-approle-bootstrap, approles, role-ids]

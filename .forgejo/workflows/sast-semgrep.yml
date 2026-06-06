@@ -1,0 +1,69 @@
+---
+# OPS-405: Standalone SAST semgrep gate — path-scoped PR check
+#
+# Context: OPS-204 parent added a semgrep job inside security-scan.yml
+# (security-scan.yml:611-626, commit 20c7a6e) that runs on ALL PRs.
+# That job works but is buried inside a 650-line multi-job workflow.
+# This standalone workflow makes SAST a named, discoverable CI check
+# and adds path-scoped triggering so code-touching PRs get a dedicated
+# status entry in the Forgejo PR UI.
+#
+# Pattern follows OPS-448 (ansible-lint.yml): informational-now
+# (continue-on-error: true), promote to hard gate after findings backlog
+# is triaged (tracked separately — same shape as OPS-456 for ansible-lint).
+#
+# Implementation re-uses .forgejo/actions/sast-semgrep composite action
+# (already on main since commit 20c7a6e). No DefectDojo upload in this
+# workflow — DefectDojo upload happens via security-scan.yml on main push
+# (security-scan.yml:611-626 passes defectdojo-token on push events).
+#
+# NIST controls: SA-11 (Developer Security Testing), SA-15 (Dev Process/Tools)
+name: sast-semgrep
+
+on:
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "**/*.js"
+      - "**/*.ts"
+      - "**/*.go"
+      - "**/*.sh"
+      - ".forgejo/workflows/sast-semgrep.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  semgrep:
+    # runs-on: cpu-heavy — routes to pve4 pool (OPS-618). CPU-intensive SAST scan,
+    # no iac-control local filesystem deps. pve4 pool: 3 LXCs × 2c/4GB.
+    runs-on: cpu-heavy
+    timeout-minutes: 15  # OPS-739: prevent queue stall; run #1583 blocked 1.5h
+
+    # continue-on-error: true — informational mode.
+    # Mirrors OPS-448 (ansible-lint.yml:90): report findings without blocking PRs
+    # until the existing findings backlog has been triaged. Remove this line to
+    # promote to a hard gate once the findings baseline is clean.
+    continue-on-error: true
+
+    steps:
+      # actions/checkout@v4 — matches checkout version used in all other
+      # sentinel-iac workflows (ansible-lint.yml:35, security-scan.yml).
+      - uses: actions/checkout@v4
+
+      # Re-use the composite action shipped in OPS-204 (commit 20c7a6e).
+      # Config: p/security-audit p/secrets — same ruleset as security-scan.yml:620.
+      # fail-on-findings: false — deferred to hard-gate phase (see continue-on-error note).
+      # defectdojo-token: empty — PR builds do not upload; main-push upload
+      #   is handled by the security-scan.yml semgrep job.
+      - name: SAST scan (semgrep)
+        uses: ./.forgejo/actions/sast-semgrep
+        with:
+          source-dir: .
+          semgrep-config: "p/security-audit p/secrets"
+          fail-on-findings: "false"
+          severity-threshold: "ERROR"
+          defectdojo-token: ""
+          product-name: "Sentinel IaC"
+          engagement-name: "Main Branch CI/CD — SAST"

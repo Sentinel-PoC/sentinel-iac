@@ -1,0 +1,69 @@
+---
+# Per-role workload user provisioning.
+# Called from main.yml in a loop with workload_role in {worker, judge, planner, scribe}.
+# OPS-545 / OPS-351 Phase 4.5 ships only `worker`; Phase 4.6 reuses for others.
+
+- name: Compute role index for stable UID/GID assignment
+  ansible.builtin.set_fact:
+    sentinel_workload_role_uid: >-
+      {{ sentinel_workload_user_uid_base + (
+           ['worker', 'judge', 'planner', 'scribe'].index(workload_role)
+         ) }}
+
+# Primary group must exist before user creation (Ansible user module's
+# `group:` arg requires the group to already exist; otherwise the module
+# errors with "Group <name> does not exist").
+- name: "Create per-role primary group for role: {{ workload_role }}"
+  ansible.builtin.group:
+    name: "sentinel-{{ workload_role }}"
+    gid: "{{ sentinel_workload_role_uid }}"  # GID == UID for consistency
+    state: present
+    system: false
+
+# The matching SPIRE workload entry selector is `unix:user:sentinel-<role>`.
+# Username MUST be exactly that — any deviation breaks attestation silently.
+- name: "Create user sentinel-{{ workload_role }}"
+  ansible.builtin.user:
+    name: "sentinel-{{ workload_role }}"
+    uid: "{{ sentinel_workload_role_uid }}"
+    group: "sentinel-{{ workload_role }}"  # primary group same name as user
+    groups: "{{ sentinel_workload_group }}"  # supplementary group (plural)
+    append: true  # don't strip other supplementary groups if any
+    shell: "{{ sentinel_workload_user_shell }}"
+    home: "{{ sentinel_workload_user_home_base }}/sentinel-{{ workload_role }}"
+    create_home: "{{ sentinel_workload_user_create_home }}"
+    system: false  # regular UID range per D2
+    state: present
+    comment: "Sentinel SPIRE-attested workload user (role={{ workload_role }}, OPS-545)"
+
+- name: "Ensure tight home dir mode for role: {{ workload_role }}"
+  ansible.builtin.file:
+    path: "{{ sentinel_workload_user_home_base }}/sentinel-{{ workload_role }}"
+    state: directory
+    owner: "sentinel-{{ workload_role }}"
+    group: "sentinel-{{ workload_role }}"
+    mode: "{{ sentinel_workload_user_home_mode }}"
+
+# ── Verification: confirm Linux user's supplementary group includes the plural
+# group. This is the load-bearing precondition for `unix:supplementary_group:
+# sentinel-agents` SPIRE Unix-attestor selector to match.
+- name: "[verification] Confirm user's group membership for role: {{ workload_role }}"
+  ansible.builtin.command:
+    cmd: "id -nG sentinel-{{ workload_role }}"
+  register: id_check
+  changed_when: false
+  failed_when: false  # tolerate absent user in --check (user-create simulated)
+  check_mode: false  # read-only
+
+- name: "[verification] FAIL if user is not in plural group for role: {{ workload_role }}"
+  ansible.builtin.assert:
+    that:
+      - (ansible_check_mode and id_check.rc != 0)
+        or sentinel_workload_group in (id_check.stdout | default('')).split()
+    fail_msg: >-
+      sentinel-{{ workload_role }} groups = '{{ id_check.stdout | default('?') }}'
+      (rc={{ id_check.rc }}) — does NOT contain '{{ sentinel_workload_group }}'.
+      Unix-attestor selector will NOT match. Aborting.
+    success_msg: >-
+      sentinel-{{ workload_role }} confirmed member of {{ sentinel_workload_group }},
+      or check-mode skipped real user creation.

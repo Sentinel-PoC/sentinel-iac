@@ -1,0 +1,15 @@
+---
+galaxy_info:
+  role_name: truenas_jit_ssh
+  author: sentinel-automation
+  description: >
+    OPS-759: Persist Vault SSH CA trust on TrueNAS SCALE despite middleware
+    sshd_config regeneration. Deploys fix script, systemd drop-in, and
+    TrueNAS POSTINIT entry.
+  min_ansible_version: "2.14"
+  platforms:
+    - name: TrueNAS SCALE (Linux/Debian-based)
+      versions:
+        - "25.x"
+
+dependencies: []

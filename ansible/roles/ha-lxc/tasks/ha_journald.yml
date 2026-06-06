@@ -1,0 +1,56 @@
+---
+# ha_journald.yml — Systemd-journald size cap for HA LXC (OPS-934)
+#
+# OPS-934 finding: kern.log.1 = 123M inside HA LXC 201 (AppArmor audit
+# message storm). No journald size cap was configured, allowing unbounded
+# log growth. This task deploys a drop-in conf that limits journal on-disk
+# usage to ha_journald_system_max_use (default 200M).
+#
+# Pattern: render drop-in to PVE host temp path, push into LXC via pct push,
+# then signal journald to apply the new limit (vacuum via pct exec).
+#
+# Ref: https://www.freedesktop.org/software/systemd/man/journald.conf.html
+
+# ── Create journald conf.d drop-in directory inside LXC ──────────────────────
+
+- name: Ensure journald drop-in directory exists inside HA LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p /etc/systemd/journald.conf.d"
+  changed_when: false
+  tags: [ha-lxc, ha-journald]
+
+# ── Write drop-in to PVE host temp path ──────────────────────────────────────
+
+- name: Write journald 10-maxuse.conf to PVE host temp path
+  ansible.builtin.copy:
+    dest: /tmp/ha-journald-10-maxuse.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Ansible managed — OPS-934 ha-lxc role
+      # Caps on-disk journal size to prevent unbounded log growth.
+      # OPS-934 evidence: kern.log.1 = 123M in HA LXC 201 (AppArmor audit storm).
+      [Journal]
+      SystemMaxUse={{ ha_journald_system_max_use }}
+  tags: [ha-lxc, ha-journald]
+
+# ── Push drop-in into LXC ─────────────────────────────────────────────────────
+
+- name: Push journald drop-in into HA LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ ha_lxc_id }}
+      /tmp/ha-journald-10-maxuse.conf
+      /etc/systemd/journald.conf.d/10-maxuse.conf
+  changed_when: true
+  notify: Restart journald in HA LXC
+  tags: [ha-lxc, ha-journald]
+
+# ── Cleanup temp file ─────────────────────────────────────────────────────────
+
+- name: Remove journald temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-journald-10-maxuse.conf
+    state: absent
+  tags: [ha-lxc, ha-journald]

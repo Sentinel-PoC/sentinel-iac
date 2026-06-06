@@ -1,0 +1,85 @@
+---
+# tls-cert-provision.yml — SEC-88
+#
+# Extract the *.208.haist.farm wildcard TLS certificate from Pangolin's
+# Traefik acme.json and deploy it to MinIO's --certs-dir.
+#
+# MinIO expects PEM files named public.crt (fullchain) and private.key in the
+# configured --certs-dir.  With these in place MinIO serves HTTPS-only on :9000.
+#
+# Run pattern:
+#   1. Slurp acme.json from Pangolin (delegate_to: {{ minio_tls_pangolin_host }})
+#   2. Extract base64-encoded cert and key via Ansible Jinja2 filters
+#   3. Write public.crt (0644) and private.key (0600) owned by minio-user to
+#      {{ minio_certs_dir }}
+#
+# Renewal:  Let's Encrypt wildcard cert from Cloudflare DNS-01 auto-renews on
+# Pangolin (Traefik ACME).  Re-run this task (tag: minio-tls) after renewal to
+# push the refreshed cert/key.  Cert expiry: ~90 days.
+#
+# Prerequisite:  Pangolin must be in the Ansible inventory as
+# {{ minio_tls_pangolin_host }} (default: pangolin-proxy) and the control node
+# must be able to SSH there.
+#
+# Mirror of: ansible/roles/forgejo-server/tasks/tls-cert-provision.yml (OPS-779)
+
+- name: Create MinIO TLS certs directory
+  ansible.builtin.file:
+    path: "{{ minio_certs_dir }}"
+    state: directory
+    owner: minio-user
+    group: minio-user
+    mode: "0700"
+  tags: [minio, minio-tls, tls]
+
+- name: Slurp Traefik acme.json from Pangolin
+  ansible.builtin.slurp:
+    src: "{{ minio_tls_acme_json_path }}"
+  delegate_to: "{{ minio_tls_pangolin_host }}"
+  become: true
+  register: minio_acme_json_raw
+  no_log: true
+  tags: [minio, minio-tls, tls]
+
+- name: Extract wildcard cert and key from acme.json
+  ansible.builtin.set_fact:
+    minio_tls_cert_pem: >-
+      {{ (minio_acme_json_raw['content'] | b64decode | from_json).values()
+         | map(attribute='Certificates')
+         | flatten
+         | selectattr('domain.main', 'equalto', minio_tls_cert_domain)
+         | map(attribute='certificate')
+         | first
+         | b64decode }}
+    minio_tls_key_pem: >-
+      {{ (minio_acme_json_raw['content'] | b64decode | from_json).values()
+         | map(attribute='Certificates')
+         | flatten
+         | selectattr('domain.main', 'equalto', minio_tls_cert_domain)
+         | map(attribute='key')
+         | first
+         | b64decode }}
+  no_log: true
+  tags: [minio, minio-tls, tls]
+
+- name: Deploy TLS certificate (fullchain) to MinIO certs dir
+  ansible.builtin.copy:
+    content: "{{ minio_tls_cert_pem }}"
+    dest: "{{ minio_certs_dir }}/public.crt"
+    owner: minio-user
+    group: minio-user
+    mode: "0644"
+  no_log: true
+  notify: Restart minio
+  tags: [minio, minio-tls, tls]
+
+- name: Deploy TLS private key to MinIO certs dir
+  ansible.builtin.copy:
+    content: "{{ minio_tls_key_pem }}"
+    dest: "{{ minio_certs_dir }}/private.key"
+    owner: minio-user
+    group: minio-user
+    mode: "0600"
+  no_log: true
+  notify: Restart minio
+  tags: [minio, minio-tls, tls]

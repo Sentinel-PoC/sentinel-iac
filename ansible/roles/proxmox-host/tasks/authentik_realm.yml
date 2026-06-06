@@ -1,0 +1,99 @@
+---
+# authentik_realm.yml — OPS-981
+# Idempotent provisioning of the Authentik OIDC realm on a standalone PVE node.
+#
+# Background: the 3-node PVE cluster (pve/pve2/pve3) has a shared realm config
+# in /etc/pve/domains.cfg. pve4-alienware is NOT a cluster member, so it needs
+# the realm added locally via pveum.
+#
+# This task mirrors the cluster realm config from OPS-634:
+#   issuer-url:        https://auth-next.208.haist.farm/application/o/proxmox/
+#   client-id/key:     Vault: secret/authentik/clients/pve
+#   username-claim:    email (matches OPS-634 cluster config)
+#   autocreate:        1 (creates PVE user on first SSO login; no roles assigned)
+#   groups-autocreate: 1 (creates PVE groups from Authentik group claims)
+#   groups-claim:      groups
+#   default:           0 — pam remains default on standalone nodes (operator safety)
+#
+# Operator note: after first SSO login, grant the user a PVE role:
+#   pveum aclmod / --user <email>@authentik --role PVEAdmin
+#
+# Authentik side prerequisite: the Authentik OAuth2 provider (pk=20, slug: proxmox)
+# must have this node's redirect_uri registered. For pve4: https://192.168.12.60:8006
+# was added to provider pk=20 in OPS-981.
+#
+# Idempotency: pvesh get pre-check skips pveum realm add if realm already exists.
+
+# ── 1. Read Authentik client credentials from Vault ───────────────────────────
+
+- name: "Authentik realm | Read Authentik PVE client credentials from Vault"
+  community.hashi_vault.vault_kv2_get:
+    engine_mount_point: secret
+    path: authentik/clients/pve
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+    validate_certs: false
+  register: _pve_authentik_vault
+  no_log: true
+  when: pve4_authentik_realm_enabled | default(false)
+  tags: [proxmox, authentik-realm]
+
+- name: "Authentik realm | Set credential facts"
+  ansible.builtin.set_fact:
+    pve_authentik_client_id: "{{ _pve_authentik_vault.secret.client_id }}"
+    pve_authentik_client_secret: "{{ _pve_authentik_vault.secret.client_secret }}"
+  no_log: true
+  when: pve4_authentik_realm_enabled | default(false)
+  tags: [proxmox, authentik-realm]
+
+# ── 2. Check if realm already exists ─────────────────────────────────────────
+
+- name: "Authentik realm | Check if authentik realm already registered"
+  ansible.builtin.command:
+    cmd: "pvesh get /access/domains/authentik"
+  register: pve_realm_check
+  changed_when: false
+  failed_when: false
+  when: pve4_authentik_realm_enabled | default(false)
+  tags: [proxmox, authentik-realm]
+
+# ── 3. Create realm if absent ─────────────────────────────────────────────────
+
+- name: "Authentik realm | Add Authentik OIDC realm to PVE (pveum realm add)"
+  ansible.builtin.command:
+    cmd: >
+      pveum realm add authentik
+      --type openid
+      --issuer-url {{ pve4_authentik_issuer_url }}
+      --client-id {{ pve_authentik_client_id }}
+      --client-key {{ pve_authentik_client_secret }}
+      --username-claim {{ pve4_authentik_username_claim }}
+      --autocreate 1
+      --groups-autocreate 1
+      --groups-claim {{ pve4_authentik_groups_claim }}
+      --default 0
+      --comment "Authentik via auth-next.208.haist.farm; OPS-634/OPS-981"
+  register: pve_realm_add
+  changed_when: pve_realm_add.rc == 0
+  no_log: true
+  when:
+    - pve4_authentik_realm_enabled | default(false)
+    - pve_realm_check.rc != 0
+  tags: [proxmox, authentik-realm]
+
+# ── 4. Verify realm is present ────────────────────────────────────────────────
+
+- name: "Authentik realm | Verify realm is registered in PVE"
+  ansible.builtin.command:
+    cmd: "pvesh get /access/domains/authentik"
+  register: pve_realm_verify
+  changed_when: false
+  when: pve4_authentik_realm_enabled | default(false)
+  tags: [proxmox, authentik-realm, verify]
+
+- name: "Authentik realm | Show realm config"
+  ansible.builtin.debug:
+    msg: "Authentik realm registered: {{ pve_realm_verify.stdout | default('no output') }}"
+  when: pve4_authentik_realm_enabled | default(false)
+  tags: [proxmox, authentik-realm, verify]

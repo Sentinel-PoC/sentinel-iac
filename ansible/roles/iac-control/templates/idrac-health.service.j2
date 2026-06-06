@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=iDRAC Hardware Health Check via Redfish
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/idrac-health-check.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=idrac-health
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

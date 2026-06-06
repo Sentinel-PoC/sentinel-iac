@@ -1,0 +1,27 @@
+---
+# OPS-759: TrueNAS JIT SSH CA persistence defaults.
+#
+# TrueNAS SCALE middleware regenerates /etc/ssh/sshd_config on service restart,
+# stripping any manually added directives including TrustedUserCAKeys. The fix
+# uses a script in /etc/ (which middleware does not manage) triggered via a
+# systemd ExecStartPost drop-in plus a TrueNAS POSTINIT script for boot coverage.
+
+# Path on the Ansible controller to the Vault SSH CA public key file.
+# Defaults to the same infrastructure/ source used by roles/jit-ssh-trust.
+truenas_jit_ssh_ca_pubkey_src: "{{ playbook_dir }}/../../infrastructure/vault-dr/ssh-ca-public-key.pub"
+
+# Destination path on TrueNAS for the CA public key.
+# /data is a ZFS dataset that persists across middleware regeneration cycles.
+truenas_jit_ssh_ca_key_dest: /data/vault-ssh-ca.pem
+
+# Destination path for the principals directory on TrueNAS.
+truenas_jit_ssh_principals_dir: /data/auth_principals
+
+# Path for the fix script. /etc/ is not managed by TrueNAS middleware.
+truenas_jit_ssh_script_dest: /etc/fix-sshd-ca.sh
+
+# Systemd drop-in path for the SSH service.
+truenas_jit_ssh_dropin_dir: /etc/systemd/system/ssh.service.d
+
+# TrueNAS POSTINIT script comment (used to identify and deduplicate the entry).
+truenas_jit_ssh_postinit_comment: "OPS-759: Patch sshd_config TrustedUserCAKeys at boot (also handled by ExecStartPost drop-in for service restarts)"

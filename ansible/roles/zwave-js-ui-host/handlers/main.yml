@@ -1,0 +1,11 @@
+---
+# handlers/main.yml — zwave-js-ui-host role (OPS-585)
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart zwave-js-ui
+  ansible.builtin.systemd:
+    name: zwave-js-ui
+    state: restarted

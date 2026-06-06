@@ -1,0 +1,50 @@
+---
+# suricata-nids/tasks/configure.yml — OPS-569
+# Deploy Suricata configuration: AF_PACKET capture, eve.json, PCAP rotation
+
+- name: Ensure Suricata log directory exists
+  ansible.builtin.file:
+    path: "{{ suricata_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - suricata
+    - config
+
+- name: Ensure Suricata PCAP capture directory exists
+  ansible.builtin.file:
+    path: "{{ suricata_pcap_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: suricata_pcap_log_enabled
+  tags:
+    - suricata
+    - config
+
+- name: Ensure Suricata rules directory exists
+  ansible.builtin.file:
+    path: "{{ suricata_rules_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - suricata
+    - config
+
+- name: Deploy Suricata main configuration
+  ansible.builtin.template:
+    src: suricata.yaml.j2
+    dest: "{{ suricata_config_dir }}/suricata.yaml"
+    owner: root
+    group: root
+    mode: "0640"
+    validate: "suricata -T -c %s"
+  notify: restart suricata
+  tags:
+    - suricata
+    - config

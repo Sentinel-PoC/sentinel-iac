@@ -1,0 +1,34 @@
+# ansible/roles/mirror-registry/defaults/main.yml
+#
+# PLACEHOLDER — defaults will be populated after OPS-148 capacity decision.
+# See Plane OPS-148 BLOCKER comment (ID 699f948a-bf13-4a01-920e-be880776a2cf).
+
+mirror_registry_hostname: "mirror.208.haist.farm"
+mirror_registry_fqdn: "mirror-registry-01.208.haist.farm"
+mirror_registry_ip: "192.168.12.215"
+mirror_registry_quay_port: 8443
+mirror_registry_storage_root: "/var/lib/quay-storage"
+mirror_registry_postgres_root: "/var/lib/quay-postgres"
+mirror_registry_sqlite_root: "/var/lib/sqlite"
+mirror_registry_cert_dir: "/etc/quay-install"
+# OPS-237: runtime cert dir — bind-mounted into Quay container at
+# /quay-registry/conf/stack. mirror_registry_cert_dir above is the install-time
+# directory used by the mirror-registry installer binary; certs placed there
+# do NOT affect the running service. TLS rotation tasks must target the
+# runtime path below.
+mirror_registry_runtime_config_dir: "/var/lib/quay-storage/quay-config"
+mirror_registry_vault_pki_role: "208-haist-farm"
+mirror_registry_admin_user: "sentinel-mirror-admin"
+
+# Dual-home OKD NIC — OPS-148 (2026-04-28)
+# Second NIC on OKD 10.0.0.0/24 for direct L2 reachability from OKD masters
+# without traversing iac-control as a router.
+mirror_registry_okd_ip: "10.0.0.50"
+mirror_registry_okd_cidr: "10.0.0.50/24"
+mirror_registry_okd_interface: "eth1"
+mirror_registry_okd_nm_connection: "okd-internal"
+mirror_registry_okd_firewalld_zone: "okd-internal"
+mirror_registry_okd_mac: "BC:24:11:F8:01:9C"
+
+# Storage paths — node/pool assignment TBD pending operator capacity decision
+# mirror_registry_data_disk: TBD (local-lvm on pve3, BACKUP_PROX on 208-pve2, or VAST on 208-pve2)

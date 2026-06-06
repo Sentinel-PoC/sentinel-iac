@@ -1,0 +1,59 @@
+---
+- name: Restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+
+- name: Load audit rules
+  ansible.builtin.command:
+    cmd: augenrules --load
+  register: augenrules_result
+  failed_when: false
+  changed_when: augenrules_result.rc == 0
+  when: auditd_enabled
+
+- name: Warn if audit rules need reboot
+  ansible.builtin.debug:
+    msg: "Audit rules updated but may need reboot to take effect (immutable flag -e 2)"
+  when:
+    - auditd_enabled
+    - augenrules_result is defined
+    - augenrules_result.rc is defined
+    - augenrules_result.rc != 0
+
+- name: Restart auditd
+  ansible.builtin.service:
+    name: auditd
+    state: restarted
+  when: auditd_enabled
+
+- name: Restart journald
+  ansible.builtin.service:
+    name: systemd-journald
+    state: restarted
+
+- name: Restart rsyslog
+  ansible.builtin.service:
+    name: rsyslog
+    state: restarted
+
+- name: Restart chrony
+  ansible.builtin.service:
+    name: chrony
+    state: restarted
+
+- name: Update grub
+  ansible.builtin.command:
+    cmd: update-grub
+  changed_when: true
+
+- name: Apply sysctl hardening
+  ansible.builtin.command:
+    cmd: sysctl -p /etc/sysctl.d/99-sentinel-hardening.conf
+  changed_when: true
+
+- name: Enable sysctl reapply service
+  ansible.builtin.systemd:
+    name: sentinel-sysctl-reapply.service
+    enabled: true
+    daemon_reload: true

@@ -1,0 +1,88 @@
+---
+# truenas-zfs | snapshot_prune — prune old snapshots beyond retention count (OPS-947)
+#
+# SAFETY GATE: This task requires confirm_destroy: true to execute any deletions.
+# Default confirm_destroy: false means this task logs a warning and skips.
+#
+# Only deletes snapshots whose name starts with truenas_zfs_snapshot_prune_prefix
+# so unrelated snapshots (e.g. created by TrueNAS periodic tasks) are untouched.
+
+- name: truenas-zfs/snapshot_prune | validate dataset is set
+  ansible.builtin.assert:
+    that:
+      - truenas_zfs_snapshot_dataset | length > 0
+    fail_msg: "truenas_zfs_snapshot_dataset must be set"
+
+- name: truenas-zfs/snapshot_prune | SAFETY GATE — warn and skip if confirm_destroy not set
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPING snapshot prune for {{ truenas_zfs_snapshot_dataset }}.
+      Set confirm_destroy: true to enable deletion of snapshots beyond retention count
+      ({{ truenas_zfs_snapshot_retention_count }}).
+  when: not confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-zfs/snapshot_prune | list existing snapshots for dataset
+  ansible.builtin.uri:
+    url: >-
+      {{ truenas_url }}/api/v2.0/zfs/snapshot?dataset={{
+        truenas_zfs_snapshot_dataset | urlencode }}&extra.retrieve_children=false
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_zfs_all_snapshots
+  when: confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-zfs/snapshot_prune | filter and sort managed snapshots
+  ansible.builtin.set_fact:
+    truenas_zfs_managed_snapshots: >-
+      {{
+        truenas_zfs_all_snapshots.json
+        | selectattr('name', 'search', truenas_zfs_snapshot_prune_prefix ~ '-')
+        | sort(attribute='properties.createtxg.value', reverse=False)
+        | list
+      }}
+  when: confirm_destroy | bool
+
+- name: truenas-zfs/snapshot_prune | report snapshot count before prune
+  ansible.builtin.debug:
+    msg: >-
+      Dataset {{ truenas_zfs_snapshot_dataset }}:
+      {{ truenas_zfs_managed_snapshots | length }} managed snapshots
+      (prefix={{ truenas_zfs_snapshot_prune_prefix }},
+      retention={{ truenas_zfs_snapshot_retention_count }},
+      to_delete={{ [(truenas_zfs_managed_snapshots | length) - truenas_zfs_snapshot_retention_count, 0] | max }})
+  when: confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-zfs/snapshot_prune | delete oldest snapshots beyond retention
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/zfs/snapshot/id/{{ item.id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: [200, 204]
+  loop: >-
+    {{
+      truenas_zfs_managed_snapshots[:
+        [(truenas_zfs_managed_snapshots | length) - truenas_zfs_snapshot_retention_count, 0] | max
+      ]
+    }}
+  when:
+    - confirm_destroy | bool
+    - (truenas_zfs_managed_snapshots | length) > truenas_zfs_snapshot_retention_count
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: truenas-zfs/snapshot_prune | report retained snapshot count
+  ansible.builtin.debug:
+    msg: >-
+      Prune complete. Retained:
+      {{ [truenas_zfs_managed_snapshots | length, truenas_zfs_snapshot_retention_count] | min }}
+      snapshot(s) for {{ truenas_zfs_snapshot_dataset }}
+  when: confirm_destroy | bool
+  changed_when: false

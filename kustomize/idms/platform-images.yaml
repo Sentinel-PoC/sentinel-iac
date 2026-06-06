@@ -1,0 +1,87 @@
+# ImageDigestMirrorSet — Harbor-primary, mirror-fallback
+#
+# Plane issue: OPS-150
+# Design baseline: docs/research-april-power-incident/OPS-147-mw1-registry-split-runbook.md §5
+# Runbook draft: docs/research-april-power-incident/yaml/idms.yaml
+#
+# Two intents bundled in one IDMS:
+#
+# 1. App images (sentinel/*): cluster pulls primarily from Harbor; if Harbor
+#    is unreachable, cri-o falls back to the off-cluster mirror at
+#    mirror.208.haist.farm/sentinel-mirror. mirrorSourcePolicy is
+#    AllowContactingSource — the primary path remains live during normal ops.
+#    The "source" is harbor.208.haist.farm/sentinel because that is the path
+#    our deployments and Helm charts already reference. The fallback applies
+#    only when Harbor's /v2/ is unreachable.
+#
+# 2. Platform/release images (quay.io/openshift-release-dev,
+#    registry.redhat.io, quay.io for Kyverno/cert-manager/etc): cluster pulls
+#    EXCLUSIVELY from the off-cluster mirror. mirrorSourcePolicy is
+#    NeverContactSource — the cluster operates in an air-gapped posture
+#    with no public-internet egress. This prevents a misconfiguration from
+#    silently contacting upstream public registries.
+#
+# Apply: OKD 4.19. Schema: config.openshift.io/v1.
+#
+# IMPORTANT: Applying this IDMS triggers an MCO rollout. Masters reboot
+# one at a time (drain + reboot). Plan as a maintenance window. The cluster
+# admission path remains up across the rollout.
+#
+# Prerequisites:
+#   - OPS-148: off-cluster mirror-registry provisioned at mirror.208.haist.farm
+#   - OPS-147: runbook reviewed and MW1 window scheduled
+#   - mirror-registry populated via oc-mirror v2 before applying NeverContactSource entries
+#
+# Acceptance criteria (operator):
+#   - MCO renders /etc/containers/registries.conf.d/ entries on every node
+#   - `oc debug node/<n>` shows correct mirror order for quay.io,
+#     registry.redhat.io, and quay.io/openshift-release-dev
+#   - Recovery drill: scale Harbor to zero, kill an arbitrary platform pod,
+#     confirm cri-o pulls from off-cluster mirror and pod restarts
+#   - NeverContactSource: with both registries unreachable, pull fails
+#     (does not silently contact upstream)
+#
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: platform-images
+  annotations:
+    sentinel.haist.farm/issue: OPS-150
+    sentinel.haist.farm/runbook: docs/research-april-power-incident/OPS-147-mw1-registry-split-runbook.md
+spec:
+  imageDigestMirrors:
+    # ---- App images: Harbor primary, mirror fallback ----
+    - source: harbor.208.haist.farm/sentinel
+      mirrors:
+        - mirror.208.haist.farm/sentinel-mirror
+      mirrorSourcePolicy: AllowContactingSource
+
+    # ---- OKD release content: mirror only (NeverContactSource = no public egress) ----
+    - source: quay.io/openshift-release-dev
+      mirrors:
+        - mirror.208.haist.farm/openshift-release-dev
+      mirrorSourcePolicy: NeverContactSource
+    - source: quay.io/okd
+      mirrors:
+        - mirror.208.haist.farm/okd
+      mirrorSourcePolicy: NeverContactSource
+
+    # ---- Red Hat ecosystem (Kyverno, cert-manager, GitOps source images): mirror only ----
+    - source: registry.redhat.io
+      mirrors:
+        - mirror.208.haist.farm/redhat
+      mirrorSourcePolicy: NeverContactSource
+
+    # ---- Community/upstream platform images: mirror only ----
+    - source: ghcr.io/kyverno
+      mirrors:
+        - mirror.208.haist.farm/kyverno
+      mirrorSourcePolicy: NeverContactSource
+    - source: quay.io/jetstack
+      mirrors:
+        - mirror.208.haist.farm/jetstack
+      mirrorSourcePolicy: NeverContactSource
+    - source: docker.io/bitnami
+      mirrors:
+        - mirror.208.haist.farm/bitnami
+      mirrorSourcePolicy: NeverContactSource

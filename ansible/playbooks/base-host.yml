@@ -1,0 +1,100 @@
+---
+# OPS-507: minimal "apply base hardening" playbook for hosts that need only
+# the common role — no VM-class-specific overlay (docker-host, seedbox, etc.).
+#
+# Initial use case: 208-pi-001 (Raspberry Pi 5, ARM64, Ubuntu 24.04 LTS)
+# onboarding to sentinel-iac. The common role handles SSH CA trust, sshd
+# hardening (cert-only auth), AIDE, auditd, chrony/time-sync, ufw,
+# AuthorizedPrincipals mapping, and includes the wazuh-agent role at end.
+#
+# Pre-task (OPS-507): remove qemu-guest-agent if previously installed.
+# Bare-metal Pi-class hosts have no QGA peer; the common role's first apply
+# (before OPS-514's gate landed) installed qemu-guest-agent on the Pi where
+# it serves no purpose. This pre-task is a one-shot cleanup; it's a no-op
+# once the package is gone (idempotent via state: absent).
+#
+# Post-task (OPS-505): override systemd-resolved DNS upstream to point at
+# iac-control's dnsmasq (192.168.12.210) for haist.farm queries only. The
+# default UCG (192.168.12.1) returns the Pangolin VIP for any *.haist.farm
+# name due to its wildcard DNS — broken for internal services. The
+# `Domains=~haist.farm` (routed-domain) syntax means 192.168.12.210 is
+# authoritative ONLY for haist.farm; internet DNS continues to use whatever
+# upstream NM hands to systemd-resolved.
+#
+# Usage:
+#   ansible-playbook playbooks/base-host.yml -l 208-pi-001 --diff --check \
+#       -e "ansible_become_password=<from operator>"
+#   ansible-playbook playbooks/base-host.yml -l 208-pi-001 \
+#       -e "ansible_become_password=<from operator>"
+# After first apply, ubuntu user is created with NOPASSWD sudo; subsequent
+# runs can use -u ubuntu without the password.
+
+- name: Apply base-host hardening (common role) and Pi-class DNS overrides
+  hosts: edge_devices
+  become: true
+
+  pre_tasks:
+    # OPS-507 cleanup: clear qemu-guest-agent residue from pre-OPS-514 applies.
+    # OPS-514 (merged 2026-05-11) added a gate so future common-role applies
+    # skip qemu-guest-agent install on bare-metal/Pi hosts. This pre_task
+    # removes the package on edge_devices hosts where prior applies left it
+    # installed. Idempotent — no-op once the package is gone.
+    - name: Remove qemu-guest-agent (no QGA peer on bare-metal Pi)
+      ansible.builtin.apt:
+        name: qemu-guest-agent
+        state: absent
+        purge: true
+      tags:
+        - cleanup
+        - ops-507
+
+  roles:
+    - role: common
+      tags: [common]
+
+  post_tasks:
+    # --- OPS-505: systemd-resolved DNS override for haist.farm ---
+    # The Pi's default systemd-resolved upstream (192.168.12.1, UCG) returns
+    # the Pangolin VIP for *.haist.farm wildcards — breaks internal service
+    # name resolution. Route haist.farm queries to iac-control's dnsmasq
+    # (192.168.12.210) explicitly using systemd-resolved's routed-domain
+    # syntax (~haist.farm). The drop-in pattern survives package updates and
+    # doesn't conflict with cloud-init or NetworkManager.
+    - name: Ensure /etc/systemd/resolved.conf.d exists
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags:
+        - dns
+        - ops-505
+
+    - name: Configure systemd-resolved upstream for haist.farm (OPS-505)
+      ansible.builtin.copy:
+        dest: /etc/systemd/resolved.conf.d/50-sentinel-haist-farm.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ansible — sentinel-iac base-host playbook (OPS-507/OPS-505)
+          # Route haist.farm queries to iac-control's dnsmasq (192.168.12.210).
+          # The leading ~ on Domains makes 192.168.12.210 authoritative for
+          # haist.farm queries only; other queries continue using the default
+          # uplink DNS from NetworkManager. Without this, default DNS via UCG
+          # (192.168.12.1) returns the Pangolin VIP for any *.haist.farm name
+          # (Pangolin DNS wildcard) — breaks internal service resolution.
+          [Resolve]
+          DNS=192.168.12.210
+          Domains=~haist.farm
+      notify: Restart systemd-resolved
+      tags:
+        - dns
+        - ops-505
+
+  handlers:
+    - name: Restart systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        state: restarted

@@ -1,0 +1,231 @@
+---
+# pve4-alienware — standalone Proxmox host baseline hardening
+# OPS-492: Onboard pve4-alienware (192.168.12.60)
+#
+# DESIGN NOTE: common role is NOT applied here because it sets
+# AuthorizedKeysFile=none (cert-only auth), which breaks key-based root
+# login required for Ansible management of PVE hosts. This matches the
+# existing platform pattern: cluster PVE nodes (pve, 208-pve2, pve3) also
+# skip common. See OPS-492 Plane comments for full rationale.
+# JIT cert support for ubuntu principal is set up here via SSH CA trust tasks;
+# full common hardening can be backfilled once Vault SSH role allows root principal.
+#
+# Roles applied:
+#   1. wazuh-agent            — SIEM agent for security telemetry (NIST AU-6, AU-12)
+#   2. chrony-client          — NTP time sync to iac-control + vault-server
+#   3. proxmox-host           — nftables firewall: SSH(22), PVE API(8006), SPICE(3128), VNC(5900-5999)
+#                               pve_cluster_nodes=[] (host_vars): standalone, no cluster peers
+#   4. proxmox-gpu-passthrough — OPS-492 Phase 4: AMD IOMMU + VFIO for RTX 3060 LHR passthrough
+#                               gpu_passthrough_enabled=true (host_vars), ids: 10de:2504,10de:228e
+#                               Triggers reboot on first apply (GRUB + initramfs update required)
+#
+# Post-tasks apply the specific common bits that are safe for root-user PVE hosts:
+#   - SSH CA trust (TrustedUserCAKeys): enables JIT cert auth for ubuntu principal
+#   - SSH banner (issue.net): operator MOTD
+#   - Root password: fetched from Vault secret/proxmox/pve4-alienware-root-password
+#
+# Run dry-run:
+#   ansible-playbook --check --diff -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware ansible/playbooks/pve4-alienware.yml
+#
+# Apply:
+#   VAULT_TOKEN=<token> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware ansible/playbooks/pve4-alienware.yml
+
+- name: Baseline hardening for pve4-alienware standalone PVE host
+  hosts: pve4-alienware
+  # ansible_user=root (host_vars) — become=false; tasks run directly as root
+  become: false
+  gather_facts: true
+
+  pre_tasks:
+    - name: Verify Proxmox host (Debian-based)
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+        fail_msg: "This playbook is for Proxmox (Debian-based) hosts only"
+      tags:
+        - always
+
+    - name: Display target host
+      ansible.builtin.debug:
+        msg: "Configuring {{ inventory_hostname }} ({{ ansible_host }}) — standalone Proxmox, Debian {{ ansible_distribution_version }}"
+      tags:
+        - always
+
+    # --- Proxmox apt repository setup ---
+    # Fresh Proxmox installs have enterprise repos (require paid subscription).
+    # Replace pve-enterprise with no-subscription repo; disable ceph enterprise repo.
+    # Proxmox 9.x (Debian 13 trixie) — node is standalone, no Ceph needed.
+    - name: Deploy Proxmox no-subscription apt sources (OPS-492)
+      ansible.builtin.copy:
+        content: |
+          Types: deb
+          URIs: http://download.proxmox.com/debian/pve
+          Suites: trixie
+          Components: pve-no-subscription
+          Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+        dest: /etc/apt/sources.list.d/pve-no-subscription.sources
+        owner: root
+        group: root
+        mode: "0644"
+      tags:
+        - apt
+        - proxmox
+
+    - name: Remove Proxmox enterprise sources file (OPS-492)
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/pve-enterprise.sources
+        state: absent
+      tags:
+        - apt
+        - proxmox
+
+    - name: Remove Ceph enterprise sources file — not needed on standalone node (OPS-492)
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/ceph.sources
+        state: absent
+      tags:
+        - apt
+        - proxmox
+
+    - name: Update apt cache after repo changes
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+      tags:
+        - apt
+        - proxmox
+
+  roles:
+    - role: wazuh-agent
+      tags:
+        - wazuh
+        - siem
+
+    - role: chrony-client
+      tags:
+        - chrony-client
+        - ntp
+
+    - role: proxmox-host
+      tags:
+        - proxmox
+        - firewall
+        - nftables
+
+    - role: proxmox-gpu-passthrough
+      tags:
+        - gpu-passthrough
+        - iommu
+        - vfio
+
+  post_tasks:
+    # --- SSH CA trust ---
+    # Enables Vault-signed JIT SSH cert auth for ubuntu principal (NIST IA-2, IA-3)
+    # AuthorizedPrincipalsFile NOT configured (requires common role, which conflicts
+    # with PVE root-user auth model). JIT certs work once Vault SSH role allows root.
+    - name: Ensure sshd_config.d directory exists
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags:
+        - ssh
+        - vault-ssh
+
+    - name: Deploy Vault SSH CA public key
+      ansible.builtin.copy:
+        content: "{{ vault_ssh_ca_public_key }}\n"
+        dest: /etc/ssh/trusted-ca.pem
+        owner: root
+        group: root
+        mode: "0644"
+      when: vault_ssh_ca_public_key | length > 0
+      notify: Restart sshd
+      tags:
+        - ssh
+        - vault-ssh
+
+    - name: Configure sshd TrustedUserCAKeys directive
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?TrustedUserCAKeys\s'
+        line: "TrustedUserCAKeys /etc/ssh/trusted-ca.pem"
+        state: present
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+      tags:
+        - ssh
+        - vault-ssh
+
+    # --- SSH banner (MOTD) ---
+    - name: Deploy SSH banner to /etc/issue.net
+      ansible.builtin.copy:
+        content: |
+          # Ansible managed
+          *********************************************************************
+          *                    AUTHORIZED USE ONLY                            *
+          *                                                                   *
+          *  This system is the property of Project Sentinel.                 *
+          *  Unauthorized access is prohibited and will be prosecuted.        *
+          *                                                                   *
+          *  All activity on this system is monitored and logged.             *
+          *  By continuing, you consent to monitoring and recording.          *
+          *********************************************************************
+        dest: /etc/issue.net
+        owner: root
+        group: root
+        mode: "0644"
+      tags:
+        - ssh
+        - banner
+
+    - name: Configure sshd Banner directive
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?Banner\s'
+        line: "Banner /etc/issue.net"
+        state: present
+        validate: "sshd -t -f %s"
+      notify: Restart sshd
+      tags:
+        - ssh
+        - banner
+
+    # --- Root password from Vault ---
+    # Fetches from secret/proxmox/pve4-alienware-root-password and sets root password.
+    # Requires VAULT_TOKEN env var with access to secret/proxmox/.
+    # no_log: true prevents password appearing in Ansible output.
+    - name: Fetch pve4-alienware root password from Vault
+      ansible.builtin.command:
+        cmd: >
+          vault kv get -field=password
+          secret/proxmox/pve4-alienware-root-password
+      delegate_to: localhost
+      environment:
+        VAULT_ADDR: "https://192.168.12.206:8200"
+        VAULT_SKIP_VERIFY: "true"
+        VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+      register: pve4_root_password_result
+      no_log: true
+      changed_when: false
+      tags:
+        - root-password
+        - vault
+
+    - name: Set root password from Vault
+      ansible.builtin.user:
+        name: root
+        password: "{{ pve4_root_password_result.stdout | password_hash('sha512') }}"
+      no_log: true
+      tags:
+        - root-password
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted

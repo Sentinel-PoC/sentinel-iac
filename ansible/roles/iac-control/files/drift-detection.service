@@ -1,0 +1,10 @@
+[Unit]
+Description=Ansible Configuration Drift Detection
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/scripts/drift-detection.sh
+StandardOutput=journal
+StandardError=journal

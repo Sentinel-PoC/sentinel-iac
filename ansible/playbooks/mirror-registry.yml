@@ -1,0 +1,43 @@
+---
+# Playbook: configure mirror-registry VM (Quay container registry on Rocky Linux).
+#
+# Targets the `mirror_registry` group from inventory/hosts.yml
+# (currently: mirror-registry-01 at 192.168.12.215, dual-homed on 10.0.0.50/24 for OKD).
+#
+# Tag map (selective application):
+#   --tags tls-cert  → fetch Vault-issued TLS bundle from secret/data/mirror-registry/tls
+#                      and replace the self-signed cert installed by the mirror-registry
+#                      installer. Restarts quay-app.service via handler.
+#
+# Vault-driven invocations (e.g. tls-cert) require a token with read on
+# secret/data/mirror-registry/tls. Pass via:
+#   -e vault_token=<token>
+# Source the token from Vault rather than hardcoding (see CLAUDE.md §11/§12).
+#
+# Example: apply TLS cert from a host that can SSH to mirror-registry-01:
+#   ansible-playbook ansible/playbooks/mirror-registry.yml \
+#     -l mirror-registry-01 --tags tls-cert \
+#     -e vault_token="$(vault token create -policy=ops-237-mirror-tls-read -ttl=30m -field=token)"
+#
+# Per OPS-147 runbook, first-provision (mirror-registry install binary) is
+# manual; this playbook does NOT bootstrap the registry binary, only ongoing
+# config (TLS cert, firewall, OKD-side NIC dual-home).
+
+- name: Configure mirror-registry VM
+  hosts: mirror_registry
+  become: true
+  roles:
+    # NOTE: role-level tag is intentionally only [mirror-registry] — adding
+    # inner tag names (e.g. tls-cert) at role level would apply that tag to
+    # every task in the role, defeating the granular tagging inside the role.
+    # Inner tags (tls-cert, etc.) live on individual tasks in roles/mirror-registry/tasks/main.yml.
+    - role: mirror-registry
+      tags: [mirror-registry]
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile.
+    # mirror-registry (Rocky Linux) doesn't include common role; jit-ssh-trust adds
+    # both CA cert (trusted-ca.pem) and principals file (auth_principals/%u).
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

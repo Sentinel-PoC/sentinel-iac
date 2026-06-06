@@ -1,0 +1,94 @@
+---
+# iac-control - keepalived VRRP configuration
+# NIST CP-7: Alternate Processing Site
+#
+# VRRP password is stored in Vault at secret/infrastructure/vrrp (field: password).
+# Retrieve with: vault kv get -field=password secret/infrastructure/vrrp
+# Pass at run time via: ansible-playbook ... -e vault_keepalived_vrrp_password=<value>
+# OR use the automatic Vault fetch task below (requires VAULT_ADDR + VAULT_TOKEN env vars
+# set in the CI environment, or run the vault-env.sh helper first).
+
+- name: Fetch VRRP password from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.shell:
+    cmd: |
+      TOKEN="${VAULT_TOKEN:-$(cat ~/.vault-token 2>/dev/null)}"
+      VAULT_ADDR="${VAULT_ADDR:-https://vault.208.haist.farm}" \
+      VAULT_TOKEN="$TOKEN" \
+      vault kv get -field=password secret/infrastructure/vrrp
+  register: _vault_vrrp_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: vault_keepalived_vrrp_password == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Set VRRP password from Vault lookup result
+  ansible.builtin.set_fact:
+    vault_keepalived_vrrp_password: "{{ _vault_vrrp_result.stdout | trim }}"
+  when:
+    - vault_keepalived_vrrp_password == 'CHANGE_ME'
+    - _vault_vrrp_result is defined
+    - _vault_vrrp_result.rc | default(1) == 0
+    - _vault_vrrp_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Fail if VRRP password is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      vault_keepalived_vrrp_password is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e vault_keepalived_vrrp_password=<value>.
+      Retrieve with: VAULT_ADDR=https://vault.208.haist.farm
+      vault kv get -field=password secret/infrastructure/vrrp
+  when:
+    - vault_keepalived_vrrp_password == 'CHANGE_ME'
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Install keepalived
+  ansible.builtin.apt:
+    name: keepalived
+    state: present
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Deploy keepalived configuration
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart keepalived
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Deploy HAProxy health check script
+  ansible.builtin.template:
+    src: check_haproxy.sh.j2
+    dest: /usr/local/bin/check_haproxy.sh
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart keepalived
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Enable and start keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: started
+    enabled: true
+  tags:
+    - iac-control
+    - keepalived

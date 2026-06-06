@@ -1,0 +1,90 @@
+---
+- name: Install CrowdSec repository
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -s https://install.crowdsec.net | bash
+  args:
+    executable: /bin/bash
+    creates: /etc/apt/sources.list.d/crowdsec_crowdsec.list
+  tags:
+    - crowdsec
+    - install
+
+- name: Install CrowdSec packages
+  ansible.builtin.apt:
+    name:
+      - crowdsec
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - crowdsec
+    - install
+
+- name: Install CrowdSec collections
+  ansible.builtin.command:
+    cmd: "cscli collections install {{ item }}"
+  loop: "{{ crowdsec_collections }}"
+  register: collection_result
+  changed_when: "overwrite not in collection_result.stderr"
+  tags:
+    - crowdsec
+    - config
+
+- name: Deploy CrowdSec acquisition config
+  ansible.builtin.template:
+    src: acquis.yaml.j2
+    dest: /etc/crowdsec/acquis.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart crowdsec
+  tags:
+    - crowdsec
+    - config
+
+- name: Deploy CrowdSec local config (Prometheus metrics)
+  ansible.builtin.template:
+    src: config.yaml.local.j2
+    dest: /etc/crowdsec/config.yaml.local
+    owner: root
+    group: root
+    mode: "0644"
+  when: crowdsec_prometheus_enabled
+  notify: Restart crowdsec
+  tags:
+    - crowdsec
+    - config
+
+- name: Install CrowdSec firewall bouncer
+  ansible.builtin.apt:
+    name:
+      - crowdsec-firewall-bouncer-iptables
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: crowdsec_firewall_bouncer
+  tags:
+    - crowdsec
+    - install
+    - bouncer
+
+- name: Enable and start CrowdSec
+  ansible.builtin.systemd:
+    name: crowdsec
+    state: started
+    enabled: true
+  tags:
+    - crowdsec
+    - service
+
+- name: Enable and start CrowdSec firewall bouncer
+  ansible.builtin.systemd:
+    name: crowdsec-firewall-bouncer
+    state: started
+    enabled: true
+  when: crowdsec_firewall_bouncer
+  tags:
+    - crowdsec
+    - service
+    - bouncer

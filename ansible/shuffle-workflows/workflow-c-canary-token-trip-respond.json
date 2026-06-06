@@ -1,0 +1,92 @@
+{
+  "id": "wf-c-canary-token-trip-respond",
+  "name": "canary-token-trip-respond",
+  "description": "G'-prime Workflow C: On Canarytokens trip event webhook, generate AI brief via LLM, write record to attacker-intel DB, notify via Telegram. No active response (observe-only). Tracking: OPS-573.",
+  "tags": ["g-prime", "canary", "deception", "threat-intel"],
+  "status": "active",
+  "start": "trigger-canary-trip",
+  "triggers": [
+    {
+      "id": "trigger-canary-trip",
+      "name": "Canarytokens Webhook",
+      "app_name": "Webhook",
+      "app_version": "1.0.0",
+      "trigger_type": "webhook",
+      "label": "Canarytokens.org trip webhook",
+      "description": "Receives HTTP POST from Canarytokens.org when a token is tripped. Fields: src_ip, useragent, memo, token_type.",
+      "parameters": []
+    }
+  ],
+  "actions": [
+    {
+      "id": "parse-canary-event",
+      "name": "Parse canary trip event",
+      "app_name": "Shuffle Tools",
+      "app_version": "1.2.0",
+      "label": "Extract key fields from Canarytokens webhook",
+      "parameters": [
+        {
+          "name": "input",
+          "value": "$exec.body"
+        }
+      ]
+    },
+    {
+      "id": "ai-brief",
+      "name": "Generate AI brief",
+      "app_name": "OpenAI",
+      "app_version": "1.0.0",
+      "label": "Ask LLM to summarize the canary trip context",
+      "parameters": [
+        {
+          "name": "model",
+          "value": "gpt-4o-mini"
+        },
+        {
+          "name": "messages",
+          "value": "[{\"role\": \"system\", \"content\": \"You are a security analyst. Summarize this Canarytokens trip in 3 sentences. Note any suspicious indicators.\"}, {\"role\": \"user\", \"content\": \"Source IP: $exec.body.src_ip\\nUser-Agent: $exec.body.useragent\\nToken memo: $exec.body.memo\\nToken type: $exec.body.token_type\\nTimestamp: $exec.body.time\"}]"
+        }
+      ]
+    },
+    {
+      "id": "write-canary-db",
+      "name": "Write canary trip to attacker-intel DB",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Insert canary event into attacker_intel.canary_trips",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "INSERT INTO attacker_intel.canary_trips (token_id, token_type, src_ip, useragent, memo, ai_brief, tripped_at) VALUES ('$exec.body.token_id', '$exec.body.token_type', '$exec.body.src_ip', '$exec.body.useragent', '$exec.body.memo', '$ai-brief.choices[0].message.content', NOW());"
+        }
+      ]
+    },
+    {
+      "id": "telegram-notify-canary",
+      "name": "Telegram notification",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Notify operator via Telegram",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "CANARY TRIP\\nToken: $exec.body.memo ($exec.body.token_type)\\nIP: $exec.body.src_ip\\nUA: $exec.body.useragent\\n\\nAI Brief: $ai-brief.choices[0].message.content"
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {"source_id": "trigger-canary-trip", "destination_id": "parse-canary-event", "has_errors": false, "conditions": []},
+    {"source_id": "parse-canary-event", "destination_id": "ai-brief", "has_errors": false, "conditions": []},
+    {"source_id": "ai-brief", "destination_id": "write-canary-db", "has_errors": false, "conditions": []},
+    {"source_id": "write-canary-db", "destination_id": "telegram-notify-canary", "has_errors": false, "conditions": []}
+  ]
+}

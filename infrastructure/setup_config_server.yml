@@ -1,0 +1,40 @@
+---
+- name: Ensure Control Node has Tools
+  hosts: iac_control
+  become: true
+  tasks:
+    - name: Install Docker on Control Node
+      apt:
+        name: docker.io
+        state: present
+    - name: Ensure gitlab-runner is in docker group
+      user:
+        name: gitlab-runner
+        groups: docker
+        append: yes
+
+- name: Setup Sentinel Config Server
+  hosts: config_servers
+  become: true
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+
+    - name: Ensure ignition directory exists
+      file:
+        path: /var/www/html/ignition
+        state: directory
+        mode: '0755'
+
+    - name: Start Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes

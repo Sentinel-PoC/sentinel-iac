@@ -1,0 +1,19 @@
+---
+# vault-jwt-agents — defaults
+# Tracking: OPS-1163 (retire Keycloak JWT mount), originally OPS-345 Phase 3
+#
+# RETIRED: This role now disables the dead Keycloak auth/jwt/ Vault mount.
+# Non-sensitive configuration only.
+# Sensitive vars (vault_token) MUST be supplied via -e — never stored here.
+
+agent_roles:
+  - worker
+  - planner
+  - judge
+  - scribe
+
+vault_addr: "https://vault.208.haist.farm"
+
+# JWT auth mount path for the DEAD Keycloak mount to be disabled.
+# DO NOT change to jwt-spire/ or jwt-authentik/ — those are live agent paths.
+vault_jwt_mount_path: "jwt"

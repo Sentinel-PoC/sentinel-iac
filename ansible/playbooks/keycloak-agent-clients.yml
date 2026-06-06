@@ -1,0 +1,26 @@
+---
+# RETIRED — OPS-1163 step 2 (2026-06-03)
+#
+# This playbook provisioned Keycloak service-account clients for Overwatch
+# agent roles in the sentinel realm (auth.208.haist.farm). The Keycloak
+# deployment is decommissioned. DO NOT RUN.
+#
+# The role directory (roles/keycloak-agent-clients/) is retained for history
+# but its tasks will fail against the dead Keycloak endpoint. Agent OIDC
+# clients now live in Authentik (auth-next.208.haist.farm) and are managed by
+# the vault-jwt-authentik role and provisioned via the Authentik provider config.
+#
+# Tracking: OPS-1163 (retire), originally OPS-335 Phase 2
+
+- name: RETIRED — Keycloak agent clients (do not run — Keycloak decommissioned)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Abort — this playbook is retired
+      ansible.builtin.fail:
+        msg: >-
+          keycloak-agent-clients.yml is RETIRED (OPS-1163).
+          Keycloak (auth.208.haist.farm) is decommissioned.
+          Agent OIDC clients are now managed via Authentik (auth-next.208.haist.farm).
+          See vault-jwt-authentik role for the live agent JWT auth configuration.

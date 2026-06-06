@@ -1,0 +1,39 @@
+# sentinel-images.txt — curated digest-pinned image list for supply-chain-scan
+# [OPS-202] v0.1 — images built by Sentinel CI (overwatch-console, haists-website, backstage)
+#
+# FORMAT (two space-separated fields per non-comment line):
+#   <image>@<digest>  <language>
+#
+# language: node | python | go | rust | none
+#   Controls which lockfile auditor runs in the composite action (SEC-61).
+#   Use "none" if no lockfile-based audit applies (SBOM + OSV image scan still runs).
+#
+# UPDATE PROCEDURE:
+#   After a successful build+push of a sentinel image, update the digest here.
+#   The source of truth for current digests is Harbor:
+#     curl -sk -u "$HARBOR_ROBOT_USER:$HARBOR_ROBOT_TOKEN" \
+#       "https://harbor.208.haist.farm/api/v2.0/projects/sentinel/repositories/<name>/artifacts?page_size=1" \
+#       | jq -r '.[0] | "\(.name)@\(.digest)"'
+#
+#   Only CI-built images belong here (not mirrored upstream images like postgres, minio, etc.).
+#   Limit to 3–5 images for v0.1 — expand after baseline triage in DefectDojo.
+#
+# EXCLUSIONS (upstream mirrors — Trivy image scan covers these):
+#   sentinel/postgres, sentinel/minio, sentinel/ntfy, sentinel/grafana, etc.
+#   These are not built by Sentinel CI; supply-chain provenance is from upstream.
+#
+# DIGESTS LAST UPDATED: 2026-04-30 by worker-A (OPS-202)
+
+# ─── Sentinel CI-built images ───────────────────────────────────────────────
+
+# overwatch-console: React dashboard — built by overwatch-console/build.yml
+# Latest tag: 5d6aa0e (2026-04-19)
+harbor.208.haist.farm/sentinel/overwatch-console@sha256:0fa7e8345c80624e7d61e3d5884210b8b34e60583af2832a84b49ed51a627c40  node
+
+# haists-website: Static site — built by haists-website/build.yml
+# Latest tag: b6e9e31 (2026-03-29)
+harbor.208.haist.farm/sentinel/haists-website@sha256:e96a616f7df07e7d5565c16313b06fd7526ef03bc4d35664a8f75c1f7899429f  none
+
+# backstage: Developer portal — built by backstage CI
+# Latest tag: a02f3a5 (2026-03-28)
+harbor.208.haist.farm/sentinel/backstage@sha256:8a94d0c4a5e7cca588576f69e59c1e39fec4a68f1e482b4e1e6ac4a1e2ee8e57  node

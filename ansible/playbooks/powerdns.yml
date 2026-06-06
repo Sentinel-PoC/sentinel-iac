@@ -1,0 +1,96 @@
+---
+# powerdns.yml — OPS-670 / OPS-669 Phase 2+
+#
+# Deploys PowerDNS Authoritative + Recursor to nameserver LXCs.
+#
+# Architecture:
+#   ns1.208.haist.farm (192.168.12.253) — primary, pve4-alienware (migrated OPS-964 2026-05-26)
+#   ns2.208.haist.farm (192.168.12.254) — secondary, pve3
+#   Each LXC runs pdns-auth (127.0.0.1:5300) + pdns-recursor (:53 on LXC IP)
+#
+# Prerequisites:
+#   1. ansible-galaxy role install PowerDNS.pdns PowerDNS.pdns_recursor
+#   2. LXC provisioned with Ubuntu 24.04 (Phase 2/3)
+#   3. VAULT_ADDR and VAULT_TOKEN set for API key lookup
+#   4. secret/infrastructure/powerdns-api-key present in Vault (Phase 4)
+#
+# Usage:
+#   # NOTE: nameservers group is defined in hosts.yml (not hosts.ini); pass both inventories.
+#   # ansible.cfg default does not include hosts.yml — always pass -i inventory/hosts.yml explicitly.
+#
+#   # Dry-run (no changes):
+#   ansible-playbook -i inventory/hosts.ini -i inventory/hosts.yml playbooks/powerdns.yml --check --diff -l nameservers
+#
+#   # Deploy auth only:
+#   ansible-playbook -i inventory/hosts.ini -i inventory/hosts.yml playbooks/powerdns.yml --tags pdns-auth -l nameservers
+#
+#   # Deploy recursor only:
+#   ansible-playbook -i inventory/hosts.ini -i inventory/hosts.yml playbooks/powerdns.yml --tags pdns-recursor -l nameservers
+#
+#   # Deploy to specific host:
+#   ansible-playbook -i inventory/hosts.ini -i inventory/hosts.yml playbooks/powerdns.yml -l ns1
+
+# NIST controls: SC-20, SC-21, SC-22 (DNS security), SI-2 (package management)
+
+- name: Deploy PowerDNS Authoritative + Recursor
+  hosts: nameservers
+  become: true
+
+  pre_tasks:
+    - name: Assert required variables are set
+      ansible.builtin.assert:
+        that:
+          - pdns_auth_peer_ns_ip != ""
+          - pdns_rec_svc_listen_addresses | length > 0
+          - "'127.0.0.1' not in pdns_rec_svc_listen_addresses or pdns_rec_svc_listen_addresses | length > 1"
+        fail_msg: >-
+          pdns_auth_peer_ns_ip and pdns_rec_svc_listen_addresses must be set
+          in host_vars for each nameserver. See ansible/inventory/host_vars/ns1/
+          and host_vars/ns2/ for expected structure.
+        quiet: true
+      tags: [always]
+
+    - name: Assert ns_mode is valid
+      ansible.builtin.assert:
+        that:
+          - pdns_auth_ns_mode in ['primary', 'secondary']
+        fail_msg: "pdns_auth_ns_mode must be 'primary' or 'secondary', got: {{ pdns_auth_ns_mode }}"
+        quiet: true
+      tags: [always]
+
+  roles:
+    - role: common
+      tags: [common]
+
+    - role: powerdns-auth
+      tags: [pdns-auth, powerdns-auth]
+
+    - role: powerdns-recursor
+      tags: [pdns-recursor, powerdns-recursor]
+
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted on ns1/ns2. Tag-gated.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh
+
+  post_tasks:
+    - name: Verify pdns-auth is listening on loopback
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ pdns_auth_listen_port }}"
+        timeout: 15
+        state: started
+        msg: "pdns-auth did not start on 127.0.0.1:{{ pdns_auth_listen_port }}"
+      tags: [verify, pdns-auth]
+
+    - name: Verify pdns-recursor is listening on LXC IP
+      ansible.builtin.wait_for:
+        host: "{{ pdns_rec_svc_listen_addresses | first | regex_replace(':53$', '') }}"
+        port: 53
+        timeout: 15
+        state: started
+        msg: "pdns-recursor did not start on port 53"
+      tags: [verify, pdns-recursor]

@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Nginx PXE file server for OKD node provisioning
+# Listens on 8080 to avoid conflict with HAProxy on port 80
+server {
+    listen 8080;
+    root /var/www/html;
+    autoindex on;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

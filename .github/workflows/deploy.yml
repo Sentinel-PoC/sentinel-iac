@@ -1,0 +1,26 @@
+﻿name: Sentinel Cluster Deploy
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'manifests/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to K3s Cluster
+        uses: appleboy/ssh-action@master
+        with:
+          host: 192.168.12.116
+          username: root
+          key: ${{ secrets.SENTINEL_SSH_KEY }}
+          script: |
+            cd /home/koiakoia/project-sentinel-k3s
+            git pull origin master
+            kubectl apply -f manifests/

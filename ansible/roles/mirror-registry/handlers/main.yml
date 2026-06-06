@@ -1,0 +1,25 @@
+# ansible/roles/mirror-registry/handlers/main.yml
+#
+# Handlers for mirror-registry Ansible role.
+# Applied: OPS-148 (2026-04-28)
+
+- name: Restart quay-app
+  ansible.builtin.systemd:
+    name: quay-app.service
+    state: restarted
+    daemon_reload: true
+
+- name: Restart quay-redis
+  ansible.builtin.systemd:
+    name: quay-redis.service
+    state: restarted
+
+- name: Reload firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    state: reloaded
+
+- name: Reload networkmanager
+  ansible.builtin.systemd:
+    name: NetworkManager
+    state: reloaded

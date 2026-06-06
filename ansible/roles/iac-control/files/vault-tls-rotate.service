@@ -1,0 +1,11 @@
+[Unit]
+Description=Vault TLS Certificate Auto-Rotation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/vault-tls-rotate.sh
+StandardOutput=journal
+StandardError=journal

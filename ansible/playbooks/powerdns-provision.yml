@@ -1,0 +1,249 @@
+---
+# powerdns-provision.yml — OPS-673 Phase 2
+# Provision ns1 + ns2 PowerDNS nameserver LXCs and apply PowerDNS roles.
+#
+# Architecture:
+#   ns1 (VMID 304) — pve4-alienware (192.168.12.168), IP 192.168.12.253/24  [migrated OPS-964]
+#   ns2 (VMID 305) — pve3 (192.168.12.57), IP 192.168.12.254/24
+#
+# NOTE: pve4-alienware and pve3 are accessed via password auth because id_ed25519 is
+# not in their authorized_keys (OPS-593 known gap). Password is fetched from
+# Vault at play start. Post-OPS-593 resolution: switch to key auth and remove
+# the ansible_password lines from plays 2 and 3.
+#
+# Play structure:
+#   Play 1: localhost — Fetch PVE root password from Vault, cache in hostvars
+#   Play 2: pve4-alienware — Create ns1 LXC (VMID 304) + SSH bootstrap (password auth)
+#   Play 3: pve3 — Create ns2 LXC (VMID 305) + SSH bootstrap (password auth)
+#   Play 4: nameservers — Apply powerdns-auth + powerdns-recursor roles (key auth)
+#
+# Usage:
+#
+#   Prerequisites:
+#     ansible-galaxy install -r ansible/requirements.yml  # PowerDNS Galaxy roles
+#
+#   Full apply (provision + roles):
+#     VAULT_TOKEN=<t> VAULT_ADDR=https://192.168.12.206:8200 \
+#       ansible-playbook -i ansible/inventory/hosts.ini \
+#                        -i ansible/inventory/hosts.yml \
+#                        ansible/playbooks/powerdns-provision.yml
+#
+#   Dry-run (LXC creation phase only):
+#     ... --check --diff --tags lxc
+#
+#   LXC provisioning only (skip PowerDNS role apply):
+#     ... --skip-tags pdns-auth,pdns-recursor,common
+#
+#   PowerDNS role apply only (LXCs already exist + SSH ready):
+#     ... --limit nameservers ansible/playbooks/powerdns.yml
+#
+# NIST controls: CM-2, CM-3, CM-3(2), SC-20, SC-21, SC-22
+
+# ── Play 1: Pre-flight — fetch PVE root password from Vault ──────────────────
+- name: Pre-flight — fetch PVE root password from Vault
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Fetch PVE root password from Vault (for password-auth to pve4-alienware/pve3)
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ lookup('env', 'VAULT_ADDR') | default('https://192.168.12.206:8200') }}"
+        auth_method: token
+        token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+        path: "proxmox/root-password"
+        validate_certs: false
+      register: _pve_creds
+      no_log: true
+      tags: [always]
+
+    - name: Cache PVE root password in hostvars for subsequent plays
+      ansible.builtin.set_fact:
+        pve_root_password: "{{ _pve_creds.secret.password }}"
+      no_log: true
+      tags: [always]
+
+# ── Play 2: Provision ns1 LXC on pve4-alienware ──────────────────────────────
+- name: Provision ns1 PowerDNS LXC on pve4-alienware (VMID 304)
+  hosts: pve4-alienware
+  become: false
+  gather_facts: true
+  vars:
+    # Password auth — OPS-593: id_ed25519 not in pve4-alienware authorized_keys.
+    # PreferredAuthentications skips publickey entirely (avoids MaxAuthTries failure).
+    ansible_user: root
+    ansible_password: "{{ hostvars['localhost']['pve_root_password'] }}"
+    ansible_ssh_extra_args: >-
+      -o PreferredAuthentications=keyboard-interactive,password
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+
+    # ns1 LXC parameters from host_vars/ns1/main.yml
+    pdns_lxc_id: "{{ hostvars['ns1']['pdns_lxc_id'] }}"
+    pdns_lxc_name: "{{ hostvars['ns1']['pdns_lxc_name'] }}"
+    pdns_lxc_ip: "{{ hostvars['ns1']['ansible_host'] }}"
+    pdns_lxc_cidr: "{{ hostvars['ns1']['pdns_lxc_cidr'] | default('24') }}"
+    pdns_lxc_gateway: "{{ hostvars['ns1']['pdns_lxc_gateway'] | default('192.168.12.1') }}"
+    pdns_lxc_nameserver: "{{ hostvars['ns1']['pdns_lxc_nameserver'] | default('192.168.12.210') }}"
+    pdns_lxc_searchdomain: "{{ hostvars['ns1']['pdns_lxc_searchdomain'] | default('208.haist.farm') }}"
+    pdns_lxc_cores: "{{ hostvars['ns1']['pdns_lxc_cores'] | default(1) }}"
+    pdns_lxc_memory: "{{ hostvars['ns1']['pdns_lxc_memory'] | default(512) }}"
+    pdns_lxc_swap: "{{ hostvars['ns1']['pdns_lxc_swap'] | default(256) }}"
+    pdns_lxc_rootfs_size: "{{ hostvars['ns1']['pdns_lxc_rootfs_size'] | default('8') }}"
+    pdns_lxc_bridge: "{{ hostvars['ns1']['pdns_lxc_bridge'] | default('vmbr0') }}"
+    pdns_lxc_template_storage: "{{ hostvars['ns1']['pdns_lxc_template_storage'] | default('local') }}"
+    pdns_lxc_rootfs_storage: "{{ hostvars['ns1']['pdns_lxc_rootfs_storage'] | default('local-lvm') }}"
+    pdns_lxc_ostemplate: "{{ hostvars['ns1']['pdns_lxc_ostemplate'] | default('ubuntu-24.04-standard_24.04-2_amd64.tar.zst') }}"
+    pdns_lxc_unprivileged: "{{ hostvars['ns1']['pdns_lxc_unprivileged'] | default(1) }}"
+    pdns_lxc_onboot: "{{ hostvars['ns1']['pdns_lxc_onboot'] | default(1) }}"
+    pdns_lxc_startup: "{{ hostvars['ns1']['pdns_lxc_startup'] | default('order=1,up=30') }}"
+
+  pre_tasks:
+    - name: Assert pve4-alienware is a Proxmox (Debian) host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+        fail_msg: "powerdns-provision Play 2 must target pve4-alienware (Proxmox/Debian). Got: {{ ansible_distribution }}"
+        quiet: true
+      tags: [always]
+
+    - name: Assert required ns1 vars are set in host_vars
+      ansible.builtin.assert:
+        that:
+          - pdns_lxc_id | string | length > 0
+          - pdns_lxc_name | string | length > 0
+          - pdns_lxc_ip | string | length > 0
+        fail_msg: "pdns_lxc_id, pdns_lxc_name, and ansible_host must be set in host_vars/ns1/main.yml"
+        quiet: true
+      tags: [always]
+
+    - name: Display ns1 LXC provisioning target
+      ansible.builtin.debug:
+        msg: >-
+          Provisioning ns1 LXC (VMID {{ pdns_lxc_id }}) on {{ inventory_hostname }} ({{ ansible_host }}).
+          LXC IP: {{ pdns_lxc_ip }} | Memory: {{ pdns_lxc_memory }}MB | Cores: {{ pdns_lxc_cores }} | Disk: {{ pdns_lxc_rootfs_size }}GB
+          Template: {{ pdns_lxc_ostemplate }}
+      tags: [always]
+
+  roles:
+    - role: powerdns-lxc
+      tags: [powerdns-lxc, lxc]
+
+# ── Play 3: Provision ns2 LXC on pve3 ────────────────────────────────────────
+- name: Provision ns2 PowerDNS LXC on pve3 (VMID 305)
+  hosts: pve3
+  become: false
+  gather_facts: true
+  vars:
+    ansible_user: root
+    ansible_password: "{{ hostvars['localhost']['pve_root_password'] }}"
+    ansible_ssh_extra_args: >-
+      -o PreferredAuthentications=keyboard-interactive,password
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+
+    pdns_lxc_id: "{{ hostvars['ns2']['pdns_lxc_id'] }}"
+    pdns_lxc_name: "{{ hostvars['ns2']['pdns_lxc_name'] }}"
+    pdns_lxc_ip: "{{ hostvars['ns2']['ansible_host'] }}"
+    pdns_lxc_cidr: "{{ hostvars['ns2']['pdns_lxc_cidr'] | default('24') }}"
+    pdns_lxc_gateway: "{{ hostvars['ns2']['pdns_lxc_gateway'] | default('192.168.12.1') }}"
+    pdns_lxc_nameserver: "{{ hostvars['ns2']['pdns_lxc_nameserver'] | default('192.168.12.210') }}"
+    pdns_lxc_searchdomain: "{{ hostvars['ns2']['pdns_lxc_searchdomain'] | default('208.haist.farm') }}"
+    pdns_lxc_cores: "{{ hostvars['ns2']['pdns_lxc_cores'] | default(1) }}"
+    pdns_lxc_memory: "{{ hostvars['ns2']['pdns_lxc_memory'] | default(512) }}"
+    pdns_lxc_swap: "{{ hostvars['ns2']['pdns_lxc_swap'] | default(256) }}"
+    pdns_lxc_rootfs_size: "{{ hostvars['ns2']['pdns_lxc_rootfs_size'] | default('8') }}"
+    pdns_lxc_bridge: "{{ hostvars['ns2']['pdns_lxc_bridge'] | default('vmbr0') }}"
+    pdns_lxc_template_storage: "{{ hostvars['ns2']['pdns_lxc_template_storage'] | default('local') }}"
+    pdns_lxc_rootfs_storage: "{{ hostvars['ns2']['pdns_lxc_rootfs_storage'] | default('local-lvm') }}"
+    pdns_lxc_ostemplate: "{{ hostvars['ns2']['pdns_lxc_ostemplate'] | default('ubuntu-24.04-standard_24.04-2_amd64.tar.zst') }}"
+    pdns_lxc_unprivileged: "{{ hostvars['ns2']['pdns_lxc_unprivileged'] | default(1) }}"
+    pdns_lxc_onboot: "{{ hostvars['ns2']['pdns_lxc_onboot'] | default(1) }}"
+    pdns_lxc_startup: "{{ hostvars['ns2']['pdns_lxc_startup'] | default('order=1,up=30') }}"
+
+  pre_tasks:
+    - name: Assert pve3 is a Proxmox (Debian) host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+        fail_msg: "powerdns-provision Play 3 must target pve3 (Proxmox/Debian). Got: {{ ansible_distribution }}"
+        quiet: true
+      tags: [always]
+
+    - name: Assert required ns2 vars are set in host_vars
+      ansible.builtin.assert:
+        that:
+          - pdns_lxc_id | string | length > 0
+          - pdns_lxc_name | string | length > 0
+          - pdns_lxc_ip | string | length > 0
+        fail_msg: "pdns_lxc_id, pdns_lxc_name, and ansible_host must be set in host_vars/ns2/main.yml"
+        quiet: true
+      tags: [always]
+
+    - name: Display ns2 LXC provisioning target
+      ansible.builtin.debug:
+        msg: >-
+          Provisioning ns2 LXC (VMID {{ pdns_lxc_id }}) on {{ inventory_hostname }} ({{ ansible_host }}).
+          LXC IP: {{ pdns_lxc_ip }} | Memory: {{ pdns_lxc_memory }}MB | Cores: {{ pdns_lxc_cores }} | Disk: {{ pdns_lxc_rootfs_size }}GB
+          Template: {{ pdns_lxc_ostemplate }}
+      tags: [always]
+
+  roles:
+    - role: powerdns-lxc
+      tags: [powerdns-lxc, lxc]
+
+# ── Play 4: Deploy PowerDNS roles to nameservers ──────────────────────────────
+# Runs against ns1 + ns2 via SSH as ubuntu (key-based, id_sentinel injected in Plays 2+3).
+# Applies: common → powerdns-auth → powerdns-recursor
+- name: Deploy PowerDNS Authoritative + Recursor to nameservers
+  hosts: nameservers
+  become: true
+
+  pre_tasks:
+    - name: Assert required PowerDNS variables are set
+      ansible.builtin.assert:
+        that:
+          - pdns_auth_peer_ns_ip != ""
+          - pdns_rec_svc_listen_addresses | length > 0
+          - "'127.0.0.1' not in pdns_rec_svc_listen_addresses or pdns_rec_svc_listen_addresses | length > 1"
+        fail_msg: >-
+          pdns_auth_peer_ns_ip and pdns_rec_svc_listen_addresses must be set
+          in host_vars for each nameserver. See host_vars/ns1/ and host_vars/ns2/.
+        quiet: true
+      tags: [always]
+
+    - name: Assert ns_mode is valid
+      ansible.builtin.assert:
+        that:
+          - pdns_auth_ns_mode in ['primary', 'secondary']
+        fail_msg: "pdns_auth_ns_mode must be 'primary' or 'secondary', got: {{ pdns_auth_ns_mode }}"
+        quiet: true
+      tags: [always]
+
+  roles:
+    - role: common
+      tags: [common]
+
+    - role: powerdns-auth
+      tags: [pdns-auth, powerdns-auth]
+
+    - role: powerdns-recursor
+      tags: [pdns-recursor, powerdns-recursor]
+
+  post_tasks:
+    - name: Verify pdns-auth is listening on loopback
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: "{{ pdns_auth_listen_port }}"
+        timeout: 15
+        state: started
+        msg: "pdns-auth did not start on 127.0.0.1:{{ pdns_auth_listen_port }}"
+      tags: [verify, pdns-auth]
+
+    - name: Verify pdns-recursor is listening on LXC IP
+      ansible.builtin.wait_for:
+        host: "{{ pdns_rec_svc_listen_addresses | first | regex_replace(':53$', '') }}"
+        port: 53
+        timeout: 15
+        state: started
+        msg: "pdns-recursor did not start on port 53"
+      tags: [verify, pdns-recursor]

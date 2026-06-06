@@ -1,0 +1,96 @@
+---
+# OPS-1123: scanopy-daemon-lxc role defaults
+# Provisions a dedicated LXC on 192.168.12.0/24 running the scanopy daemon
+# for ARP-based network topology discovery of the platform VLAN.
+#
+# Pattern mirrors ha-lxc (OPS-585) and powerdns-lxc (OPS-673).
+# Daemon requires NET_RAW for ARP scanning — privileged LXC (unprivileged=0).
+#
+# Operator scope decision (OPS-1123):
+# - Scan scope: 192.168.12.0/24 ONLY (SCANOPY_INTERFACES pinned to eth0)
+# - NOT iac-control — dedicated LXC keeps privileged scanner isolated
+# - SCANOPY_SERVER_URL: https://scanopy.208.haist.farm (via Pangolin -> OKD Route)
+
+# ---------------------------------------------------------------------------
+# LXC identity
+# ---------------------------------------------------------------------------
+scanopy_lxc_id: 305
+scanopy_lxc_name: "scanopy-daemon"
+
+# ---------------------------------------------------------------------------
+# Network — 192.168.12.0/24 platform VLAN
+# ---------------------------------------------------------------------------
+scanopy_lxc_ip: "192.168.12.93"
+scanopy_lxc_cidr: "24"
+scanopy_lxc_gateway: "192.168.12.1"
+scanopy_lxc_nameserver: "192.168.12.210"    # iac-control dnsmasq
+scanopy_lxc_searchdomain: "208.haist.farm"
+scanopy_lxc_bridge: "vmbr0"
+
+# ---------------------------------------------------------------------------
+# Template storage — same node/pattern as ha-lxc and jellyfin-lxc
+# ---------------------------------------------------------------------------
+scanopy_lxc_template_storage: "local"
+scanopy_lxc_rootfs_storage: "local-lvm"
+scanopy_lxc_rootfs_size: "8"                 # GB — daemon-only, minimal footprint
+scanopy_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+# OPS-1009 pattern: discard (TRIM/UNMAP) mount option for thinpool reclamation
+scanopy_lxc_rootfs_mountoptions: "discard"
+
+# ---------------------------------------------------------------------------
+# Compute
+# ---------------------------------------------------------------------------
+scanopy_lxc_cores: 1
+scanopy_lxc_memory: 512                      # MiB — daemon is lightweight
+scanopy_lxc_swap: 256                        # MiB
+
+# ---------------------------------------------------------------------------
+# Security + capabilities
+# Privileged LXC (unprivileged=0) required for NET_RAW capability (ARP scanning).
+# features=nesting=1 allows future podman/quadlet operation inside LXC.
+# onboot=1 + startup order=3 ensures daemon survives PVE host reboots and
+# starts after infrastructure LXCs (order=1 nameservers, order=2 auth).
+# ---------------------------------------------------------------------------
+scanopy_lxc_unprivileged: 0                  # 0 = privileged (required for NET_RAW)
+scanopy_lxc_features: "nesting=1"
+scanopy_lxc_onboot: 1
+scanopy_lxc_startup: "order=3,up=30"
+
+# ---------------------------------------------------------------------------
+# SSH bootstrap — key for Ansible ubuntu user access
+# lookup('file', ...) runs on the Ansible controller (iac-control as ubuntu)
+# ---------------------------------------------------------------------------
+scanopy_lxc_admin_user: "ubuntu"
+scanopy_lxc_admin_ssh_key_file: "~/.ssh/id_sentinel.pub"
+
+# ---------------------------------------------------------------------------
+# Container image — Harbor-signed, cosign-verified (OPS-1122)
+# ---------------------------------------------------------------------------
+scanopy_daemon_image: "harbor.208.haist.farm/sentinel/scanopy-daemon@sha256:ebbc8afbf749506d6337d8d0089415e75fd18e913e887bec531998c88b133186"
+scanopy_daemon_container_name: "scanopy-daemon"
+
+# ---------------------------------------------------------------------------
+# Daemon configuration — sourced from config.rs AppConfig (v0.16.2)
+# SCANOPY_INTERFACES confirmed real env var (AppConfig.interfaces field).
+# SCANOPY_SERVER_URL: daemon registration endpoint.
+# ---------------------------------------------------------------------------
+# Interface restriction: eth0 is the LXC's vmbr0 interface on 192.168.12.0/24.
+# Pinning to eth0 ensures the daemon only ARP-scans 192.168.12.0/24 —
+# the authorized scope per operator decision in OPS-1123.
+scanopy_daemon_interfaces: "eth0"
+scanopy_daemon_server_url: "https://scanopy.208.haist.farm"
+scanopy_daemon_log_level: "info"
+# Pangolin route for daemon health API — used by scanopy-server SCANOPY_INTEGRATED_DAEMON_URL
+# OKD pods cannot reach 192.168.12.93 directly (cluster subnet isolation).
+# Routing: OKD server pod → Pangolin (scanopy-daemon-api.208.haist.farm, internal-only)
+#   → sentinel-vm-services.yml service-scanopy-daemon-208 → http://192.168.12.93:60073
+# The server uses this URL to call /api/initialize on the daemon after a network is created.
+scanopy_daemon_api_external_url: "https://scanopy-daemon-api.208.haist.farm"
+
+# Vault paths for Harbor pull credentials
+scanopy_vault_addr: "https://vault.208.haist.farm"
+scanopy_harbor_robot_vault_path: "secret/harbor/robot-pull"
+
+# Container runtime — podman (standard on Ubuntu 24.04 LXC; no Docker-in-LXC needed)
+# systemd service file manages the container lifecycle
+scanopy_daemon_data_dir: "/opt/scanopy-daemon"

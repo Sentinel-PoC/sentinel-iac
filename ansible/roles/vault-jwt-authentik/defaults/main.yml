@@ -1,0 +1,94 @@
+---
+# vault-jwt-authentik — defaults
+# Tracking: OPS-656 (follow-up to OPS-630)
+#
+# Non-sensitive configuration only.
+# Sensitive vars (vault_token) MUST be supplied via -e — never stored here.
+#
+# This role codes up the jwt-authentik/ Vault JWT auth mount created manually
+# during OPS-630. The mount uses Authentik (auth-next.208.haist.farm) as the
+# JWT issuer, with a per-application JWKS URL for key material.
+#
+# Design note: each Authentik provider (sentinel-worker, -judge, -planner,
+# -scribe) has a distinct OAuth client_id (bound_audience) and a per-app
+# issuer URL (bound_claims.iss). The mount-level jwks_url is shared — all
+# Authentik applications sign JWTs with the same key material. bound_audiences
+# and bound_claims are the load-bearing discriminators that prevent cross-role
+# login.
+#
+# bound_audience values are Authentik OAuth client_ids — non-secret by OAuth
+# convention (client_id vs client_secret) — safe to track in VCS.
+
+# Vault JWT auth mount path
+vault_jwt_authentik_mount_path: "jwt-authentik"
+
+# Human-readable description written to the Vault mount at enable time
+vault_jwt_authentik_mount_description: >-
+  JWT auth backed by Authentik (OPS-630, parallel to jwt/ Keycloak mount)
+
+# Default role — SEC-95: cleared to empty string so requests that do not
+# specify a role name get no automatic login path. Each agent login must
+# explicitly target auth/jwt-authentik/login?role=<name>.
+# bound_issuer is intentionally empty (per-role iss in bound_claims is the
+# binding point, which is more granular than a mount-level bound_issuer).
+vault_jwt_authentik_default_role: ""
+
+# JWKS URL for Authentik key material. All Authentik applications share the
+# same RSA signing key; the sentinel-worker JWKS endpoint is used as the
+# mount-level key source. This URL is the internal Authentik address
+# (192.168.12.83:9000) — Vault (192.168.12.206) can reach it directly.
+vault_jwt_authentik_jwks_url: "http://192.168.12.83:9000/application/o/sentinel-worker/jwks/"
+
+# Vault address for API calls.
+# The FQDN works for token-bearing API calls — Pangolin only enforces Keycloak
+# SSO on browser flows, not on the /v1/* API surface this role uses. The
+# previously-referenced direct-IP override (https://192.168.12.206:8200) is
+# actively broken: the direct-IP cert has no IP SANs, so TLS validation fails.
+# Do NOT override at apply time. Mirrors vault-jwt-spire / vault-jwt-agents precedent.
+# (OPS-853: corrected from erroneous 403-on-FQDN claim in original OPS-656 commit.)
+vault_addr: "https://vault.208.haist.farm"
+
+# Token TTL — hard cap at 1h. Mirrors OPS-345 / vault-jwt-agents / vault-jwt-spire contract.
+vault_jwt_authentik_token_ttl: "1h"
+vault_jwt_authentik_token_max_ttl: "1h"
+
+# Token explicit max TTL — closes the renewal-stacking loophole (a 1h-TTL token
+# cannot exceed 1h even if periodic renewal is attempted). Aligns with
+# vault-jwt-agents (OPS-345) and vault-jwt-spire (OPS-536).
+# OPS-853: live jwt-authentik mount (2026-05-22) had token_explicit_max_ttl not set;
+# running this playbook against the live mount will enable this hardening.
+vault_jwt_authentik_token_explicit_max_ttl: "1h"
+
+# Strip the Vault default policy — per-role agent-* policies grant only what each
+# agent needs (including auth/token/lookup-self for TTL inspection, granted
+# explicitly in agent-*.hcl). Aligns with vault-jwt-agents (OPS-345) and
+# vault-jwt-spire (OPS-536).
+# OPS-853: live jwt-authentik mount (2026-05-22) had token_no_default_policy=false;
+# running this playbook against the live mount will enable this hardening.
+vault_jwt_authentik_token_no_default_policy: true
+
+# Per-role configuration: Authentik application bindings
+# Each entry captures the Vault role name, the Vault policy to grant, the
+# Authentik OAuth client_id (bound_audience), and the per-app issuer URL
+# (bound_claims.iss).
+#
+# Source: vault read auth/jwt-authentik/role/<name> (captured 2026-05-22)
+# bound_audience = Authentik OAuth client_id (non-secret)
+# iss = Authentik per-provider token endpoint base
+vault_jwt_authentik_roles:
+  - name: worker
+    policy: agent-worker
+    bound_audience: "KcpY84WET1wGEv7gGzYM0kWQZwb7pFc95LHRYCWl"
+    iss: "https://auth-next.208.haist.farm/application/o/sentinel-worker/"
+  - name: judge
+    policy: agent-judge
+    bound_audience: "7jOJvYpGJiW2NX74DzFQhymNNkuRUUeVDUAvKfbo"
+    iss: "https://auth-next.208.haist.farm/application/o/sentinel-judge/"
+  - name: planner
+    policy: agent-planner
+    bound_audience: "5JHHWafdWG7BimHufIxYd5JgxILXaghk4XejZ6El"
+    iss: "https://auth-next.208.haist.farm/application/o/sentinel-planner/"
+  - name: scribe
+    policy: agent-scribe
+    bound_audience: "8WYzGcdQ6OEhturGtH0m2ts4IcHrpcHgU1Bw3Gvb"
+    iss: "https://auth-next.208.haist.farm/application/o/sentinel-scribe/"

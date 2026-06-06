@@ -1,0 +1,11 @@
+[Unit]
+Description=GitLab Data Backup to MinIO
+After=gitlab-runsvdir.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=1800
+EnvironmentFile=/etc/gitlab-backup.env
+ExecStart=/usr/local/bin/gitlab-backup.sh
+StandardOutput=journal
+StandardError=journal

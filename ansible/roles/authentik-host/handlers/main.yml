@@ -1,0 +1,16 @@
+---
+# authentik-host role handlers — OPS-605
+
+- name: Restart authentik-server
+  ansible.builtin.command:
+    cmd: docker compose restart server
+    chdir: "{{ authentik_compose_dir }}"
+  changed_when: true
+  listen: "restart authentik"
+
+- name: Restart authentik-full
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ authentik_compose_dir }}"
+  changed_when: true
+  listen: "restart authentik-full"

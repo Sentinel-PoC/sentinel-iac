@@ -1,0 +1,29 @@
+[Unit]
+Description=Vault auto-unseal token rotation (OPS-191)
+# Rotates the periodic token embedded in /etc/vault/config/config.hcl on
+# vault-server. Runs weekly (Sunday 03:00 UTC) via vault-autounseal-rotate.timer.
+#
+# Designed to be safe at any state: if prod Vault is sealed or transit Vault is
+# unreachable, the script aborts at pre-flight with exit 1 (no changes made).
+# A CRIT log entry is emitted and Wazuh fires an alert.
+#
+# Runs as ubuntu so it can use ~/.ssh/id_sentinel + ~/.ssh/id_sentinel-cert.pub
+# (the same SSH credential used by vault-tls-rotate.service).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/vault-autounseal-rotate.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+# Exit codes:
+#   0 — success
+#   1 — pre-flight abort (no changes)
+#   2 — mid-flight failure (see log)
+#   3 — config/file error
+# All exits are logged to journald + /var/log/vault-autounseal-rotation.json.
+# Do NOT set SuccessExitStatus here; non-zero exits should surface in
+# systemd journal as failure so Wazuh sees them.

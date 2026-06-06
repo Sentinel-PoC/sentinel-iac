@@ -1,0 +1,162 @@
+# Ansible managed — wazuh-ha-bridge role (OPS-586 Section C)
+# Home Assistant package: Wazuh security integration
+# Location: /config/packages/wazuh.yaml
+# DO NOT EDIT DIRECTLY — overwritten by Ansible role run.
+#
+# This package is loaded via 'homeassistant: packages: !include_dir_named packages'
+# in configuration.yaml.
+#
+# Ref: https://www.home-assistant.io/docs/configuration/packages/
+# Ref: https://www.home-assistant.io/integrations/mqtt/ (MQTT discovery sensors
+#      are registered by the custom-ha-mqtt script — not declared here)
+# Ref: https://www.home-assistant.io/integrations/counter/
+# Ref: https://www.home-assistant.io/integrations/template/
+# Ref: https://www.home-assistant.io/integrations/telegram_bot/ (deprecated but
+#      still functional; telegram_bot config is in main configuration.yaml via
+#      Section E / manual Telegram setup)
+
+# ── Counter entities — alert tallies ─────────────────────────────────────────
+# Incremented by automations below when alerts arrive on MQTT topic.
+# Reset daily via automation. Counters persist across HA restarts by default.
+counter:
+  wazuh_critical_alerts:
+    name: "Wazuh Critical Alerts Today"
+    initial: 0
+    step: 1
+    icon: mdi:shield-alert
+    restore: true
+
+  wazuh_high_alerts:
+    name: "Wazuh High Alerts Today"
+    initial: 0
+    step: 1
+    icon: mdi:shield-half-full
+    restore: true
+
+  wazuh_medium_alerts:
+    name: "Wazuh Medium Alerts Today"
+    initial: 0
+    step: 1
+    icon: mdi:shield-outline
+    restore: true
+
+# ── Template sensors — derived state ─────────────────────────────────────────
+# security_posture: GREEN/AMBER/RED based on alert counters.
+# Ref: https://www.home-assistant.io/integrations/template/
+template:
+  - sensor:
+      - name: "Wazuh Security Posture"
+        unique_id: wazuh_security_posture
+        icon: >-
+          {% raw %}{% if states('counter.wazuh_critical_alerts') | int > 0 %}
+            mdi:shield-alert
+          {% elif states('counter.wazuh_high_alerts') | int > 0 %}
+            mdi:shield-half-full
+          {% else %}
+            mdi:shield-check
+          {% endif %}{% endraw %}
+        state: >-
+          {% raw %}{% if states('counter.wazuh_critical_alerts') | int > 0 %}
+            RED
+          {% elif states('counter.wazuh_high_alerts') | int >= 3 %}
+            AMBER
+          {% elif states('counter.wazuh_high_alerts') | int > 0 %}
+            YELLOW
+          {% else %}
+            GREEN
+          {% endif %}{% endraw %}
+        attributes:
+          critical_count: "{% raw %}{{ states('counter.wazuh_critical_alerts') | int }}{% endraw %}"
+          high_count: "{% raw %}{{ states('counter.wazuh_high_alerts') | int }}{% endraw %}"
+          medium_count: "{% raw %}{{ states('counter.wazuh_medium_alerts') | int }}{% endraw %}"
+          last_alert_level: "{% raw %}{{ states('sensor.wazuh_last_alert_level') | default('0') }}{% endraw %}"
+          last_alert_host: "{% raw %}{{ states('sensor.wazuh_last_alert_host') | default('none') }}{% endraw %}"
+          last_alert_desc: "{% raw %}{{ states('sensor.wazuh_last_alert_desc') | default('none') }}{% endraw %}"
+
+# ── Automations ───────────────────────────────────────────────────────────────
+automation:
+
+  # ── Alert counter increment ────────────────────────────────────────────────
+  # Fires on every Wazuh alert arriving via MQTT.
+  # Ref: https://www.home-assistant.io/integrations/mqtt/ (trigger)
+  - id: wazuh_alert_counter_increment
+    alias: "Wazuh Alert — Increment Counters"
+    description: "Increment alert severity counters on each Wazuh MQTT alert"
+    mode: queued
+    max: 30
+    trigger:
+      - platform: mqtt
+        topic: "{{ mqtt_alert_topic }}"
+    action:
+      - choose:
+          # Critical: level >= {{ wazuh_ha_critical_level }}
+          - conditions:
+              - condition: template
+                value_template: >-
+                  {% raw %}{{ trigger.payload_json.level | int >= {% endraw %}{{ wazuh_ha_critical_level }}{% raw %} }}{% endraw %}
+            sequence:
+              - service: counter.increment
+                target:
+                  entity_id: counter.wazuh_critical_alerts
+          # High: level >= 7
+          - conditions:
+              - condition: template
+                value_template: "{% raw %}{{ trigger.payload_json.level | int >= 7 }}{% endraw %}"
+            sequence:
+              - service: counter.increment
+                target:
+                  entity_id: counter.wazuh_high_alerts
+          # Medium: level >= 4
+          - conditions:
+              - condition: template
+                value_template: "{% raw %}{{ trigger.payload_json.level | int >= 4 }}{% endraw %}"
+            sequence:
+              - service: counter.increment
+                target:
+                  entity_id: counter.wazuh_medium_alerts
+
+  # ── Daily counter reset ────────────────────────────────────────────────────
+  - id: wazuh_daily_counter_reset
+    alias: "Wazuh — Daily Counter Reset"
+    description: "Reset alert counters at midnight each day"
+    trigger:
+      - platform: time
+        at: "00:00:00"
+    action:
+      - service: counter.reset
+        target:
+          entity_id:
+            - counter.wazuh_critical_alerts
+            - counter.wazuh_high_alerts
+            - counter.wazuh_medium_alerts
+
+  # ── Critical alert Telegram notification ──────────────────────────────────
+  # Fires when a critical alert (level >= {{ wazuh_ha_critical_level }}) arrives.
+  # Ref: https://www.home-assistant.io/integrations/telegram_bot/
+  # Telegram bot is configured via Section E (or manually): notify.telegram_bot
+  # or notify.notify for the configured Telegram notifier.
+  #
+  # NOTE: This automation is DISABLED by default (enabled: false).
+  # Enable after Telegram bot is configured in configuration.yaml (Section E or manual).
+  # The notify service name depends on the configured telegram notifier name.
+  - id: wazuh_critical_alert_telegram
+    alias: "Wazuh — Critical Alert Telegram Notification"
+    description: "Send Telegram message for Wazuh alerts level >= {{ wazuh_ha_critical_level }}"
+    mode: parallel
+    max: 10
+    enabled: false  # ENABLE after Telegram bot is configured
+    trigger:
+      - platform: mqtt
+        topic: "{{ mqtt_alert_topic }}"
+    condition:
+      - condition: template
+        value_template: >-
+          {% raw %}{{ trigger.payload_json.level | int >= {% endraw %}{{ wazuh_ha_critical_level }}{% raw %} }}{% endraw %}
+    action:
+      - service: notify.telegram_haists
+        data:
+          message: >-
+            {% raw %}🚨 *Wazuh Critical Alert* — Level {{ trigger.payload_json.level }}
+            🖥️ Host: {{ trigger.payload_json.agent_name | default('unknown') }}
+            📋 Rule: {{ trigger.payload_json.rule_id | default('') }} — {{ trigger.payload_json.description | default('') | truncate(200) }}
+            🕐 Time: {{ trigger.payload_json.timestamp | default('') }}{% endraw %}

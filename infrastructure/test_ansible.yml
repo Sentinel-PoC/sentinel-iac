@@ -1,0 +1,20 @@
+---
+- name: Verify Ansible Connectivity
+  hosts: control_node
+  become: yes
+  tasks:
+    - name: Check system uptime
+      command: uptime
+      register: uptime_output
+
+    - name: Show uptime
+      debug:
+        msg: "The system uptime is: {{ uptime_output.stdout }}"
+
+    - name: Verify OpenTofu is present
+      command: tofu --version
+      register: tofu_version
+
+    - name: Show OpenTofu version
+      debug:
+        msg: "Verified OpenTofu: {{ tofu_version.stdout_lines[0] }}"

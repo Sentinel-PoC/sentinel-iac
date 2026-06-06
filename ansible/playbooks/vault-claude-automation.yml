@@ -1,0 +1,136 @@
+---
+# Apply claude-automation Vault policy and ensure the claude-session token role exists.
+#
+# Runs locally (no SSH) — all work is API calls against Vault.
+#
+# IMPORTANT: This playbook applies the policy and creates the token ROLE.
+# It does NOT create or store an actual token — that is an operator task run once:
+#
+#   vault token create -role=claude-session -display-name=claude-code-session
+#   vault kv put secret/operator/claude-session-token token=<value>
+#
+# The stored token is used by Claude Code sessions as VAULT_TOKEN instead of
+# the operator root token, enforcing the policy boundary defined here.
+# secret/operator/* is in the deny list so the token cannot read itself.
+#
+# Required vars (pass via -e or environment):
+#   vault_token  — root token or token with sys/policies/acl write + auth/token/roles write
+#
+# Example run:
+#   ansible-playbook ansible/playbooks/vault-claude-automation.yml \
+#     -e vault_token="${VAULT_TOKEN}"
+#
+# Idempotent: safe to re-run.
+#
+# Tracking: OPS-736
+
+- name: Apply claude-automation Vault policy and claude-session token role
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    vault_addr: "https://192.168.12.206:8200"
+    policy_name: "claude-automation"
+    policy_file: "{{ playbook_dir }}/../../infrastructure/vault-dr/policies/claude-automation.hcl"
+    token_role_name: "claude-session"
+
+  tasks:
+    - name: "Fail fast if vault_token is not set"
+      ansible.builtin.fail:
+        msg: "vault_token must be provided via -e vault_token=<token>"
+      when: vault_token is not defined or vault_token == ""
+
+    - name: "Read claude-automation policy HCL from repo"
+      ansible.builtin.slurp:
+        src: "{{ policy_file }}"
+      register: _policy_hcl
+
+    - name: "Apply claude-automation policy to Vault"
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/policies/acl/{{ policy_name }}"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          policy: "{{ _policy_hcl.content | b64decode }}"
+        status_code: [200, 204]
+        validate_certs: false
+      no_log: true
+      register: _policy_result
+      changed_when: _policy_result.status in [200, 204]
+
+    - name: "Confirm policy applied (read back)"
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/sys/policies/acl/{{ policy_name }}"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      no_log: true
+      register: _policy_readback
+
+    - name: "Show policy character count (verify non-empty)"
+      ansible.builtin.debug:
+        msg: "Policy {{ policy_name }} applied — {{ _policy_readback.json.policy | length }} chars"
+
+    - name: "Create or update claude-session token role"
+      # A token role breaks the 'child must be subset of parent' constraint,
+      # allowing any token holder to create a claude-automation-policy token
+      # regardless of their own policy set. Period=720h (30 days), renewable.
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/token/roles/{{ token_role_name }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          allowed_policies:
+            - "{{ policy_name }}"
+          period: "720h"
+          renewable: true
+          orphan: true
+          token_type: "service"
+        status_code: [200, 204]
+        validate_certs: false
+      no_log: true
+      register: _role_result
+      changed_when: _role_result.status in [200, 204]
+
+    - name: "Confirm token role exists"
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/auth/token/roles/{{ token_role_name }}"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        status_code: [200]
+        validate_certs: false
+      no_log: true
+      register: _role_readback
+
+    - name: "Show token role summary"
+      ansible.builtin.debug:
+        msg: >
+          Token role '{{ token_role_name }}' confirmed:
+          allowed_policies={{ _role_readback.json.data.allowed_policies }},
+          period={{ _role_readback.json.data.period }},
+          renewable={{ _role_readback.json.data.renewable }}
+
+    - name: "Operator reminder — token provisioning not automated"
+      ansible.builtin.debug:
+        msg: |
+          -------------------------------------------------------
+          OPERATOR ACTION REQUIRED after first run:
+            vault token create -role={{ token_role_name }} \
+              -display-name=claude-code-session
+            vault kv put secret/operator/claude-session-token \
+              token=<value above>
+          Then update Claude Code session startup to use:
+            VAULT_TOKEN=$(vault kv get -field=token \
+              secret/operator/claude-session-token)
+          -------------------------------------------------------

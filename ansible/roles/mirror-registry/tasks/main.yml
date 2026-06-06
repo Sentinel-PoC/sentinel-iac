@@ -1,0 +1,211 @@
+# ansible/roles/mirror-registry/tasks/main.yml
+#
+# Applied (OPS-148, 2026-04-28): mirror-registry VM deployed manually per
+# OPS-147-mw1-registry-split-runbook.md §1.1–§1.6. This role documents
+# the steps taken and can be used for idempotent re-application or reprovisioning.
+#
+# VM: VMID 215 on 208-pve2 (192.168.12.215, Rocky Linux 9.4 cloud image)
+# Runbook reference: docs/research-april-power-incident/OPS-147-mw1-registry-split-runbook.md
+
+---
+- name: Install mirror-registry prerequisites
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - openssl
+      - jq
+      - curl
+      - tar
+      - firewalld
+    state: present
+
+- name: Enable and start firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    enabled: true
+    state: started
+
+- name: Open firewalld ports for Quay
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    state: enabled
+    immediate: true
+  loop:
+    - "8443"
+    - "443"
+
+- name: Create Quay storage directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "1001"
+    group: "0"
+    mode: "0775"
+  loop:
+    - /var/lib/quay-storage
+    - /var/lib/quay-postgres
+    - /var/lib/sqlite
+    - /etc/quay-install
+    - /srv/backup/sqlite
+
+- name: Deploy SQLite backup script
+  ansible.builtin.copy:
+    dest: /usr/local/bin/quay-sqlite-backup.sh
+    mode: "0755"
+    owner: root
+    group: root
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      ts=$(date +%F)
+      mkdir -p /srv/backup/sqlite
+      # Use .backup command for consistent hot backup (OPS-509 IaC-vs-live backflow)
+      podman exec quay-app sqlite3 /sqlite/quay_sqlite.db ".backup /tmp/quay-backup-${ts}.db" 2>/dev/null || true
+      cp /var/lib/sqlite/quay_sqlite.db /srv/backup/sqlite/quay-${ts}.db.tmp 2>/dev/null \
+        && mv /srv/backup/sqlite/quay-${ts}.db.tmp /srv/backup/sqlite/quay-${ts}.db
+      find /srv/backup/sqlite -name 'quay-*.db' -mtime +14 -delete
+      echo "$(date): SQLite backup to /srv/backup/sqlite/quay-${ts}.db"
+  tags:
+    - backup-cron
+
+- name: Deploy SQLite backup cron
+  ansible.builtin.copy:
+    dest: /etc/cron.d/quay-sqlite-backup
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      # Quay SQLite backup - daily at 02:00
+      0 2 * * * root /usr/local/bin/quay-sqlite-backup.sh >> /var/log/quay-backup.log 2>&1
+  tags:
+    - backup-cron
+
+# --- Dual-home OKD NIC — OPS-148 (2026-04-28) ---
+# Adds a second NIC on the OKD 10.0.0.0/24 L2 network so OKD masters can
+# reach the mirror directly without traversing iac-control.
+# The PVE NIC (net1 on vmbr1) must be added via PVE API before this runs.
+# This role handles the in-VM network + firewall config only.
+
+- name: Create NetworkManager connection for OKD-internal NIC
+  community.general.nmcli:
+    type: ethernet
+    conn_name: "{{ mirror_registry_okd_nm_connection }}"
+    ifname: "{{ mirror_registry_okd_interface }}"
+    ip4: "{{ mirror_registry_okd_cidr }}"
+    gw4: ""
+    dns4: []
+    method4: manual
+    zone: "{{ mirror_registry_okd_firewalld_zone }}"
+    state: present
+  notify: Reload networkmanager
+
+- name: Activate OKD-internal connection
+  ansible.builtin.command:
+    cmd: nmcli connection up "{{ mirror_registry_okd_nm_connection }}"
+  changed_when: false
+  failed_when: false
+
+- name: Create firewalld okd-internal zone
+  ansible.posix.firewalld:
+    zone: "{{ mirror_registry_okd_firewalld_zone }}"
+    state: present
+    permanent: true
+  notify: Reload firewalld
+
+- name: Set okd-internal zone target to DROP
+  ansible.builtin.command:
+    cmd: >
+      firewall-cmd --permanent
+      --zone={{ mirror_registry_okd_firewalld_zone }}
+      --set-target=DROP
+  changed_when: false
+  notify: Reload firewalld
+
+- name: Allow tcp/8443 in okd-internal zone
+  ansible.posix.firewalld:
+    zone: "{{ mirror_registry_okd_firewalld_zone }}"
+    port: "8443/tcp"
+    permanent: true
+    state: enabled
+    immediate: true
+
+- name: Assign OKD NIC interface to okd-internal zone (permanent)
+  ansible.posix.firewalld:
+    zone: "{{ mirror_registry_okd_firewalld_zone }}"
+    interface: "{{ mirror_registry_okd_interface }}"
+    permanent: true
+    state: enabled
+    immediate: true
+
+# --- TLS certificate provisioning via Vault pki_int — OPS-159 (2026-04-30, paths corrected OPS-237 2026-05-11) ---
+# Fetches the Vault-issued cert for mirror.208.haist.farm from Vault KV and
+# deploys it to the Quay runtime config dir (NOT the mirror-registry installer
+# dir at mirror_registry_cert_dir). The Quay container bind-mounts
+# /var/lib/quay-storage/quay-config -> /quay-registry/conf/stack and reads
+# ssl.cert + ssl.key from there. Files at /etc/quay-install/* are only relevant
+# at first-install time (mirror-registry install binary copies them into
+# quay-config during initial provisioning); they have no effect on a running
+# Quay container.
+#
+# Pre-condition: OPS-159 must have populated secret/data/mirror-registry/tls.
+# Invocation: pass vault_token var (token must have read on that path).
+# Usage: ansible-playbook playbooks/mirror-registry.yml -l mirror-registry-01 \
+#          --tags tls-cert -e "vault_token=<token>"
+#
+# Restart mechanism: handler 'restart quay-app' fires `systemctl restart
+# quay-app.service`. The unit's ExecStart uses `podman run --replace`, which
+# tears down the existing container and creates a new one — so bind-mounted
+# ssl.cert/ssl.key are re-read on each service restart.
+
+- name: Fetch TLS cert bundle from Vault KV
+  ansible.builtin.uri:
+    url: "https://vault.208.haist.farm/v1/secret/data/mirror-registry/tls"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ vault_token }}"
+    validate_certs: true
+    return_content: true
+    status_code: 200
+  register: vault_tls_response
+  no_log: true
+  tags:
+    - tls-cert
+
+# ssl.cert is leaf + intermediate concatenated (full chain except root).
+# This lets clients build the chain to a root they trust without needing the
+# intermediate pre-installed locally — standard TLS hygiene. The Vault root
+# CA is intentionally NOT included here; distribute it to client trust stores
+# via the OKD/coreos-trust-bundle path noted below.
+- name: Deploy Vault-issued TLS certificate (ssl.cert = leaf + intermediate)
+  ansible.builtin.copy:
+    dest: "{{ mirror_registry_runtime_config_dir }}/ssl.cert"
+    content: "{{ vault_tls_response.json.data.data.certificate }}\n{{ vault_tls_response.json.data.data.issuing_ca }}"
+    owner: "1001"
+    group: "0"
+    mode: "0644"
+    backup: true
+  notify: Restart quay-app
+  tags:
+    - tls-cert
+
+- name: Deploy Vault-issued TLS private key (ssl.key)
+  ansible.builtin.copy:
+    dest: "{{ mirror_registry_runtime_config_dir }}/ssl.key"
+    content: "{{ vault_tls_response.json.data.data.private_key }}"
+    owner: "1001"
+    group: "0"
+    mode: "0600"
+    backup: true
+  no_log: true
+  notify: Restart quay-app
+  tags:
+    - tls-cert
+
+# NOTE: The Vault root CA (pki/ca/pem — CN=Vault Root CA 208.haist.farm,
+# SKID BD:C1:52:4E:50:58:F5:CB:6A:88:B2:B8:E2:68:27:22:15:A9:09:82) must be
+# distributed to OKD nodes' trust store before MW1 IDMS/CIP apply.
+# See child issue created under OPS-159 for coreos-trust-bundle role.
+
+# NOTE: mirror-registry install binary must be run manually on first provision.
+# See OPS-147 runbook §1.4. Subsequent config changes can be applied via this role.

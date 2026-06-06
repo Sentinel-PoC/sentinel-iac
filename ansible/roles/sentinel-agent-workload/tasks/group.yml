@@ -1,0 +1,75 @@
+---
+# Group provisioning + singular-vs-plural hard guard.
+# OPS-545 F3: pre-existing `sentinel-agent` (singular, GID 995) is the SPIRE
+# Agent container's own service account; the workload entries' selector
+# specifies `sentinel-agents` (PLURAL). These are different groups by design.
+# A typo here would silently break attestation, so we fail loud if anything
+# is wrong.
+
+# ── 1. Hard guard A: confirm SINGULAR group, if present, has its expected GID
+# Use `getent group` shell call (failed_when only on unexpected GID, not on
+# absence). Ansible's `getent` module's fact-setting semantics are version-
+# sensitive; raw getent is portable.
+- name: "[F3 guard] Read pre-existing singular group sentinel-agent (if any)"
+  ansible.builtin.command:
+    cmd: "getent group {{ sentinel_workload_singular_group_name }}"
+  register: singular_group_check
+  changed_when: false
+  failed_when: false  # rc=2 if absent — both absent and present are acceptable
+  check_mode: false  # read-only; must run in --check so the guard below has rc
+
+- name: "[F3 guard] FAIL if singular group GID collides with our intended plural GID"
+  # Real risk: typo-driven cross-wire where the singular and plural end up at
+  # the same GID. We do NOT pin the singular's GID — it's owned by the SPIRE
+  # Agent role and observed to vary by host (e.g., 986 on iac-control). We
+  # only fail if a collision with our plural GID would occur.
+  ansible.builtin.assert:
+    that:
+      - singular_group_check.rc != 0
+        or ((singular_group_check.stdout | default('')).split(':')[2] | int)
+           != sentinel_workload_group_gid
+    fail_msg: >-
+      Pre-existing singular group '{{ sentinel_workload_singular_group_name }}' has GID
+      {{ (singular_group_check.stdout | default('?')).split(':')[2] | default('?') }} —
+      this collides with our intended plural GID {{ sentinel_workload_group_gid }}.
+      Pick a different sentinel_workload_group_gid in inventory/host_vars to avoid
+      breaking the SPIRE Agent container's service account.
+    success_msg: >-
+      No GID collision between '{{ sentinel_workload_singular_group_name }}' (singular)
+      and intended plural GID {{ sentinel_workload_group_gid }}.
+
+# ── 2. Create PLURAL group sentinel-agents at fixed GID
+- name: "Create supplementary group (PLURAL): {{ sentinel_workload_group }}"
+  ansible.builtin.group:
+    name: "{{ sentinel_workload_group }}"
+    gid: "{{ sentinel_workload_group_gid }}"
+    state: present
+    system: false  # regular GID range per D2
+
+# ── 3. Hard guard B: confirm PLURAL group landed at the expected GID
+# Catches a prior accidental creation at a different GID, which would still
+# pass the unix:supplementary_group:sentinel-agents selector (selector matches
+# by name, not GID) but would silently confuse anyone reading /etc/group later.
+- name: "[F3 guard] Re-read plural group to confirm GID"
+  ansible.builtin.command:
+    cmd: "getent group {{ sentinel_workload_group }}"
+  register: plural_group_check
+  changed_when: false
+  failed_when: false  # tolerate absence in --check mode (group not yet created)
+  check_mode: false  # read-only
+
+- name: "[F3 guard] FAIL if plural group GID mismatches expected"
+  ansible.builtin.assert:
+    that:
+      # In --check, the create-group task was simulated; the group may not
+      # actually exist yet. Tolerate rc != 0 in check mode only; under
+      # full apply, the create task ran first and rc must == 0.
+      - (ansible_check_mode and plural_group_check.rc != 0)
+        or ((plural_group_check.stdout | default('')).split(':')[2] | int) == sentinel_workload_group_gid
+    fail_msg: >-
+      Group '{{ sentinel_workload_group }}' check yielded
+      stdout='{{ plural_group_check.stdout | default('') }}' rc={{ plural_group_check.rc }};
+      expected GID {{ sentinel_workload_group_gid }}.
+    success_msg: >-
+      Plural group '{{ sentinel_workload_group }}' GID is correct, or check-mode
+      skipped real creation.

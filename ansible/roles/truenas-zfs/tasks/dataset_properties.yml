@@ -1,0 +1,66 @@
+---
+# truenas-zfs | dataset_properties — idempotent property enforcement (OPS-947)
+#
+# For each entry in truenas_zfs_dataset_properties, reads current properties
+# and PUTs an update only when the current value differs from desired.
+# Idempotent: a second run with unchanged desired state makes no API calls.
+
+- name: truenas-zfs/dataset_properties | fail if no datasets configured
+  ansible.builtin.assert:
+    that:
+      - truenas_zfs_dataset_properties | length > 0
+    fail_msg: >
+      truenas_zfs_dataset_properties is empty. Set a list of
+      {name, compression, atime} dicts or remove dataset_properties from truenas_zfs_tasks.
+  when: truenas_zfs_dataset_properties | length == 0
+
+- name: truenas-zfs/dataset_properties | read current properties for each dataset
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/pool/dataset/id/{{ item.name | urlencode }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_zfs_current_props
+  loop: "{{ truenas_zfs_dataset_properties }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: truenas-zfs/dataset_properties | enforce properties on each dataset
+  ansible.builtin.uri:
+    url: >-
+      {{ truenas_url }}/api/v2.0/pool/dataset/id/{{
+        (truenas_zfs_current_props.results | selectattr('item.name', 'equalto', item.name) | first).json.id | urlencode
+      }}
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      compression: "{{ item.compression | default('LZ4') }}"
+      atime: "{{ item.atime | default('OFF') }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  loop: "{{ truenas_zfs_dataset_properties }}"
+  loop_control:
+    label: "{{ item.name }}"
+  # Only PUT when current value differs from desired
+  when: >-
+    (
+      (truenas_zfs_current_props.results
+        | selectattr('item.name', 'equalto', item.name)
+        | first).json.compression.value | default('') != (item.compression | default('LZ4'))
+    ) or (
+      (truenas_zfs_current_props.results
+        | selectattr('item.name', 'equalto', item.name)
+        | first).json.atime.value | default('') != (item.atime | default('OFF'))
+    )
+  register: truenas_zfs_props_update
+
+- name: truenas-zfs/dataset_properties | report changes
+  ansible.builtin.debug:
+    msg: "Updated {{ truenas_zfs_props_update.results | selectattr('changed') | list | length }} dataset(s)"
+  changed_when: false

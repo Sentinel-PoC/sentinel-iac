@@ -1,0 +1,38 @@
+---
+# Provision Vault Kubernetes auth role + policy for cert-manager
+#
+# This playbook creates the Vault objects required by the vault-issuer
+# ClusterIssuer in overwatch-gitops/apps/cert-manager/:
+#   - Policy: cert-manager (grants pki_int/sign/208-haist-farm create+update)
+#   - K8s auth role: cert-manager (binds SA cert-manager/cert-manager to policy)
+#
+# Background (OPS-1202): the ClusterIssuer was deployed referencing role
+# "cert-manager" but the role was never provisioned in Vault, leaving the
+# issuer Ready=False. This playbook is the IaC source of truth for that role.
+#
+# Runs locally (no SSH dependency) — all work is Vault API calls.
+#
+# Required vars (pass via -e or environment):
+#   vault_token  — Vault token with sys/policies/acl + auth/kubernetes/role
+#                  write scope (operator or claude-automation)
+#
+# Example run (on iac-control or workstation with Vault access):
+#   ansible-playbook ansible/playbooks/vault-k8s-cert-manager.yml \
+#     -e vault_token="$(cat ~/.vault-token)"
+#
+# To override Vault address (if FQDN routes through SSO):
+#   ansible-playbook ansible/playbooks/vault-k8s-cert-manager.yml \
+#     -e vault_token="$(sudo cat /root/.vault-token)" \
+#     -e vault_addr=https://192.168.12.206:8200
+#
+# Idempotent: safe to re-run.
+# Tracking: OPS-1202
+
+- name: Provision Vault cert-manager Kubernetes auth role and policy
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - vault-k8s-cert-manager

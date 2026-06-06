@@ -1,0 +1,40 @@
+---
+# zeek-nids/tasks/wazuh.yml — Wazuh agent install + ossec.conf localfile for Zeek logs
+# OPS-568 — requires wazuh-agent role to have run first (or wazuh-agent package present).
+# This task configures the Wazuh agent's localfile stanza for Zeek JSON logs.
+
+- name: Ensure wazuh-agent package is installed
+  ansible.builtin.apt:
+    name: wazuh-agent
+    state: present
+  register: wazuh_agent_install
+
+- name: Check if Wazuh agent ossec.conf exists
+  ansible.builtin.stat:
+    path: "{{ wazuh_agent_config_path }}"
+  register: ossec_conf_stat
+
+- name: Deploy Zeek localfile stanza into Wazuh ossec.conf
+  ansible.builtin.template:
+    src: ossec-zeek.conf.j2
+    dest: /var/ossec/etc/ossec.conf
+    owner: root
+    group: wazuh
+    mode: "0660"
+  when: ossec_conf_stat.stat.exists
+  notify: Restart wazuh-agent
+
+# If ossec.conf doesn't exist yet (fresh Wazuh install), warn and defer.
+- name: Warn if ossec.conf missing — Wazuh agent may not be configured yet
+  ansible.builtin.debug:
+    msg: >-
+      /var/ossec/etc/ossec.conf not found. Deploy the wazuh-agent role first,
+      then re-run zeek-nids to configure log forwarding.
+  when: not ossec_conf_stat.stat.exists
+
+- name: Ensure wazuh-agent service is started and enabled
+  ansible.builtin.service:
+    name: wazuh-agent
+    state: started
+    enabled: true
+  when: ossec_conf_stat.stat.exists

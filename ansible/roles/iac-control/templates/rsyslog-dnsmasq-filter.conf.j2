@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Drop high-volume dnsmasq query/reply messages before remote forwarding
+# Keeps DHCP, error, and startup messages
+:programname, isequal, "dnsmasq" :msg, contains, "query[" stop
+:programname, isequal, "dnsmasq" :msg, contains, "reply" stop
+:programname, isequal, "dnsmasq" :msg, contains, "cached" stop
+:programname, isequal, "dnsmasq" :msg, contains, "forwarded" stop

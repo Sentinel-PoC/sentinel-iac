@@ -1,0 +1,81 @@
+# SPIRE Agent configuration
+# Deployed by Ansible — OPS-528 (parent OPS-351 Phase 4.2a); OPS-553 x509pop migration
+# Trust domain: {{ spire_trust_domain }}
+# NodeAttestor: x509pop (Vault PKI node cert — stable across restarts)
+# Managed: do not edit manually; changes will be overwritten on next Ansible run.
+
+agent {
+    data_dir = "{{ spire_agent_data_dir_container }}"
+    log_level = "{{ spire_agent_log_level }}"
+
+    # Server reach: host network mode on iac-control means we hit the Server's
+    # docker-proxy listener at {{ spire_server_lan_ip }}:{{ spire_server_host_port }}
+    # via the local NIC. Same-host loopback path; no off-host hops.
+    server_address = "{{ spire_server_lan_ip }}"
+    server_port = "{{ spire_server_host_port }}"
+
+    # Workload API UDS — host-network mode means this path is the same on the
+    # host and inside the container. Workloads connect to /run/spire-agent/agent.sock.
+    socket_path = "{{ spire_agent_socket_path_container }}"
+
+    # Explicit trust anchor for first contact (NOT insecure_bootstrap).
+    # File is fetched at deploy time via `spire-server bundle show -format=pem`.
+    trust_bundle_path = "{{ spire_agent_trust_bundle_path_container }}"
+    trust_domain = "{{ spire_trust_domain }}"
+}
+
+plugins {
+    # x509pop NodeAttestor — OPS-553, replaces join_token.
+    # The agent presents the Vault-PKI-issued node cert at attestation time.
+    # Re-attestation is automatic on every restart: just present the cert.
+    # No one-shot tokens; no manual operator recovery after sleep/restart.
+    # SPIFFE ID: spiffe://agents.haist.farm/spire/agent/x509pop/<fingerprint>
+    # where fingerprint = SHA-1 of cert SubjectPublicKeyInfo DER.
+    # Cert + key provisioned by Ansible --tags spire-node-certs; 1-year TTL.
+    NodeAttestor "x509pop" {
+        plugin_data {
+            private_key_path   = "{{ spire_node_cert_key_container }}"
+            certificate_path   = "{{ spire_node_cert_file_container }}"
+        }
+    }
+
+    # Disk KeyManager — SVID private key persists in data_dir across restarts.
+    # With x509pop, the SVID re-attestation uses the node cert credential — not
+    # the KeyManager key. KeyManager is still needed for the agent's SVID lifecycle.
+    KeyManager "disk" {
+        plugin_data {
+            directory = "{{ spire_agent_data_dir_container }}"
+        }
+    }
+
+    # WorkloadAttestor plugins — used Phase 4.2b+ when workload entries are
+    # registered. Declared now so the agent comes up with a complete plugin
+    # graph; no-op until workload registrations exist on the Server.
+    WorkloadAttestor "unix" {
+        plugin_data {}
+    }
+
+    WorkloadAttestor "docker" {
+        plugin_data {}
+    }
+}
+
+health_checks {
+    # Bound to 127.0.0.1 because the container runs in host network mode —
+    # this listener is on the host's loopback. Server uses 8445; we use 8446.
+    listener_enabled = true
+    bind_address     = "127.0.0.1"
+    bind_port        = "{{ spire_agent_health_port }}"
+    live_path        = "/live"
+    ready_path       = "/ready"
+}
+
+telemetry {
+    # Prometheus metrics on host port {{ spire_agent_telemetry_port }}
+    # (Server uses {{ spire_telemetry_port }} — disjoint to avoid host collision).
+    # Not externally wired to Prometheus in Phase 4.2a — port available for scrape
+    # config wiring in a follow-up issue.
+    Prometheus {
+        port = {{ spire_agent_telemetry_port }}
+    }
+}

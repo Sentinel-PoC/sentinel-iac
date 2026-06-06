@@ -1,0 +1,30 @@
+[Unit]
+Description=forgejo-runner wedge watchdog — RESULT_CANCELLED auto-recovery (OPS-775)
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac
+After=forgejo-runner.service
+Requires=forgejo-runner.service
+
+[Service]
+Type=oneshot
+User=root
+
+# Configurable via /etc/forgejo-runner-watchdog/env
+Environment=WEDGE_WINDOW_SECONDS=300
+Environment=SERVICE_NAME=forgejo-runner
+EnvironmentFile=-/etc/forgejo-runner-watchdog/env
+
+ExecStart=/usr/local/bin/forgejo-runner-watchdog.sh
+
+# Short timeout — watchdog check should complete in seconds.
+TimeoutStartSec=60
+
+# Log to journal; Wazuh monitors for user.warning from forgejo-runner-watchdog.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forgejo-runner-watchdog
+
+# Do not auto-restart watchdog itself on failure.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+---
+- name: Restart forgejo
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate
+    chdir: "{{ forgejo_dir }}"
+  changed_when: false
+  listen: Restart forgejo
+
+- name: Restart forgejo-nginx
+  ansible.builtin.command:
+    cmd: docker compose up -d --force-recreate nginx
+    chdir: "{{ forgejo_dir }}"
+  changed_when: false
+  listen: Restart forgejo-nginx
+
+- name: Daemon reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: Daemon reload

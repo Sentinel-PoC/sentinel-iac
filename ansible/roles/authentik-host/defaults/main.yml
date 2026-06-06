@@ -1,0 +1,89 @@
+---
+# authentik-host role defaults — OPS-605
+# Tracking: https://plane.208.haist.farm OPS-605
+# Phase 1: Deploy Authentik (parallel with existing Keycloak; no cutover)
+#
+# Upstream compose reference (verified 2026-05-13):
+#   https://docs.goauthentik.io/compose.yml  (version 2026.2.3)
+#   https://docs.goauthentik.io/install-config/install/docker-compose/
+#
+# NOTE: Authentik 2026.2.x removed Redis as a hard dependency.
+# The upstream compose.yml (fetched directly) has no Redis service.
+# This role matches upstream — no Redis container.
+#
+# Sensitive values (secret_key, postgresql_password, admin_email) are
+# supplied at runtime from Vault (secret/authentik/*) — never set here.
+
+# ── Images (upstream: ghcr.io/goauthentik/server) ──────────────────────────
+# Pin exact release tag; verified against GitHub releases 2026-05-13.
+# Both server and worker use the same image — differ only in command.
+# Upstream compose: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server}:${AUTHENTIK_TAG:-2026.2.3}
+authentik_version: "2026.2.3"
+authentik_image: "ghcr.io/goauthentik/server"
+authentik_postgresql_image: "docker.io/library/postgres:16-alpine"
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+authentik_compose_dir: "/opt/authentik"
+
+# ── Networking ─────────────────────────────────────────────────────────────
+# Pangolin reverse proxy terminates TLS and proxies to authentik_http_port.
+# Upstream defaults: 9000 (HTTP) / 9443 (HTTPS).
+# We expose only 9000 to the host; Pangolin terminates TLS externally.
+authentik_http_port: 9000
+authentik_https_port: 9443
+authentik_external_hostname: "auth-next.208.haist.farm"
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────
+# Upstream uses PG_DB / PG_USER / PG_PASS env vars in the postgresql service
+# and AUTHENTIK_POSTGRESQL__* env vars in server/worker.
+# Service hostname inside compose: "postgresql" (matches upstream service name)
+authentik_db_name: "authentik"
+authentik_db_user: "authentik"
+authentik_db_password: ""        # Vault: secret/authentik.postgresql_password
+
+# ── Authentik secrets ──────────────────────────────────────────────────────
+authentik_secret_key: ""         # Vault: secret/authentik.secret_key
+#   Generate: openssl rand -base64 60 | tr -d '\n'
+#   Postgres password max 99 chars (PostgreSQL limitation)
+authentik_admin_email: ""        # Vault: secret/authentik.admin_email
+#   Used by Authentik's first-run setup flow — operator-decided
+
+# ── Error reporting ────────────────────────────────────────────────────────
+# Upstream recommends false for self-hosted; set true only if opting in to
+# Sentry telemetry to Authentik Security Inc.
+authentik_error_reporting_enabled: false
+
+# ── Proxy trust ────────────────────────────────────────────────────────────
+# Pangolin reverse proxy IP for X-Forwarded-For trust.
+# Pangolin VIP: 192.168.12.168 (see pangolin/dynamic/sentinel-vm-services.yml)
+authentik_trusted_proxy_cidrs: "192.168.12.168/32"
+
+# ── Vault ──────────────────────────────────────────────────────────────────
+# vault_addr: cross-role shared variable (platform convention).
+# Same pattern in misp, keycloak-agent-clients, seedbox roles.
+vault_addr: "https://192.168.12.206:8200"  # noqa: var-naming[no-role-prefix]
+authentik_vault_path: "secret/authentik"
+
+# ── Phase 2: Keycloak federation ─────────────────────────────────────────────
+# Federation config for the Keycloak upstream OIDC source.
+# Keycloak OIDC client "authentik-federation" in realm "sentinel"
+# was provisioned by OPS-605 Phase 2; client_secret stored in Vault.
+# These defaults reference the sentinel realm OIDC discovery endpoint.
+authentik_keycloak_host: "https://auth.208.haist.farm"
+authentik_keycloak_realm: "sentinel"
+authentik_keycloak_discovery_url: >-
+  {{ authentik_keycloak_host }}/realms/{{ authentik_keycloak_realm }}/.well-known/openid-configuration
+# Secrets sourced from Vault at runtime by vault-secrets.yml:
+authentik_keycloak_client_id: ""       # Vault: secret/authentik/keycloak-upstream.client_id
+authentik_keycloak_client_secret: ""   # Vault: secret/authentik/keycloak-upstream.client_secret
+authentik_admin_token: ""              # Vault: secret/authentik.admin_token
+
+# OPS-684: Email scope mapping fix — scope mapping PKs for idempotent swap.
+# authentik_email_broken_mapping_pk: Authentik default managed mapping (email_verified: False)
+#   This is a managed object (goauthentik.io/providers/oauth2/scope-email) — cannot be patched.
+# authentik_email_fixed_mapping_pk:  "Pangolin: OpenID email (verified)" (email_verified: True)
+#   Platform-local unmanaged mapping created during OPS-684 investigation.
+# The email-scope-fix.yml task swaps the broken PK for the fixed PK in all OAuth2 providers.
+# Live fix was applied 2026-05-18 via direct API call — 20 providers updated.
+authentik_email_broken_mapping_pk: "49d5d850-016d-41d8-9304-7d65703b82b1"
+authentik_email_fixed_mapping_pk: "05fbfc9d-3eb4-4531-8b6d-2035f8efcaf1"

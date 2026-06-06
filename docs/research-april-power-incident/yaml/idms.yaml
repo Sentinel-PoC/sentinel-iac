@@ -1,0 +1,69 @@
+# ImageDigestMirrorSet — Harbor-primary, mirror-fallback
+#
+# Two intents bundled in one IDMS:
+#
+# 1. App images (sentinel/*): cluster pulls primarily from Harbor; if Harbor
+#    is unreachable, cri-o falls back to the off-cluster mirror at
+#    mirror.208.haist.farm/sentinel-mirror. mirrorSourcePolicy is
+#    AllowContactingSource — we keep the primary path live during normal ops.
+#    The "source" here is harbor.208.haist.farm/sentinel itself, because that
+#    is the path our deployments and Helm charts already reference. The
+#    fallback applies only when Harbor's /v2/ is down.
+#
+# 2. Platform/release images (quay.io/openshift-release-dev,
+#    registry.redhat.io, quay.io for Kyverno/cert-manager/etc): cluster
+#    pulls EXCLUSIVELY from the off-cluster mirror. mirrorSourcePolicy is
+#    NeverContactSource — the cluster has no public-internet egress in the
+#    target air-gapped posture, and we do not want a misconfig silently
+#    contacting upstream. This is the install-time pattern from
+#    `oc-mirror v2 --output idms-oc-mirror.yaml`, applied post-install.
+#
+# Apply target: OKD 4.19. Schema: config.openshift.io/v1.
+#
+# Note: applying this IDMS will trigger an MCO rollout — masters reboot
+# one at a time. Plan the MW1 window accordingly. The cluster admission
+# path stays up across the rollout.
+#
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: harbor-primary-mirror-fallback
+  annotations:
+    sentinel.haist.farm/issue: OPS-147
+spec:
+  imageDigestMirrors:
+    # ---- App images: Harbor primary, mirror fallback ----
+    - source: harbor.208.haist.farm/sentinel
+      mirrors:
+        - mirror.208.haist.farm/sentinel-mirror
+      mirrorSourcePolicy: AllowContactingSource
+
+    # ---- OKD release content: mirror only ----
+    - source: quay.io/openshift-release-dev
+      mirrors:
+        - mirror.208.haist.farm/openshift-release-dev
+      mirrorSourcePolicy: NeverContactSource
+    - source: quay.io/okd
+      mirrors:
+        - mirror.208.haist.farm/okd
+      mirrorSourcePolicy: NeverContactSource
+
+    # ---- Red Hat ecosystem (Kyverno, cert-manager, GitOps source images): mirror only ----
+    - source: registry.redhat.io
+      mirrors:
+        - mirror.208.haist.farm/redhat
+      mirrorSourcePolicy: NeverContactSource
+
+    # ---- Community/upstream platform images: mirror only ----
+    - source: ghcr.io/kyverno
+      mirrors:
+        - mirror.208.haist.farm/kyverno
+      mirrorSourcePolicy: NeverContactSource
+    - source: quay.io/jetstack
+      mirrors:
+        - mirror.208.haist.farm/jetstack
+      mirrorSourcePolicy: NeverContactSource
+    - source: docker.io/bitnami
+      mirrors:
+        - mirror.208.haist.farm/bitnami
+      mirrorSourcePolicy: NeverContactSource

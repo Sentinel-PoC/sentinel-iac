@@ -1,0 +1,660 @@
+---
+# Supply-chain security-scan composite action
+# SEC-60: SBOM generation (Syft CycloneDX) + DefectDojo ingestion
+# SEC-61: OSV-Scanner + language-specific audit (npm/pip/go/cargo)
+# SEC-62: SLSA v1.0 provenance attestation via cosign attest
+#
+# Usage: after buildah push in any rebuild-* workflow, add:
+#   - uses: ./.forgejo/actions/security-scan
+#     with:
+#       image-ref: harbor.208.haist.farm/sentinel/myapp@sha256:...
+#       language: python
+#       source-dir: .
+#       defectdojo-engagement-id: ${{ secrets.DD_ENGAGEMENT_SENTINEL }}
+#       defectdojo-token: ${{ secrets.DEFECTDOJO_API_KEY }}
+#       cosign-key: ${{ secrets.COSIGN_KEY }}
+#
+# Idempotent: cosign sign --yes overwrites existing sig; cosign attest
+# --replace overwrites existing attestation. Running twice is safe.
+
+name: "Supply-chain Security Scan"
+description: >
+  SBOM generation (Syft CycloneDX), language-specific supply-chain audit
+  (OSV-Scanner + npm/pip/go/cargo), DefectDojo ingestion, SLSA v1.0
+  provenance attestation, and cosign image signing. SEC-60/61/62.
+
+inputs:
+  image-ref:
+    description: >
+      Fully-qualified image reference (with digest preferred):
+      harbor.208.haist.farm/sentinel/myapp@sha256:abc123
+      OR harbor.208.haist.farm/sentinel/myapp:tag
+    required: true
+
+  language:
+    description: >
+      Language ecosystem for lockfile-based supply-chain audit.
+      node   -> npm audit signatures
+      python -> pip-audit
+      go     -> govulncheck
+      rust   -> cargo audit
+      none   -> skip lockfile audit (still runs SBOM + OSV image scan)
+    required: false
+    default: "none"
+
+  source-dir:
+    description: "Path to source directory containing lockfiles"
+    required: false
+    default: "."
+
+  defectdojo-url:
+    description: "DefectDojo base URL"
+    required: false
+    default: "https://defectdojo.208.haist.farm"
+
+  defectdojo-engagement-id:
+    description: "DefectDojo engagement ID for this product (numeric)"
+    required: false
+    default: ""
+
+  defectdojo-product-name:
+    description: "DefectDojo product name (used if engagement-id is empty)"
+    required: false
+    default: "Sentinel Platform"
+
+  defectdojo-token:
+    description: "DefectDojo API token"
+    required: true
+
+  cosign-key:
+    description: "PEM-encoded cosign private key (from secret/cosign private_key)"
+    required: true
+
+  cosign-password:
+    description: "Cosign key password (empty string if none)"
+    required: false
+    default: ""
+
+  upload-sbom:
+    description: "Upload SBOM and OSV findings to DefectDojo (true|false)"
+    required: false
+    default: "true"
+
+  hard-fail-on-critical:
+    description: "Exit non-zero if OSV-Scanner finds malicious packages"
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    # ---------------------------------------------------------------
+    # STEP 0: Bridge container credentials for registry tools
+    # OPS-1140: buildah login writes Harbor credentials to containers/auth.json.
+    # Tools that use go-containerregistry (syft oci-registry, cosign) read
+    # ~/.docker/config.json instead — a different credential store.
+    # Without this bridge, syft and cosign both fail with UNAUTHORIZED
+    # from Harbor's Referrers/manifest API before any real work happens.
+    # This step runs once at the top so every subsequent step benefits.
+    # Format is identical: {"auths":{"registry":{"auth":"base64creds"}}}
+    # ---------------------------------------------------------------
+    - name: Bridge container registry credentials
+      shell: bash
+      run: |
+        # NOTE: on the buildah runner LXCs the service runs as uid 1000 with no
+        # logind PAM session, so /run/user/$(id -u) is never created and the
+        # containers library falls back to /var/tmp/containers-user-<UID>/containers/
+        # (verified via pct exec on LXCs 210-215, OPS-1140). That path MUST be in
+        # this list or syft pulls from Harbor unauthenticated and the job dies.
+        for _auth_candidate in \
+          "/var/tmp/containers-user-$(id -u)/containers/containers/auth.json" \
+          "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json" \
+          "${HOME}/.local/share/containers/auth.json" \
+          "${HOME}/.config/containers/auth.json" \
+          "/run/user/$(id -u)/containers/auth.json" \
+          "/run/containers/storage/auth.json" \
+          "/etc/containers/auth.json"; do
+          if [ -f "${_auth_candidate}" ]; then
+            mkdir -p "${HOME}/.docker"
+            if [ ! -f "${HOME}/.docker/config.json" ]; then
+              cp "${_auth_candidate}" "${HOME}/.docker/config.json"
+              echo "[OPS-1140] Bridged ${_auth_candidate} → ~/.docker/config.json for registry auth"
+            else
+              echo "[OPS-1140] ~/.docker/config.json already present — skipping bridge"
+            fi
+            break
+          fi
+        done
+
+    # ---------------------------------------------------------------
+    # STEP 1: Generate CycloneDX SBOM via Syft
+    # Syft scans the image filesystem and emits a CycloneDX 1.4 JSON.
+    # Uses --scope all-layers to capture every installed package.
+    # ---------------------------------------------------------------
+    - name: Generate CycloneDX SBOM (Syft)
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-60: SBOM Generation ==="
+        echo "Image: ${IMAGE_REF}"
+
+        # Syft must be installed on the runner (iac-control role installs it)
+        if ! command -v syft >/dev/null 2>&1; then
+          echo "::error::syft not found on runner. Install via: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin"
+          exit 1
+        fi
+
+        syft "${IMAGE_REF}" \
+          --scope all-layers \
+          --output cyclonedx-json=sbom.cyclonedx.json \
+          --output table
+
+        COMPONENT_COUNT=$(python3 -c "import json; d=json.load(open('sbom.cyclonedx.json')); print(len(d.get('components', [])))" 2>/dev/null || echo "unknown")
+        echo "SBOM generated: sbom.cyclonedx.json (${COMPONENT_COUNT} components)"
+        echo "sbom_component_count=${COMPONENT_COUNT}" >> "${GITHUB_OUTPUT}"
+
+    # ---------------------------------------------------------------
+    # STEP 2: Language-specific supply-chain audit
+    # Checks package provenance / known vulnerabilities at the lockfile
+    # level — catches things Trivy misses (malicious packages in OSV).
+    # ---------------------------------------------------------------
+    - name: Language supply-chain audit
+      shell: bash
+      env:
+        LANGUAGE: ${{ inputs.language }}
+        SOURCE_DIR: ${{ inputs.source-dir }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-61: Language Supply-chain Audit (${LANGUAGE}) ==="
+        cd "${SOURCE_DIR}"
+
+        case "${LANGUAGE}" in
+          node)
+            echo "Running npm audit signatures..."
+            if [ -f package-lock.json ]; then
+              # npm audit signatures verifies SLSA/sigstore provenance on npm packages
+              npm audit signatures 2>&1 | tee npm-audit-signatures.txt
+              # Also run standard vulnerability audit (non-blocking on non-critical)
+              npm audit --audit-level=critical 2>&1 | tee npm-audit-vulns.txt || {
+                echo "::warning::npm audit found critical vulnerabilities — review npm-audit-vulns.txt"
+              }
+            elif [ -f pnpm-lock.yaml ]; then
+              echo "pnpm lockfile detected — running pnpm audit"
+              pnpm audit --audit-level=critical 2>&1 | tee npm-audit-vulns.txt || {
+                echo "::warning::pnpm audit found critical vulnerabilities"
+              }
+            else
+              echo "::warning::No package-lock.json or pnpm-lock.yaml found in ${SOURCE_DIR}. Skipping npm audit."
+            fi
+            ;;
+
+          python)
+            echo "Running pip-audit..."
+            if command -v pip-audit >/dev/null 2>&1; then
+              if [ -f requirements.txt ]; then
+                pip-audit -r requirements.txt --format json --output pip-audit-report.json 2>&1 || {
+                  echo "::warning::pip-audit found vulnerabilities — review pip-audit-report.json"
+                }
+              elif [ -f pyproject.toml ]; then
+                pip-audit --format json --output pip-audit-report.json 2>&1 || {
+                  echo "::warning::pip-audit found vulnerabilities — review pip-audit-report.json"
+                }
+              else
+                echo "::warning::No requirements.txt or pyproject.toml found. Skipping pip-audit."
+              fi
+            else
+              echo "::warning::pip-audit not installed. Install: pip install pip-audit"
+            fi
+            ;;
+
+          go)
+            echo "Running govulncheck..."
+            if command -v govulncheck >/dev/null 2>&1; then
+              govulncheck ./... 2>&1 | tee govulncheck-report.txt || {
+                echo "::warning::govulncheck found vulnerabilities — review govulncheck-report.txt"
+              }
+            else
+              echo "::warning::govulncheck not installed. Install: go install golang.org/x/vuln/cmd/govulncheck@latest"
+            fi
+            ;;
+
+          rust)
+            echo "Running cargo audit..."
+            if command -v cargo-audit >/dev/null 2>&1 || command -v cargo >/dev/null 2>&1; then
+              cargo audit --json > cargo-audit-report.json 2>&1 || {
+                echo "::warning::cargo audit found vulnerabilities — review cargo-audit-report.json"
+              }
+            else
+              echo "::warning::cargo audit not installed. Install: cargo install cargo-audit"
+            fi
+            ;;
+
+          none)
+            echo "language=none — skipping lockfile-based audit (SBOM+OSV image scan still runs)"
+            ;;
+
+          *)
+            echo "::warning::Unknown language '${LANGUAGE}'. Valid values: node, python, go, rust, none"
+            ;;
+        esac
+
+    # ---------------------------------------------------------------
+    # STEP 3: OSV-Scanner on image filesystem
+    # Scans the image for OSV database matches including malicious
+    # package entries (not just CVEs — this is the key difference
+    # from Trivy).
+    # ---------------------------------------------------------------
+    - name: OSV-Scanner image scan
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        HARD_FAIL: ${{ inputs.hard-fail-on-critical }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-61: OSV-Scanner ==="
+
+        if ! command -v osv-scanner >/dev/null 2>&1; then
+          echo "::warning::osv-scanner not found — skipping OSV image scan. Install: https://google.github.io/osv-scanner/"
+          echo '{"results": [], "experimental_config": {}}' > osv.json
+          exit 0
+        fi
+
+        # OSV-Scanner can scan lockfiles directly from a directory.
+        # For image filesystem scanning, extract via Trivy/syft or use
+        # the --lockfile flags. Here we scan the source-dir lockfiles
+        # since image filesystem extraction requires privileged docker.
+        # The image-level SBOM from Step 1 provides the package inventory.
+        OSV_EXIT=0
+        osv-scanner \
+          --format json \
+          --output osv.json \
+          --recursive \
+          . || OSV_EXIT=$?
+
+        # Parse results
+        VULN_COUNT=$(python3 -c "
+        import json, sys
+        try:
+            d = json.load(open('osv.json'))
+            results = d.get('results', [])
+            total = sum(len(r.get('packages', [])) for r in results)
+            print(total)
+        except Exception as e:
+            print(0)
+        " 2>/dev/null || echo 0)
+
+        echo "OSV-Scanner findings: ${VULN_COUNT} affected packages"
+        echo "OSV-Scanner exit code: ${OSV_EXIT}"
+
+        # Hard-fail on malicious package findings (MAL-* or 'malicious' in summary).
+        # Also hard-fail if osv-scanner itself returned non-zero AND any malicious
+        # findings exist — belt-and-suspenders: non-zero exit means scanner found
+        # something, MAL-* check confirms it is a provenance/supply-chain threat.
+        if [ "${HARD_FAIL}" = "true" ]; then
+          MALICIOUS=$(python3 -c "
+        import json
+        try:
+            d = json.load(open('osv.json'))
+            malicious = []
+            for result in d.get('results', []):
+                for pkg in result.get('packages', []):
+                    for vuln in pkg.get('vulnerabilities', []):
+                        vuln_id = vuln.get('id', '')
+                        summary = vuln.get('summary', '').lower()
+                        if 'malicious' in summary or vuln_id.startswith('MAL-'):
+                            malicious.append(vuln_id)
+            print(len(malicious))
+            if malicious:
+                print('Malicious package IDs:', malicious, file=__import__('sys').stderr)
+        except Exception:
+            print(0)
+          " 2>&1)
+          MAL_COUNT=$(echo "$MALICIOUS" | head -1)
+          if [ "${MAL_COUNT:-0}" -gt 0 ]; then
+            echo "::error::OSV-Scanner detected ${MAL_COUNT} malicious package entries. Build failed."
+            echo "::error::Review osv.json for MAL-* or malicious-tagged entries."
+            exit 1
+          fi
+          # OSV_EXIT non-zero but no MAL-* parsed — scanner may have failed to write
+          # JSON or found only non-malicious vulns (CVEs). Treat as warning, not hard-fail,
+          # so transient osv-scanner errors don't block every build.
+          if [ "${OSV_EXIT}" -ne 0 ] && [ "${MAL_COUNT:-0}" -eq 0 ]; then
+            echo "::warning::OSV-Scanner exited ${OSV_EXIT} but no MAL-* findings parsed. Check osv.json manually."
+          fi
+        fi
+
+    # ---------------------------------------------------------------
+    # STEP 4: Upload SBOM to DefectDojo
+    # Uses reimport-scan for idempotency (updates existing test run).
+    # scan_type=CycloneDX Scan requires DefectDojo >= 2.x with the
+    # CycloneDX parser enabled (default in all current releases).
+    # ---------------------------------------------------------------
+    - name: Upload SBOM to DefectDojo
+      shell: bash
+      if: ${{ inputs.upload-sbom == 'true' && hashFiles('sbom.cyclonedx.json') != '' }}
+      env:
+        DD_URL: ${{ inputs.defectdojo-url }}
+        DD_TOKEN: ${{ inputs.defectdojo-token }}
+        DD_ENGAGEMENT_ID: ${{ inputs.defectdojo-engagement-id }}
+        DD_PRODUCT_NAME: ${{ inputs.defectdojo-product-name }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-60: Upload SBOM to DefectDojo ==="
+
+        # [OPS-863] Strip digest for SHA-stable test_title.
+        # IMAGE_REF is digest-based (harbor.../repo@sha256:XXX). DefectDojo creates
+        # a new test for each unique test_title — if test_title embeds the digest,
+        # a new test is created per build and close_old_findings never fires across
+        # builds, causing stale SBOM accumulation. Strip @sha256:... for a stable key.
+        IMAGE_STABLE="${IMAGE_REF%%@sha256:*}"
+
+        # Build form data based on whether we have an engagement ID or product name
+        if [ -n "${DD_ENGAGEMENT_ID}" ]; then
+          ENGAGEMENT_FIELDS="-F engagement=${DD_ENGAGEMENT_ID}"
+        else
+          ENGAGEMENT_FIELDS="-F product_name=${DD_PRODUCT_NAME} -F engagement_name=sentinel-platform-sbom -F auto_create_context=true"
+        fi
+
+        RESPONSE=$(curl -sk -X POST "${DD_URL}/api/v2/reimport-scan/" \
+          -H "Authorization: Token ${DD_TOKEN}" \
+          -F "scan_type=CycloneDX Scan" \
+          ${ENGAGEMENT_FIELDS} \
+          -F "test_title=SBOM: ${IMAGE_STABLE}" \
+          -F "file=@sbom.cyclonedx.json" \
+          -F "active=true" \
+          -F "verified=false" \
+          -F "close_old_findings=false" \
+          -F "minimum_severity=Info" \
+          -F "scan_date=$(date +%Y-%m-%d)" \
+          -F "tags=sbom,cyclonedx,supply-chain,sec-60" \
+          -w "\n%{http_code}" 2>/dev/null)
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -1)
+        echo "DefectDojo SBOM upload HTTP status: ${HTTP_CODE}"
+
+        if [ "${HTTP_CODE}" -ge 400 ]; then
+          echo "::warning::DefectDojo SBOM upload failed (HTTP ${HTTP_CODE}): ${BODY}"
+          echo "::warning::Continuing — SBOM artifact is available in workflow artifacts"
+        else
+          echo "SBOM uploaded to DefectDojo"
+        fi
+
+    # ---------------------------------------------------------------
+    # STEP 5: Upload OSV findings to DefectDojo
+    # ---------------------------------------------------------------
+    - name: Upload OSV findings to DefectDojo
+      shell: bash
+      if: ${{ inputs.upload-sbom == 'true' && hashFiles('osv.json') != '' }}
+      env:
+        DD_URL: ${{ inputs.defectdojo-url }}
+        DD_TOKEN: ${{ inputs.defectdojo-token }}
+        DD_ENGAGEMENT_ID: ${{ inputs.defectdojo-engagement-id }}
+        DD_PRODUCT_NAME: ${{ inputs.defectdojo-product-name }}
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-61: Upload OSV findings to DefectDojo ==="
+
+        # [OPS-863] Strip digest for SHA-stable test_title (same fix as SBOM upload above).
+        IMAGE_STABLE="${IMAGE_REF%%@sha256:*}"
+
+        # Check if osv.json has any results
+        HAS_RESULTS=$(python3 -c "
+        import json
+        try:
+            d = json.load(open('osv.json'))
+            print('true' if d.get('results') else 'false')
+        except Exception:
+            print('false')
+        " 2>/dev/null || echo "false")
+
+        if [ "${HAS_RESULTS}" = "false" ]; then
+          echo "No OSV findings to upload — skipping"
+          exit 0
+        fi
+
+        if [ -n "${DD_ENGAGEMENT_ID}" ]; then
+          ENGAGEMENT_FIELDS="-F engagement=${DD_ENGAGEMENT_ID}"
+        else
+          ENGAGEMENT_FIELDS="-F product_name=${DD_PRODUCT_NAME} -F engagement_name=sentinel-platform-osv -F auto_create_context=true"
+        fi
+
+        RESPONSE=$(curl -sk -X POST "${DD_URL}/api/v2/reimport-scan/" \
+          -H "Authorization: Token ${DD_TOKEN}" \
+          -F "scan_type=OSV Scan" \
+          ${ENGAGEMENT_FIELDS} \
+          -F "test_title=OSV: ${IMAGE_STABLE}" \
+          -F "file=@osv.json" \
+          -F "active=true" \
+          -F "verified=false" \
+          -F "close_old_findings=true" \
+          -F "minimum_severity=Low" \
+          -F "scan_date=$(date +%Y-%m-%d)" \
+          -F "tags=osv,supply-chain,malicious-package,sec-61" \
+          -w "\n%{http_code}" 2>/dev/null)
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        echo "DefectDojo OSV upload HTTP status: ${HTTP_CODE}"
+
+        if [ "${HTTP_CODE}" -ge 400 ]; then
+          echo "::warning::DefectDojo OSV upload failed (HTTP ${HTTP_CODE}) — continuing"
+        else
+          echo "OSV findings uploaded to DefectDojo"
+        fi
+
+    # ---------------------------------------------------------------
+    # STEP 6: Generate SLSA v1.0 provenance predicate JSON (body only)
+    #
+    # OPS-910: Fixed predicate format — body only, not full in-toto statement.
+    # Previous version wrapped the predicate in _type/subject/predicateType/predicate
+    # fields (a full in-toto statement). cosign interprets the input as the predicate
+    # body only, so it searched for buildDefinition at the top level and found it
+    # nested inside "predicate" instead — causing "required field buildDefinition missing"
+    # (OPS-696 layer-6 root cause, also documented in overwatch-gitops attest composite).
+    #
+    # Fields populated from Forgejo Actions environment variables.
+    # ---------------------------------------------------------------
+    - name: Generate SLSA v1.0 provenance predicate
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-62: Generate SLSA v1.0 provenance predicate (OPS-910 fixed format) ==="
+
+        python3 - <<'PYEOF'
+        import json, os, datetime
+
+        # OPS-910: predicate BODY only — no outer _type/subject/predicateType/predicate wrapper.
+        # cosign builds the outer in-toto statement (with _type, subject, predicateType) itself.
+        # Passing the full statement as --predicate causes cosign to look for buildDefinition
+        # at top level and fail because it is nested under "predicate".
+        predicate = {
+            "buildDefinition": {
+                "buildType": "https://forgejo.208.haist.farm/actions/runner@v1",
+                "externalParameters": {
+                    "source": {
+                        "repository": os.environ.get("GITHUB_SERVER_URL", "https://forgejo.208.haist.farm") + "/" + os.environ.get("GITHUB_REPOSITORY", ""),
+                        "revision": os.environ.get("GITHUB_SHA", ""),
+                        "ref": os.environ.get("GITHUB_REF", ""),
+                    },
+                    "workflow": os.environ.get("GITHUB_WORKFLOW", ""),
+                    "event": os.environ.get("GITHUB_EVENT_NAME", ""),
+                },
+                "internalParameters": {
+                    "runner_environment": "forgejo-runner",
+                    "runner_host": "iac-control.208.haist.farm",
+                }
+            },
+            "runDetails": {
+                "builder": {
+                    "id": "https://forgejo.208.haist.farm/" + os.environ.get("GITHUB_REPOSITORY", "") + "/actions/runner",
+                    "version": {
+                        "runner": "forgejo-runner-v5"
+                    }
+                },
+                "metadata": {
+                    "invocationId": os.environ.get("GITHUB_RUN_ID", "") + "/" + os.environ.get("GITHUB_RUN_ATTEMPT", "1"),
+                    "startedOn": datetime.datetime.utcnow().isoformat() + "Z",
+                    "finishedOn": datetime.datetime.utcnow().isoformat() + "Z",
+                }
+            }
+        }
+
+        with open("slsaprovenance.json", "w") as f:
+            json.dump(predicate, f, indent=2)
+        print("SLSA predicate written to slsaprovenance.json")
+        print("  buildType:", predicate["buildDefinition"]["buildType"])
+        print("  builder.id:", predicate["runDetails"]["builder"]["id"])
+        PYEOF
+
+        # Validate: must have buildDefinition at top level (not nested in "predicate" wrapper)
+        # OPS-1177: indent python3 -c body so lines stay within the YAML block scalar
+        python3 -c "
+        import json, sys
+        with open('slsaprovenance.json') as f:
+            p = json.load(f)
+        assert 'buildDefinition' in p, 'ERROR: buildDefinition missing at top level — wrong format'
+        assert '_type' not in p, 'ERROR: _type present — full in-toto statement leaked in (OPS-696 layer-6 bug)'
+        assert 'subject' not in p, 'ERROR: subject present — outer statement wrapper leaked in'
+        print('Predicate validation passed: body-only format confirmed (buildDefinition at top level, no in-toto wrapper fields)')
+        "
+
+    # ---------------------------------------------------------------
+    # STEP 7: Cosign sign + attest (SLSA provenance + SBOM)
+    # cosign sign: standard image signature (may already exist from
+    #   existing workflow steps — --yes makes it idempotent)
+    # cosign attest --predicate slsaprovenance.json: SLSA v1.0 attestation
+    # cosign attest --predicate sbom.cyclonedx.json: SBOM attestation
+    # --replace ensures idempotency (no duplicate attestations)
+    #
+    # OPS-910: Removed COSIGN_EXPERIMENTAL and --registry-referrers-mode oci-1-1.
+    # cosign attest does not support --registry-referrers-mode at any released version
+    # (audited v2.4.3 through v3.0.6 + main by OPS-701/OPS-699 research).
+    # AttestOptions lacks RegistryExperimentalOptions embed (unlike AttachSBOMOptions
+    # and SignOptions which DO embed it). Attestations are stored as legacy sha256-XXX.att
+    # tags — the same behavior with or without the flag (flag is silently no-op if
+    # accepted, but not accepted by attest subcommand). COSIGN_EXPERIMENTAL=1 is also
+    # not needed since we're not using the tlog or any experimental features.
+    # ---------------------------------------------------------------
+    - name: Cosign sign and attest image
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        COSIGN_KEY: ${{ inputs.cosign-key }}
+        COSIGN_PASSWORD: ${{ inputs.cosign-password }}
+      run: |
+        set -euo pipefail
+        echo "=== SEC-62: Cosign sign + attest ==="
+
+        if ! command -v cosign >/dev/null 2>&1; then
+          echo "::error::cosign not found on runner. Install via: https://github.com/sigstore/cosign/releases"
+          exit 1
+        fi
+
+        # Guard: skip signing gracefully when COSIGN_KEY is not configured.
+        # Builds that have not yet provisioned the COSIGN_KEY Forgejo secret will
+        # produce a warning instead of blocking the entire build. Set the secret to
+        # re-enable signing. (OPS-748)
+        if [ -z "${COSIGN_KEY}" ]; then
+          echo "::warning::COSIGN_KEY is empty — skipping image signing. Set the COSIGN_KEY Forgejo secret to enable supply-chain signing. (OPS-748)"
+          exit 0
+        fi
+
+        # OPS-748 / OPS-707 credential bridge:
+        # buildah login (the preceding Push step) writes Harbor credentials to
+        # containers/auth.json. cosign reads ~/.docker/config.json. These are
+        # different credential stores; without bridging, cosign returns HTTP 401
+        # from Harbor's Referrers API when pushing signatures.
+        # Copy the first containers/auth.json found to ~/.docker/config.json so
+        # cosign can authenticate to Harbor without explicit --registry-username/
+        # --registry-password flags (which would require new composite inputs and
+        # breaking changes to all callers).
+        # Format is identical: {"auths":{"registry":{"auth":"base64creds"}}}
+        for _auth_candidate in \
+          "${HOME}/.local/share/containers/auth.json" \
+          "${HOME}/.config/containers/auth.json" \
+          "/run/user/$(id -u)/containers/auth.json" \
+          "/run/containers/storage/auth.json" \
+          "/etc/containers/auth.json"; do
+          if [ -f "${_auth_candidate}" ]; then
+            mkdir -p "${HOME}/.docker"
+            if [ ! -f "${HOME}/.docker/config.json" ]; then
+              cp "${_auth_candidate}" "${HOME}/.docker/config.json"
+              echo "[OPS-748] Bridged ${_auth_candidate} → ~/.docker/config.json for cosign Harbor auth"
+            fi
+            break
+          fi
+        done
+
+        # Write key to temp file with restricted perms
+        COSIGN_KEY_FILE=$(mktemp /tmp/cosign-XXXXXX.key)
+        chmod 600 "${COSIGN_KEY_FILE}"
+        printf '%s' "${COSIGN_KEY}" > "${COSIGN_KEY_FILE}"
+        trap "rm -f ${COSIGN_KEY_FILE}" EXIT
+
+        # Sign the image (idempotent via --yes)
+        echo "Signing image: ${IMAGE_REF}"
+        COSIGN_PASSWORD="${COSIGN_PASSWORD}" cosign sign \
+          --key "${COSIGN_KEY_FILE}" \
+          --tlog-upload=false \
+          --yes \
+          "${IMAGE_REF}"
+        echo "Image signed"
+
+        # Attest SLSA provenance (v1.0)
+        # OPS-910: --type slsaprovenance1 maps to predicateType https://slsa.dev/provenance/v1
+        # Previously used --type slsaprovenance (v0.1, predicateType .../v0.1).
+        # The Kyverno verify-attestations policy requires predicateType .../v1, so v0.1
+        # attestations never matched and the policy always fired FAIL.
+        # Attestations are stored as legacy sha256-XXX.att tags (cosign attest default mode).
+        echo "Attesting SLSA v1.0 provenance (OPS-910: slsaprovenance1 type)..."
+        COSIGN_PASSWORD="${COSIGN_PASSWORD}" cosign attest \
+          --key "${COSIGN_KEY_FILE}" \
+          --predicate slsaprovenance.json \
+          --type slsaprovenance1 \
+          --tlog-upload=false \
+          --replace \
+          --yes \
+          "${IMAGE_REF}"
+        echo "SLSA v1.0 provenance attestation uploaded (sha256-XXX.att tag)"
+
+        # Attest SBOM as CycloneDX attestation
+        if [ -f sbom.cyclonedx.json ]; then
+          echo "Attesting CycloneDX SBOM..."
+          COSIGN_PASSWORD="${COSIGN_PASSWORD}" cosign attest \
+            --key "${COSIGN_KEY_FILE}" \
+            --predicate sbom.cyclonedx.json \
+            --type cyclonedx \
+            --tlog-upload=false \
+            --replace \
+            --yes \
+            "${IMAGE_REF}"
+          echo "CycloneDX SBOM attestation uploaded (sha256-XXX.att tag)"
+        fi
+
+        echo "=== Cosign sign + attest complete ==="
+
+    # ---------------------------------------------------------------
+    # STEP 8: Upload artifacts (always, for audit trail)
+    # ---------------------------------------------------------------
+    - name: Upload security scan artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: security-scan-artifacts-${{ github.run_id }}
+        path: |
+          sbom.cyclonedx.json
+          osv.json
+          slsaprovenance.json
+          npm-audit-signatures.txt
+          npm-audit-vulns.txt
+          pip-audit-report.json
+          govulncheck-report.txt
+          cargo-audit-report.json
+        if-no-files-found: ignore
+        retention-days: 90

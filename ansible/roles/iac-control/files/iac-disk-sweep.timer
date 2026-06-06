@@ -1,0 +1,20 @@
+[Unit]
+Description=iac-control disk sweep — weekly Saturday 02:00 UTC (OPS-776)
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/issues
+
+[Timer]
+# Run weekly on Saturday at 02:00 UTC — outside business hours and CI activity
+# windows. Avoids overlap with harbor-sweep (daily 03:00), evidence-pipeline (07:00),
+# nist-compliance-check (06:00), drift-detection (Sunday 04:00).
+OnCalendar=Sat *-*-* 02:00:00 UTC
+
+# Randomize within 5 minutes to avoid exact simultaneous start with other timers.
+RandomizedDelaySec=300
+
+# Run on next boot if last run was missed (e.g., host rebooted).
+Persistent=true
+
+Unit=iac-disk-sweep.service
+
+[Install]
+WantedBy=timers.target

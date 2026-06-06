@@ -1,0 +1,95 @@
+---
+# deploy.yml — OPS-573
+# Creates directories, writes Docker Compose + env file, starts Shuffle stack.
+# Service names: opensearch, shuffle-backend, shuffle-frontend, shuffle-orborus.
+
+- name: Create Shuffle base directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ shuffle_dir }}"
+    - "{{ shuffle_db_dir }}"
+    - "{{ shuffle_data_dir }}"
+    - "{{ shuffle_apps_dir }}"
+  tags: [shuffle, deploy]
+
+- name: Set vm.max_map_count for OpenSearch
+  ansible.posix.sysctl:
+    name: vm.max_map_count
+    value: "262144"
+    state: present
+    reload: true
+  tags: [shuffle, deploy]
+
+- name: Deploy Shuffle docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ shuffle_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: restart shuffle-full
+  tags: [shuffle, deploy]
+
+- name: Deploy Shuffle environment file
+  ansible.builtin.template:
+    src: shuffle.env.j2
+    dest: "{{ shuffle_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart shuffle-full
+  no_log: true
+  tags: [shuffle, deploy]
+
+- name: Pull Shuffle images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ shuffle_dir }}"
+  register: shuffle_docker_pull_result
+  changed_when: "'Pull complete' in shuffle_docker_pull_result.stdout or 'Downloaded newer image' in shuffle_docker_pull_result.stdout"
+  tags: [shuffle, deploy]
+
+- name: Start Shuffle stack
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ shuffle_dir }}"
+  register: shuffle_compose_up_result
+  changed_when: >-
+    'Started' in shuffle_compose_up_result.stderr or
+    'Creating' in shuffle_compose_up_result.stderr or
+    'Recreating' in shuffle_compose_up_result.stderr
+  tags: [shuffle, deploy]
+
+- name: Wait for OpenSearch to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ shuffle_opensearch_port }}/_cluster/health"
+    method: GET
+    status_code: 200
+    validate_certs: false
+    user: admin
+    password: admin
+    force_basic_auth: true
+  register: shuffle_opensearch_health
+  retries: 30
+  delay: 10
+  until: shuffle_opensearch_health.status == 200
+  when: not ansible_check_mode
+  tags: [shuffle, deploy, verify]
+
+- name: Wait for Shuffle backend to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ shuffle_backend_port }}/api/v1/healthz"
+    method: GET
+    status_code: 200
+    validate_certs: false
+  register: shuffle_backend_health
+  retries: 30
+  delay: 10
+  until: shuffle_backend_health.status == 200
+  when: not ansible_check_mode
+  tags: [shuffle, deploy, verify]

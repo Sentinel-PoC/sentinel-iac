@@ -1,0 +1,251 @@
+---
+# host_driver.yml — Phase 1: NVIDIA driver + container toolkit on PVE host
+# OPS-564
+#
+# Why open kernel modules?
+#   RTX 3060 (GA106, compute cap 8.6) is in NVIDIA's "Production" open-module branch.
+#   Open modules (cuda-drivers-open) are GPL-compatible and more likely to build
+#   cleanly against Proxmox's patched kernel than the proprietary closed driver.
+#   The key difference: VFIO passthrough (proxmox-gpu-passthrough role) BLACKLISTS
+#   nvidia. This role INSTALLS it. Both flags must never be true simultaneously.
+
+# ── CUDA apt repository (NVIDIA's official package source) ────────────────────
+# OPS-613: idempotency guard — skip download+install if cuda-keyring is already present.
+# The 'deb:' form of ansible.builtin.apt skips reinstall if version matches, but
+# the preceding get_url still triggers a network fetch on every role run. The
+# dpkg pre-check avoids the unnecessary round-trip on repeat applies.
+
+- name: Check if cuda-keyring package is already installed
+  ansible.builtin.command:
+    cmd: dpkg-query -W cuda-keyring
+  register: cuda_keyring_installed
+  changed_when: false
+  failed_when: false
+  tags:
+    - nvidia-driver
+    - apt-repo
+
+- name: Download NVIDIA CUDA apt keyring package
+  ansible.builtin.get_url:
+    url: >-
+      https://developer.download.nvidia.com/compute/cuda/repos/{{ nvidia_cuda_repo_debian }}/{{ nvidia_cuda_repo_arch }}/cuda-keyring_1.1-1_all.deb
+    dest: /tmp/cuda-keyring.deb
+    mode: "0644"
+    timeout: 60
+  when: cuda_keyring_installed.rc != 0
+  tags:
+    - nvidia-driver
+    - apt-repo
+
+- name: Install CUDA apt keyring (registers NVIDIA GPG key + apt source)
+  ansible.builtin.apt:
+    deb: /tmp/cuda-keyring.deb
+    state: present
+  when: cuda_keyring_installed.rc != 0
+  tags:
+    - nvidia-driver
+    - apt-repo
+
+- name: Update apt cache after CUDA repo registration
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+  tags:
+    - nvidia-driver
+    - apt-repo
+
+# ── Proxmox kernel headers for DKMS ────────────────────────────────────────────
+# DKMS builds the nvidia-open kernel modules against the running PVE kernel.
+# Kernel headers package: pve-headers-<uname -r> (e.g., pve-headers-6.17.2-1-pve)
+# Published in the PVE no-subscription repo (configured in pve4-alienware.yml
+# pre_tasks). If the exact-version package is missing, fallback to generic headers.
+
+- name: Get running kernel version for headers installation
+  ansible.builtin.command: uname -r
+  register: pve_kernel_version
+  changed_when: false
+  tags:
+    - nvidia-driver
+    - dkms
+
+- name: Install Proxmox kernel headers (required for NVIDIA DKMS build)
+  ansible.builtin.apt:
+    name: "pve-headers-{{ pve_kernel_version.stdout }}"
+    state: present
+  register: pve_headers_result
+  when: nvidia_install_pve_headers | bool
+  ignore_errors: true
+  tags:
+    - nvidia-driver
+    - dkms
+
+- name: Install fallback kernel headers (if pve-headers not available for this kernel)
+  ansible.builtin.apt:
+    name: "{{ nvidia_fallback_headers_package }}"
+    state: present
+  when:
+    - nvidia_install_pve_headers | bool
+    - pve_headers_result is failed
+  tags:
+    - nvidia-driver
+    - dkms
+
+- name: Log kernel headers installation status
+  ansible.builtin.debug:
+    msg: >-
+      Kernel headers: {{ 'pve-headers-' + pve_kernel_version.stdout + ' installed' if (pve_headers_result is success)
+      else 'pve-headers not available, used ' + nvidia_fallback_headers_package }}
+  tags:
+    - nvidia-driver
+    - dkms
+
+# ── NVIDIA open kernel modules + CUDA runtime ──────────────────────────────────
+# cuda-drivers-open meta-package installs:
+#   - nvidia-kernel-open-dkms (open-source GPU kernel modules for GA10x+)
+#   - nvidia-utils-XXX        (nvidia-smi, NVML)
+#   - CUDA compatibility libraries
+# DKMS build runs during this step — may take 5-10 minutes on first install.
+
+- name: Install NVIDIA open driver packages (DKMS build runs here — allow 10 min)
+  ansible.builtin.apt:
+    name: "{{ nvidia_host_packages }}"
+    state: present
+  async: 600
+  poll: 15
+  tags:
+    - nvidia-driver
+    - dkms
+
+# ── nvidia-container-toolkit ───────────────────────────────────────────────────
+# Required by issue scope even though Ollama runs native (not in Docker).
+# Adds the NVIDIA container runtime hooks for future containerised workloads.
+
+- name: Download nvidia-container-toolkit GPG key
+  ansible.builtin.get_url:
+    url: "https://nvidia.github.io/libnvidia-container/gpgkey"
+    dest: /tmp/libnvidia-container-gpgkey
+    mode: "0644"
+    timeout: 30
+  tags:
+    - nvidia-driver
+    - container-toolkit
+
+- name: Install nvidia-container-toolkit GPG key to keyring
+  ansible.builtin.shell:
+    cmd: >
+      gpg --dearmor < /tmp/libnvidia-container-gpgkey
+      > /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  tags:
+    - nvidia-driver
+    - container-toolkit
+
+- name: Write signed nvidia-container-toolkit apt source
+  # Replaces 'deb https://' with 'deb [signed-by=...] https://' using lineinfile.
+  # Using ansible.builtin.copy with a hardcoded URL avoids the sed pipe lint issue.
+  ansible.builtin.copy:
+    content: |
+      deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+    dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - nvidia-driver
+    - container-toolkit
+
+- name: Update apt cache after container toolkit repo add
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 0
+  tags:
+    - nvidia-driver
+    - container-toolkit
+
+- name: Install nvidia-container-toolkit packages
+  ansible.builtin.apt:
+    name: "{{ nvidia_container_toolkit_packages }}"
+    state: present
+  tags:
+    - nvidia-driver
+    - container-toolkit
+
+# ── Load NVIDIA kernel modules ─────────────────────────────────────────────────
+# DKMS built the modules; load them now so /dev/nvidia* devices are created.
+# modules-load.d config ensures persistence across reboots.
+
+- name: Configure NVIDIA modules to load at boot
+  ansible.builtin.copy:
+    content: |
+      # OPS-564: NVIDIA modules for LXC cgroup-passthrough on pve4-alienware
+      # Managed by pve4-nvidia-gpu Ansible role — do not edit manually.
+      # NOTE: This is the OPPOSITE of proxmox-gpu-passthrough which blacklists these.
+      nvidia
+      nvidia_modeset
+      nvidia_uvm
+      nvidia_drm
+    dest: /etc/modules-load.d/nvidia-lxc.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - nvidia-driver
+    - modules
+
+- name: Load NVIDIA kernel modules (immediate)
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ nvidia_kernel_modules }}"
+  tags:
+    - nvidia-driver
+    - modules
+
+# ── Verify driver on host ──────────────────────────────────────────────────────
+
+- name: Verify nvidia-smi reports GPU on PVE host
+  ansible.builtin.command:
+    cmd: nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+  register: nvidia_smi_host
+  changed_when: false
+  failed_when: nvidia_smi_host.rc != 0 or 'RTX 3060' not in nvidia_smi_host.stdout
+  tags:
+    - nvidia-driver
+    - verify
+
+- name: Display host nvidia-smi output
+  ansible.builtin.debug:
+    msg: "Host GPU: {{ nvidia_smi_host.stdout }}"
+  tags:
+    - nvidia-driver
+    - verify
+
+# ── Capture nvidia-uvm major device number ────────────────────────────────────
+# The nvidia-uvm major device number varies by driver version / load order.
+# Read from /proc/devices after module load so the LXC cgroup config uses
+# the correct number for this system.
+# Stored as fact: nvidia_uvm_major_fact (used in lxc_provision.yml)
+
+- name: Read nvidia-uvm major device number from /proc/devices
+  ansible.builtin.shell:
+    cmd: "awk '/nvidia-uvm$/{print $1}' /proc/devices"
+  register: nvidia_uvm_major_raw
+  changed_when: false
+  failed_when: nvidia_uvm_major_raw.stdout == ""
+  tags:
+    - nvidia-driver
+    - cgroup
+
+- name: Set nvidia_uvm_major_fact
+  ansible.builtin.set_fact:
+    nvidia_uvm_major_fact: "{{ nvidia_uvm_major_raw.stdout | trim }}"
+  tags:
+    - nvidia-driver
+    - cgroup
+
+- name: Display detected nvidia-uvm major device number
+  ansible.builtin.debug:
+    msg: "nvidia-uvm major number: {{ nvidia_uvm_major_fact }} (used in LXC cgroup2.devices.allow)"
+  tags:
+    - nvidia-driver
+    - cgroup

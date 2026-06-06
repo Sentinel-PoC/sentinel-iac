@@ -1,0 +1,12 @@
+---
+# [OPS-566] postgres-attacker-intel handlers
+
+- name: Restart attacker-intel-db
+  ansible.builtin.systemd:
+    name: attacker-intel-db
+    state: restarted
+    daemon_reload: true
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true

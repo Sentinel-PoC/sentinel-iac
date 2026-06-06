@@ -1,0 +1,20 @@
+---
+# zeek-nids handlers — OPS-568
+
+- name: Restart zeek
+  ansible.builtin.command:
+    cmd: "{{ zeek_install_prefix }}/bin/zeekctl restart"
+  changed_when: true
+  become: true
+
+- name: Deploy zeek
+  ansible.builtin.command:
+    cmd: "{{ zeek_install_prefix }}/bin/zeekctl deploy"
+  changed_when: true
+  become: true
+
+- name: Restart wazuh-agent
+  ansible.builtin.service:
+    name: wazuh-agent
+    state: restarted
+  become: true

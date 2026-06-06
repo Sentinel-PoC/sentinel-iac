@@ -1,0 +1,161 @@
+# Haists IT Consulting — Home Assistant Theme
+# OPS-586 Section A
+#
+# Color palette sourced from haist.farm CSS variables (fetched 2026-05-13).
+# Light mode: haist.farm :root CSS vars
+# Dark mode:  haist.farm [data-theme="dark"] CSS vars
+#
+# Theme schema: https://www.home-assistant.io/integrations/frontend/#defining-themes
+# Dark mode support: https://www.home-assistant.io/integrations/frontend/#dark-mode-support
+#
+# Variable naming follows HA frontend color.globals.ts conventions.
+# Hex values are quoted to prevent YAML treating # as comment.
+#
+# To set as default: user profile → Theme → Haists IT
+# (No configuration.yaml key for default_theme; it is per-user in HA.)
+
+haists:
+  modes:
+    light:
+      # ── Primary / accent ────────────────────────────────────────────────────
+      # --field #2D6B4A (brand green)
+      primary-color: "#2D6B4A"
+      # --rust #A0522D
+      accent-color: "#A0522D"
+
+      # ── Typography ──────────────────────────────────────────────────────────
+      # --text #2C2416
+      primary-text-color: "#2C2416"
+      # --text-light #6B5F4E
+      secondary-text-color: "#6B5F4E"
+      # Text on coloured backgrounds (header / sidebar)
+      text-primary-color: "#FAF8F4"
+
+      # ── Backgrounds ─────────────────────────────────────────────────────────
+      # --warm-white #FAF8F4
+      primary-background-color: "#FAF8F4"
+      # --cream #F5F0E8
+      secondary-background-color: "#F5F0E8"
+      card-background-color: "#F5F0E8"
+      # --border #DDD5C7
+      divider-color: "#DDD5C7"
+
+      # ── Sidebar ─────────────────────────────────────────────────────────────
+      # --bark #3D3425 (bold dark contrast)
+      sidebar-background-color: "#3D3425"
+      sidebar-text-color: "#FAF8F4"
+      sidebar-icon-color: "#DDD5C7"
+      # Selected nav item
+      sidebar-selected-background-color: "#2D6B4A"
+      sidebar-selected-text-color: "#FAF8F4"
+      sidebar-selected-icon-color: "#FAF8F4"
+
+      # ── App header ──────────────────────────────────────────────────────────
+      app-header-background-color: "#2D6B4A"
+      app-header-text-color: "#FAF8F4"
+      app-header-edit-text-color: "#FAF8F4"
+
+      # ── Icons / states ──────────────────────────────────────────────────────
+      # --field-light #3A8A60
+      state-icon-color: "#3A8A60"
+      # --soil #5C5638
+      paper-item-icon-color: "#5C5638"
+
+      # ── Interactive elements ─────────────────────────────────────────────────
+      paper-item-icon-active-color: "#2D6B4A"
+      switch-checked-color: "#2D6B4A"
+      switch-checked-button-color: "#FAF8F4"
+      switch-checked-track-color: "#2D6B4A"
+      toggle-button-color: "#2D6B4A"
+      mdc-theme-primary: "#2D6B4A"
+      mdc-theme-secondary: "#A0522D"
+
+      # ── Input / forms ────────────────────────────────────────────────────────
+      input-fill-color: "#F5F0E8"
+      input-dropdown-icon-color: "#6B5F4E"
+      input-ink-color: "#2C2416"
+      input-label-ink-color: "#6B5F4E"
+      input-idle-line-color: "#DDD5C7"
+
+      # ── Errors / warnings ───────────────────────────────────────────────────
+      error-color: "#A0522D"
+      warning-color: "#C06A3A"
+      success-color: "#2D6B4A"
+      info-color: "#2D6B4A"
+
+      # ── Cards ───────────────────────────────────────────────────────────────
+      ha-card-border-radius: "12px"
+      ha-card-box-shadow: "0 2px 8px rgba(61,52,37,0.08)"
+      ha-card-border-width: "0px"
+
+    dark:
+      # ── Primary / accent ────────────────────────────────────────────────────
+      # --field (dark) #3A8A60 (lighter green readable on dark bg)
+      primary-color: "#3A8A60"
+      # --rust (dark) #C06A3A
+      accent-color: "#C06A3A"
+
+      # ── Typography ──────────────────────────────────────────────────────────
+      # --text (dark) #E8E2D8
+      primary-text-color: "#E8E2D8"
+      # --text-light (dark) #B8AE9C
+      secondary-text-color: "#B8AE9C"
+      # Text on coloured backgrounds
+      text-primary-color: "#E8E2D8"
+
+      # ── Backgrounds ─────────────────────────────────────────────────────────
+      # --warm-white (dark) #141210
+      primary-background-color: "#141210"
+      # --cream (dark) #1E1C18
+      secondary-background-color: "#1E1C18"
+      card-background-color: "#1E1C18"
+      # --border (dark) #2E2A24
+      divider-color: "#2E2A24"
+
+      # ── Sidebar ─────────────────────────────────────────────────────────────
+      # --bark (dark) #1A1714
+      sidebar-background-color: "#1A1714"
+      sidebar-text-color: "#E8E2D8"
+      sidebar-icon-color: "#6B6354"
+      # Selected nav item — --field dark
+      sidebar-selected-background-color: "#3A8A60"
+      sidebar-selected-text-color: "#E8E2D8"
+      sidebar-selected-icon-color: "#E8E2D8"
+
+      # ── App header ──────────────────────────────────────────────────────────
+      app-header-background-color: "#3A8A60"
+      app-header-text-color: "#E8E2D8"
+      app-header-edit-text-color: "#E8E2D8"
+
+      # ── Icons / states ──────────────────────────────────────────────────────
+      # --field-light (dark) #5CBA7D
+      state-icon-color: "#5CBA7D"
+      # --stone (dark) #6B6354 (soil #2A2620 is too dark for icons on dark bg)
+      paper-item-icon-color: "#6B6354"
+
+      # ── Interactive elements ─────────────────────────────────────────────────
+      paper-item-icon-active-color: "#3A8A60"
+      switch-checked-color: "#3A8A60"
+      switch-checked-button-color: "#E8E2D8"
+      switch-checked-track-color: "#3A8A60"
+      toggle-button-color: "#3A8A60"
+      mdc-theme-primary: "#3A8A60"
+      mdc-theme-secondary: "#C06A3A"
+
+      # ── Input / forms ────────────────────────────────────────────────────────
+      input-fill-color: "#1E1C18"
+      input-dropdown-icon-color: "#B8AE9C"
+      input-ink-color: "#E8E2D8"
+      input-label-ink-color: "#B8AE9C"
+      input-idle-line-color: "#2E2A24"
+
+      # ── Errors / warnings ───────────────────────────────────────────────────
+      error-color: "#C06A3A"
+      warning-color: "#C06A3A"
+      success-color: "#3A8A60"
+      info-color: "#3A8A60"
+
+      # ── Cards ───────────────────────────────────────────────────────────────
+      ha-card-border-radius: "12px"
+      ha-card-box-shadow: "0 2px 8px rgba(0,0,0,0.4)"
+      ha-card-border-width: "0px"

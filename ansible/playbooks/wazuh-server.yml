@@ -1,0 +1,16 @@
+---
+- name: Configure Wazuh SIEM server
+  hosts: wazuh
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: wazuh-server
+      tags: [wazuh, siem]
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Tag-gated; --tags jit-ssh-trust runs only this.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

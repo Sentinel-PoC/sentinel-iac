@@ -1,0 +1,46 @@
+---
+# tasks/main.yml — ha-lxc role (OPS-585)
+#
+# Provision Home Assistant Container LXC on pve4-alienware.
+# Pattern mirrors roles/pve4-nvidia-gpu/tasks/lxc_provision.yml (OPS-564).
+# All pct commands run directly on the PVE host (ansible target = pve4-alienware root).
+
+- name: Include LXC provisioning tasks
+  ansible.builtin.import_tasks: lxc_provision.yml
+  tags: [ha-lxc, lxc, provision]
+
+- name: Include Docker CE install tasks
+  ansible.builtin.import_tasks: docker_install.yml
+  tags: [ha-lxc, docker]
+
+- name: Include HA Container deploy tasks
+  ansible.builtin.import_tasks: ha_deploy.yml
+  tags: [ha-lxc, homeassistant, deploy]
+
+- name: Include HA reverse-proxy configuration tasks
+  ansible.builtin.import_tasks: ha_config.yml
+  tags: [ha-lxc, homeassistant, ha-config]
+
+- name: Include Haists branded theme + favicon tasks
+  ansible.builtin.import_tasks: ha_theme.yml
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+- name: Include Section E integrations tasks (media + presence + comms)
+  ansible.builtin.import_tasks: integrations.yml
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+- name: Include primary Lovelace dashboard tasks (OPS-586 Section F)
+  ansible.builtin.import_tasks: ha_dashboard.yml
+  tags: [ha-lxc, homeassistant, ha-dashboard]
+
+- name: Include proxmoxve PVEAuditor token reconfiguration tasks (OPS-847)
+  ansible.builtin.import_tasks: ha_proxmoxve.yml
+  tags: [ha-lxc, homeassistant, ha-proxmoxve]
+
+- name: Include journald size cap tasks (OPS-934)
+  ansible.builtin.import_tasks: ha_journald.yml
+  tags: [ha-lxc, ha-journald]
+
+- name: Include verification tasks
+  ansible.builtin.import_tasks: verify.yml
+  tags: [ha-lxc, verify]

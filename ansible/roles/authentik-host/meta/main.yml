@@ -1,0 +1,12 @@
+---
+# authentik-host role meta — OPS-605
+galaxy_info:
+  role_name: authentik-host
+  description: >-
+    Deploys Authentik IdP via Docker Compose (Phase 1 of OPS-605 Keycloak migration).
+    Parallel deployment — does not touch existing auth.208.haist.farm Keycloak.
+  min_ansible_version: "2.14"
+
+dependencies:
+  - role: docker-host
+    tags: [docker]

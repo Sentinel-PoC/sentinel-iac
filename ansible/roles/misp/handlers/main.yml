@@ -1,0 +1,24 @@
+---
+# MISP role handlers — OPS-571
+# Note: no misp-workers container — workers run inside misp-core via supervisord.
+
+- name: Restart misp
+  ansible.builtin.command:
+    cmd: docker compose restart misp-core
+    chdir: "{{ misp_dir }}"
+  changed_when: true
+  listen: "restart misp"
+
+- name: Restart misp-full
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ misp_dir }}"
+  changed_when: true
+  listen: "restart misp-full"
+
+- name: Restart wazuh-manager
+  ansible.builtin.systemd:
+    name: wazuh-manager
+    state: restarted
+  delegate_to: "{{ misp_wazuh_host }}"
+  listen: "restart wazuh-manager"

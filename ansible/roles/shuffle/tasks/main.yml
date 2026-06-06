@@ -1,0 +1,24 @@
+---
+# Shuffle role — main task entry point — OPS-573
+# Deploys Shuffle SOAR via Docker Compose with:
+#   - OpenSearch backend
+#   - Keycloak OIDC SSO
+#   - Telegram confirm gate (standing bot from Vault secret/telegram/bot)
+#   - 5 baseline G'-prime workflows imported
+
+- name: Include vault-secrets tasks
+  ansible.builtin.include_tasks: vault-secrets.yml
+  tags: [shuffle, vault]
+
+- name: Include deploy tasks
+  ansible.builtin.include_tasks: deploy.yml
+  tags: [shuffle, deploy]
+
+- name: Include configure tasks
+  ansible.builtin.include_tasks: configure.yml
+  when: shuffle_import_workflows | bool
+  tags: [shuffle, configure]
+
+- name: Include verify tasks
+  ansible.builtin.include_tasks: verify.yml
+  tags: [shuffle, verify]

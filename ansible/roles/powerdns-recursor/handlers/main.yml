@@ -1,0 +1,9 @@
+---
+# OPS-670: powerdns-recursor handlers
+# Service restart is handled by PowerDNS.pdns_recursor Galaxy role handlers.
+
+- name: Restart pdns-recursor
+  ansible.builtin.service:
+    name: pdns-recursor
+    state: restarted
+  listen: restart pdns-recursor

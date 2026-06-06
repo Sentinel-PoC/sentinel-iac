@@ -1,0 +1,21 @@
+---
+# handlers/main.yml — wazuh-ha-bridge role (OPS-586 Section C)
+
+- name: Restart wazuh-manager
+  ansible.builtin.systemd:
+    name: wazuh-manager
+    state: restarted
+    daemon_reload: false
+  listen: "restart wazuh-manager"
+
+- name: Reload mosquitto
+  ansible.builtin.systemd:
+    name: mosquitto
+    state: reloaded
+  listen: "reload mosquitto"
+
+- name: Restart home-assistant container
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- docker restart homeassistant"
+  changed_when: true
+  listen: "restart home-assistant container"

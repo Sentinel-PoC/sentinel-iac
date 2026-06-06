@@ -1,0 +1,27 @@
+---
+- name: Configure Vault server
+  hosts: vault
+  become: true
+  vars:
+    docker_users: [root]
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker-host
+      tags: [docker]
+    - role: vault-server
+      tags: [vault]
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Tag-gated; --tags jit-ssh-trust runs only this.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh
+  post_tasks:
+    - name: Reminder - Vault unseal required
+      ansible.builtin.debug:
+        msg: >
+          Vault is running but SEALED. You must unseal manually using
+          Shamir keys from Proton Pass. Run: vault operator unseal
+      tags: [vault]

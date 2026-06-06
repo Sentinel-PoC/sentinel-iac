@@ -1,0 +1,25 @@
+---
+extends: default
+# OPS-493: Exclude Jinja templates (.j2) and INI files (.ini) from yamllint scope.
+# These are not YAML — .j2 files contain Jinja {% %} syntax yamllint cannot parse,
+# and .ini files use a completely different format. Without this, yamllint produces
+# false-positive syntax errors on every PR that touches these files.
+ignore: |
+  *.j2
+  **/*.j2
+  *.ini
+  **/*.ini
+rules:
+  line-length:
+    max: 200
+    level: warning
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+  comments:
+    min-spaces-from-content: 1
+  document-start:
+    present: true
+    level: warning
+  indentation:
+    spaces: 2
+    indent-sequences: whatever

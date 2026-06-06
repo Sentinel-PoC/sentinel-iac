@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sentinel Matrix Bot — Webhook to Matrix alert forwarder
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+EnvironmentFile=/etc/sentinel/matrix-bot.env
+ExecStart=/usr/bin/python3 /usr/local/bin/sentinel-matrix-bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

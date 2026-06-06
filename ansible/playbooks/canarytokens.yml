@@ -1,0 +1,46 @@
+---
+# Canarytokens self-hosted deployment playbook
+# OPS-572 — Plan G'/02 passive-beacon deception layer
+#
+# Usage:
+#   # Generate WG key seed once; store in Vault
+#   WG_SEED=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+#   vault kv put secret/canarytokens wg_private_key_seed="${WG_SEED}"
+#
+#   # Deploy
+#   ansible-playbook playbooks/canarytokens.yml \
+#     -e "CANARY_WG_PRIVATE_KEY_SEED=${WG_SEED}"
+#
+# Env var names (CANARY_* prefix) verified against upstream frontend.env.dist
+# and switchboard.env.dist — passed as Ansible vars that map 1:1 into env files.
+#
+# Target: iac-control (192.168.12.210) — already runs Docker
+
+- name: Deploy Canarytokens passive-beacon deception layer
+  hosts: iac_control
+  become: true
+  vars:
+    # Required domain settings — CANARY_* names match upstream env var names exactly
+    CANARY_PUBLIC_IP: "192.168.12.210"
+    CANARY_DOMAINS: "canary.208.haist.farm"
+    CANARY_NXDOMAINS: "nx.canary.208.haist.farm"
+    CANARY_PUBLIC_DOMAIN: "canary.208.haist.farm"
+    # CANARY_WG_PRIVATE_KEY_SEED: passed via extra-vars from Vault (required)
+  roles:
+    - role: docker-host
+      tags: [docker]
+    - role: canarytokens
+      tags: [canarytokens]
+  post_tasks:
+    - name: Post-deploy checklist
+      ansible.builtin.debug:
+        msg: >
+          Canarytokens deployed. Operator action items:
+          1. DNS: A-record canary.208.haist.farm -> 192.168.12.210 in dnsmasq
+          2. DNS: CNAME *.canary.208.haist.farm -> canary.208.haist.farm
+          3. Pangolin: route canarytokens.208.haist.farm -> 192.168.12.210:80 with Keycloak ForwardAuth
+          4. Keycloak: create client 'canarytokens' in sentinel realm (confidential, auth-code flow)
+          5. Generate initial 12-token set per compliance-vault/runbooks/canarytoken-plant-strategy.md
+          6. Encrypt token inventory: gpg --encrypt --recipient admin@haist.farm sentinel-cache/canarytoken-inventory.md
+          7. Test trip: open planted Office doc; verify Wazuh rule 199703 fires + Telegram message within 60s
+      tags: [canarytokens]

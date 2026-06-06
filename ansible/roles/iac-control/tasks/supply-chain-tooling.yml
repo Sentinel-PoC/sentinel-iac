@@ -1,0 +1,303 @@
+---
+# supply-chain-tooling.yml — OPS-258
+# Installs Syft, osv-scanner, cosign, and packer at pinned versions on the
+# iac-control Forgejo runner host. Required before SEC-60/61/62 composite
+# action (PR #66) merges — those workflows call all three binaries.
+# OPS-935: packer added — required by .forgejo/workflows/packer.yml packer-validate job.
+#
+# Install strategy:
+#  1. Stat the binary; capture version output if it exists.
+#  2. Skip download if binary is present at the expected version.
+#  3. Otherwise: get_url with SHA256 checksum (supply-chain hygiene).
+#  4. Extract tarball/zip; move binary to /usr/local/bin; chmod 0755.
+#  5. Assert all tools report the pinned versions at the end.
+
+# ────────────────────────────────────────────────────────────────────────────
+# Syft — SBOM generator (anchore/syft)
+# ────────────────────────────────────────────────────────────────────────────
+
+- name: Check if syft is installed at pinned version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/syft --version
+  register: syft_version_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Download syft tarball (v{{ syft_version }})
+  ansible.builtin.get_url:
+    url: "https://github.com/anchore/syft/releases/download/v{{ syft_version }}/syft_{{ syft_version }}_linux_amd64.tar.gz"
+    dest: "/tmp/syft_{{ syft_version }}_linux_amd64.tar.gz"
+    checksum: "sha256:{{ syft_sha256 }}"
+    mode: "0644"
+  when: >
+    syft_version_check.rc != 0 or
+    ('v' + syft_version) not in syft_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Extract syft binary from tarball
+  ansible.builtin.unarchive:
+    src: "/tmp/syft_{{ syft_version }}_linux_amd64.tar.gz"
+    dest: "/tmp/"
+    remote_src: true
+    include:
+      - syft
+  when: >
+    syft_version_check.rc != 0 or
+    ('v' + syft_version) not in syft_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Install syft binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: /tmp/syft
+    dest: /usr/local/bin/syft
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  when: >
+    syft_version_check.rc != 0 or
+    ('v' + syft_version) not in syft_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Clean up syft tarball and extracted binary
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/syft_{{ syft_version }}_linux_amd64.tar.gz"
+    - "/tmp/syft"
+  when: >
+    syft_version_check.rc != 0 or
+    ('v' + syft_version) not in syft_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+# ────────────────────────────────────────────────────────────────────────────
+# osv-scanner — vulnerability scanner (google/osv-scanner)
+# ────────────────────────────────────────────────────────────────────────────
+
+- name: Check if osv-scanner is installed at pinned version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/osv-scanner --version
+  register: osv_version_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Download osv-scanner binary (v{{ osv_scanner_version }})
+  ansible.builtin.get_url:
+    url: "https://github.com/google/osv-scanner/releases/download/v{{ osv_scanner_version }}/osv-scanner_linux_amd64"
+    dest: "/tmp/osv-scanner_linux_amd64"
+    checksum: "sha256:{{ osv_scanner_sha256 }}"
+    mode: "0644"
+  when: >
+    osv_version_check.rc != 0 or
+    osv_scanner_version not in osv_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Install osv-scanner binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: /tmp/osv-scanner_linux_amd64
+    dest: /usr/local/bin/osv-scanner
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  when: >
+    osv_version_check.rc != 0 or
+    osv_scanner_version not in osv_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Clean up osv-scanner download
+  ansible.builtin.file:
+    path: /tmp/osv-scanner_linux_amd64
+    state: absent
+  when: >
+    osv_version_check.rc != 0 or
+    osv_scanner_version not in osv_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+# ────────────────────────────────────────────────────────────────────────────
+# cosign — container signing + verification (sigstore/cosign)
+# Installed if missing or version < 2.4.3. Does NOT downgrade.
+# ────────────────────────────────────────────────────────────────────────────
+
+- name: Check if cosign is installed at pinned version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/cosign version
+  register: cosign_version_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Download cosign binary (v{{ cosign_version }})
+  ansible.builtin.get_url:
+    url: "https://github.com/sigstore/cosign/releases/download/v{{ cosign_version }}/cosign-linux-amd64"
+    dest: "/tmp/cosign-linux-amd64"
+    checksum: "sha256:{{ cosign_sha256 }}"
+    mode: "0644"
+  when: >
+    cosign_version_check.rc != 0 or
+    ('v' + cosign_version) not in cosign_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Install cosign binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: /tmp/cosign-linux-amd64
+    dest: /usr/local/bin/cosign
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  when: >
+    cosign_version_check.rc != 0 or
+    ('v' + cosign_version) not in cosign_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Clean up cosign download
+  ansible.builtin.file:
+    path: /tmp/cosign-linux-amd64
+    state: absent
+  when: >
+    cosign_version_check.rc != 0 or
+    ('v' + cosign_version) not in cosign_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+# ────────────────────────────────────────────────────────────────────────────
+# packer — infrastructure image builder (hashicorp/packer)
+# OPS-935: packer-validate CI job was failing in 6-9s because packer binary
+# was absent from the iac runner. ZIP distribution from releases.hashicorp.com.
+# Requires unzip (present on Ubuntu via ansible.builtin.unarchive dependency).
+# ────────────────────────────────────────────────────────────────────────────
+
+- name: Check if packer is installed at pinned version
+  ansible.builtin.command:
+    cmd: /usr/local/bin/packer version
+  register: packer_version_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Ensure unzip is installed (required for packer ZIP extraction)
+  ansible.builtin.apt:
+    name: unzip
+    state: present
+    update_cache: false
+  when: >
+    packer_version_check.rc != 0 or
+    packer_version not in packer_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Download packer ZIP (v{{ packer_version }})
+  ansible.builtin.get_url:
+    url: "https://releases.hashicorp.com/packer/{{ packer_version }}/packer_{{ packer_version }}_linux_amd64.zip"
+    dest: "/tmp/packer_{{ packer_version }}_linux_amd64.zip"
+    checksum: "sha256:{{ packer_sha256 }}"
+    mode: "0644"
+  when: >
+    packer_version_check.rc != 0 or
+    packer_version not in packer_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Extract packer binary from ZIP
+  ansible.builtin.unarchive:
+    src: "/tmp/packer_{{ packer_version }}_linux_amd64.zip"
+    dest: "/tmp/"
+    remote_src: true
+    include:
+      - packer
+  when: >
+    packer_version_check.rc != 0 or
+    packer_version not in packer_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Install packer binary to /usr/local/bin
+  ansible.builtin.copy:
+    src: /tmp/packer
+    dest: /usr/local/bin/packer
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  when: >
+    packer_version_check.rc != 0 or
+    packer_version not in packer_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Clean up packer ZIP and extracted binary
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/packer_{{ packer_version }}_linux_amd64.zip"
+    - "/tmp/packer"
+  when: >
+    packer_version_check.rc != 0 or
+    packer_version not in packer_version_check.stdout
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+# ────────────────────────────────────────────────────────────────────────────
+# Verification — assert all four tools are present at pinned versions
+# ────────────────────────────────────────────────────────────────────────────
+
+- name: Verify supply-chain tools installed at pinned versions
+  ansible.builtin.shell: |
+    set -o pipefail
+    syft --version | grep -q 'v{{ syft_version }}'
+    osv-scanner --version | grep -q '{{ osv_scanner_version }}'
+    cosign version | grep -q 'v{{ cosign_version }}'
+    packer version | grep -q '{{ packer_version }}'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  register: verify_supply_chain_tools
+  tags:
+    - iac-control
+    - supply-chain-tooling
+
+- name: Fail if supply-chain tool verification failed
+  ansible.builtin.fail:
+    msg: "Supply-chain tools missing or wrong version (OPS-258/OPS-935). rc={{ verify_supply_chain_tools.rc }} stdout={{ verify_supply_chain_tools.stdout }} stderr={{ verify_supply_chain_tools.stderr }}"
+  when: verify_supply_chain_tools.rc != 0
+  tags:
+    - iac-control
+    - supply-chain-tooling

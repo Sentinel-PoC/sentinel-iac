@@ -1,0 +1,27 @@
+<!-- Wazuh decoder for Canarytokens webhook alerts -->
+<!-- Managed by Ansible — OPS-572 -->
+<!-- Decodes JSON records written by the local webhook-receiver.py -->
+<!--
+  Log format (one JSON object per line):
+  {
+    "timestamp": "2026-05-12T22:05:00Z",
+    "source": "canarytokens",
+    "event_type": "token_trip",
+    "payload": {
+      "token": "<token_id>",
+      "token_type": "aws_keys",
+      "src_ip": "1.2.3.4",
+      "geo": {...},
+      "memo": "Fake AWS key — backup-server share"
+    }
+  }
+-->
+<decoder name="canarytokens">
+  <prematch>\"source\": \"canarytokens\"</prematch>
+</decoder>
+
+<decoder name="canarytokens_trip">
+  <parent>canarytokens</parent>
+  <use_own_name>true</use_own_name>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>

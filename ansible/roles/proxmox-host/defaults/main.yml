@@ -1,0 +1,59 @@
+---
+# Proxmox host nftables firewall defaults
+# NIST SC-7(5): Deny by Default / Allow by Exception
+
+# Management networks allowed to access PVE services (list of CIDRs)
+# SEC-2 / feedback_workstation_no_lockout: both 192.168.12.0/24 (primary management)
+# and 10.0.0.0/24 (OKD/internal segment — iac-control 10.0.0.10 interface) must
+# remain reachable to PVE hosts as break-glass protection.
+pve_management_networks:
+  - "192.168.12.0/24"
+  - "10.0.0.0/24"
+
+# Cluster node IPs for inter-node traffic (corosync, migration)
+pve_cluster_nodes:
+  - "192.168.12.6"
+  - "192.168.12.56"
+  - "192.168.12.57"
+
+# Corosync port (UDP)
+pve_corosync_port: 5405
+
+# Live migration port range (TCP)
+pve_migration_port_start: 60000
+pve_migration_port_end: 60050
+
+# PVE API port
+pve_api_port: 8006
+
+# SPICE proxy port
+pve_spice_port: 3128
+
+# VNC websocket port range
+pve_vnc_port_start: 5900
+pve_vnc_port_end: 5999
+
+# SSH port
+pve_ssh_port: 22
+
+# Wazuh manager for agent communication (outbound)
+pve_wazuh_manager: "192.168.12.100"
+
+# Wazuh agent-to-manager port (TCP)
+# OPS-864: explicit allow in output chain for CIS 4.3.8 compliance
+pve_wazuh_agent_port: 1514
+
+# Syslog server for remote logging (outbound)
+pve_syslog_server: "192.168.12.100"
+
+# Enable nftables logging of dropped packets
+pve_nftables_log_drops: true
+
+# Rate limit for logged drops (prevent log flooding)
+pve_nftables_log_rate: "5/minute"
+
+# OPS-805: PVE host kernel tuning
+# vm.swappiness=10 reduces kernel eagerness to swap pages to disk.
+# Default Debian/PVE value is 60. Setting to 10 keeps active VM pages
+# in RAM longer, reducing latency spikes from unnecessary paging.
+pve_vm_swappiness: 10

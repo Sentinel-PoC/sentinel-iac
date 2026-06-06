@@ -1,0 +1,132 @@
+# Shuffle SOAR Docker Compose — managed by Ansible (sentinel-iac roles/shuffle)
+# Based on upstream: https://github.com/frikky/Shuffle/blob/main/docker-compose.yml
+# Do not edit directly — changes will be overwritten by ansible.
+# Tracking: OPS-573
+
+# Architecture (upstream Shuffle):
+#   - opensearch:       OpenSearch 2.14 — document store for Shuffle state
+#   - shuffle-backend:  Go REST API backend (port 5001)
+#   - shuffle-frontend: React/nginx frontend (port 3001)
+#   - shuffle-orborus:  Workflow execution engine (Docker-in-Docker capable)
+
+services:
+  opensearch:
+    image: {{ shuffle_opensearch_image }}
+    container_name: shuffle-opensearch
+    restart: unless-stopped
+    hostname: shuffle-opensearch
+    environment:
+      - "cluster.name={{ shuffle_opensearch_cluster_name }}"
+      - "cluster.initial_master_nodes=shuffle-opensearch"
+      - "bootstrap.memory_lock=true"
+      - "OPENSEARCH_JAVA_OPTS={{ shuffle_opensearch_java_opts }}"
+      - "DISABLE_PERFORMANCE_ANALYZER_AGENT_CLI=true"
+      - "action.auto_create_index=true"
+      - "plugins.security.ssl.http.enabled=false"
+      - "plugins.security.disabled=true"
+      # Security plugin disabled (plugins.security.disabled=true below); admin password not used.
+      # OPS-573: placeholder removed to avoid secret-scanner false positives.
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - {{ shuffle_db_dir }}:/usr/share/opensearch/data:Z
+    ports:
+      - "127.0.0.1:{{ shuffle_opensearch_port }}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:9200/_cluster/health | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  shuffle-backend:
+    image: {{ shuffle_backend_image }}
+    container_name: shuffle-backend
+    hostname: shuffle-backend
+    restart: unless-stopped
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:{{ shuffle_backend_port }}:5001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - {{ shuffle_apps_dir }}:/shuffle-apps:Z
+      - {{ shuffle_data_dir }}:/shuffle-files:Z
+    env_file:
+      - .env
+    environment:
+      - "DATASTORE_EMULATOR_HOST=shuffle-opensearch:9200"
+      - "SHUFFLE_OPENSEARCH_URL=http://shuffle-opensearch:9200"
+      - "SHUFFLE_DEFAULT_USERNAME={{ shuffle_admin_username }}"
+      - "SHUFFLE_DEFAULT_PASSWORD={{ shuffle_admin_password }}"
+{% if shuffle_api_token | length > 0 %}
+      - "SHUFFLE_DEFAULT_APIKEY={{ shuffle_api_token }}"
+{% endif %}
+      - "BASE_URL=http://shuffle-backend:5001"
+      - "SHUFFLE_APP_HOTLOAD_FOLDER=/shuffle-apps"
+      - "SHUFFLE_FILE_LOCATION=/shuffle-files"
+{% if shuffle_oidc_enabled | bool %}
+      - "SHUFFLE_OIDC_PROVIDER={{ shuffle_oidc_provider_url }}"
+      - "SHUFFLE_OIDC_CLIENT_ID={{ shuffle_oidc_client_id }}"
+      - "SHUFFLE_OIDC_CLIENT_SECRET={{ shuffle_oidc_client_secret }}"
+      - "SHUFFLE_OIDC_REDIRECT_URL={{ shuffle_base_url }}/api/v1/login_sso"
+{% endif %}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:5001/api/v1/healthz | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  shuffle-frontend:
+    image: {{ shuffle_frontend_image }}
+    container_name: shuffle-frontend
+    hostname: shuffle-frontend
+    restart: unless-stopped
+    depends_on:
+      shuffle-backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:{{ shuffle_frontend_port }}:80"
+    environment:
+      - "BACKEND_HOSTNAME=shuffle-backend"
+      - "BACKEND_PORT=5001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:80 | grep -qE '^[23]'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  shuffle-orborus:
+    image: {{ shuffle_orborus_image }}
+    container_name: shuffle-orborus
+    hostname: shuffle-orborus
+    restart: unless-stopped
+    depends_on:
+      shuffle-backend:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - "SHUFFLE_APP_SDK_VERSION=1.4.0"
+      - "SHUFFLE_WORKER_VERSION=latest"
+      - "BASE_URL=http://shuffle-backend:5001"
+      - "SHUFFLE_ORBORUS_EXECUTION_TIMEOUT=300"
+      - "SHUFFLE_BASE_IMAGE_NAME=shuffle"
+      - "SHUFFLE_BASE_IMAGE_REGISTRY=ghcr.io/shuffle"
+      - "SHUFFLE_BASE_IMAGE_TAG_SUFFIX=-latest"
+      - "CLEANUP=true"
+      - "SHUFFLE_PASS_WORKER_PROXY=false"
+      - "SHUFFLE_PASS_APP_PROXY=false"
+
+networks:
+  default:
+    driver: bridge
+    name: shuffle-net

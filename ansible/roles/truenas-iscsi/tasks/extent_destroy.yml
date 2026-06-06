@@ -1,0 +1,78 @@
+---
+# truenas-iscsi | extent_destroy — delete iSCSI extent by name (OPS-1011)
+#
+# SAFETY GATE: Requires confirm_destroy: true to execute any deletion.
+# Default confirm_destroy: false means this task logs a warning and skips.
+#
+# WARNING: TrueNAS will reject deletion if the extent is still referenced by a
+# targetextent (LUN mapping). Run targetextent_destroy BEFORE extent_destroy.
+#
+# Requires truenas_iscsi_extent_name.
+
+- name: truenas-iscsi/extent_destroy | validate extent name is set
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_extent_name | length > 0
+    fail_msg: "truenas_iscsi_extent_name must be set"
+
+- name: truenas-iscsi/extent_destroy | SAFETY GATE — warn and skip if confirm_destroy not set
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPING extent deletion for '{{ truenas_iscsi_extent_name }}'.
+      Set confirm_destroy: true to enable deletion.
+      WARNING: ensure targetextent_destroy has run first (TrueNAS rejects deleting
+      an extent still referenced by a LUN mapping).
+  when: not confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/extent_destroy | fetch all extents to find target by name
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_destroy_all_extents
+  when: confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/extent_destroy | find extent by name
+  ansible.builtin.set_fact:
+    truenas_iscsi_extent_to_delete: >-
+      {{
+        truenas_iscsi_destroy_all_extents.json
+        | selectattr('name', 'equalto', truenas_iscsi_extent_name)
+        | list
+      }}
+  when: confirm_destroy | bool
+
+- name: truenas-iscsi/extent_destroy | report if extent not found (skip)
+  ansible.builtin.debug:
+    msg: "Extent '{{ truenas_iscsi_extent_name }}' not found — nothing to delete (idempotent)"
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_extent_to_delete | length == 0
+  changed_when: false
+
+- name: truenas-iscsi/extent_destroy | delete extent
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent/id/{{ (truenas_iscsi_extent_to_delete | first).id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: [200, 204]
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_extent_to_delete | length > 0
+
+- name: truenas-iscsi/extent_destroy | report deletion
+  ansible.builtin.debug:
+    msg: >-
+      Deleted extent '{{ truenas_iscsi_extent_name }}'
+      id={{ (truenas_iscsi_extent_to_delete | first).id }}
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_extent_to_delete | length > 0
+  changed_when: false

@@ -1,0 +1,106 @@
+services:
+  forgejo:
+    image: {{ forgejo_image }}
+    container_name: forgejo
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=postgres
+      - FORGEJO__database__HOST=postgres:5432
+      - FORGEJO__database__NAME={{ forgejo_db_name }}
+      - FORGEJO__database__USER={{ forgejo_db_user }}
+      - FORGEJO__database__PASSWD={{ forgejo_db_password }}
+      # OPS-1061 / OPS-1063: agentic-scale tuning — DB pool + redis queue/cache/session.
+      # Raises idle pool from 2→20 (absorbs 20-agent bursts without TCP/auth churn).
+      # Caps open at 80 to leave 20 headroom within postgres max_connections=100.
+      - FORGEJO__database__MAX_OPEN_CONNS={{ forgejo_db_max_open_conns }}
+      - FORGEJO__database__MAX_IDLE_CONNS={{ forgejo_db_max_idle_conns }}
+      - FORGEJO__database__CONN_MAX_LIFETIME={{ forgejo_db_conn_max_lifetime }}
+      # Redis queue replaces LevelDB single-writer (depth 20) with depth 1000,
+      # eliminating queue-full 500s under concurrent agent pushes.
+      - FORGEJO__queue__TYPE=redis
+      - FORGEJO__queue__CONN_STR=redis://redis:6379/0
+      - FORGEJO__queue__LENGTH={{ forgejo_queue_length }}
+      - FORGEJO__queue__BATCH_LENGTH={{ forgejo_queue_batch_length }}
+      # Redis cache/session offload token/permission lookups from postgres.
+      - FORGEJO__cache__ADAPTER=redis
+      - FORGEJO__cache__HOST=redis://redis:6379/1
+      - FORGEJO__session__PROVIDER=redis
+      - FORGEJO__session__PROVIDER_CONFIG=redis://redis:6379/2
+    volumes:
+      - {{ forgejo_data_dir }}:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "{{ forgejo_http_port }}:3000"
+      - "{{ forgejo_ssh_port }}:22"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: always
+    extra_hosts:
+      # OPS-779: pin forgejo.208.haist.farm → loopback so LOCAL_ROOT_URL
+      # (http://forgejo.208.haist.farm:3000/) resolves inside the container.
+      # Without this, the container DNS resolves the domain to Pangolin
+      # (192.168.12.168) which does not forward :3000 → git hook 500s.
+      - "forgejo.208.haist.farm:127.0.0.1"
+{% for host_entry in forgejo_extra_hosts %}
+      - "{{ host_entry }}"
+{% endfor %}
+
+  postgres:
+    image: {{ forgejo_postgres_image }}
+    container_name: forgejo-postgres
+    environment:
+      - POSTGRES_DB={{ forgejo_db_name }}
+      - POSTGRES_USER={{ forgejo_db_user }}
+      - POSTGRES_PASSWORD={{ forgejo_db_password }}
+    volumes:
+      - {{ forgejo_postgres_dir }}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ forgejo_db_user }} -d {{ forgejo_db_name }}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  # OPS-1061 / OPS-1063: redis sidecar for forgejo queue/cache/session.
+  # Replaces LevelDB single-writer queue (depth 20) with redis (depth 1000) to
+  # serve concurrent agent bursts without queue-full 500s.  In-memory only
+  # (--save "" disables RDB persistence); ~5 MB idle, capped at {{ forgejo_redis_maxmemory }} LRU.
+  redis:
+    image: {{ forgejo_redis_image }}
+    container_name: forgejo-redis
+    command: ["redis-server", "--maxmemory", "{{ forgejo_redis_maxmemory }}", "--maxmemory-policy", "{{ forgejo_redis_maxmemory_policy }}", "--save", ""]
+    restart: always
+
+  # OPS-779: TLS-terminating sidecar so HTTPS artifact uploads from runners
+  # reach this host on :443 (not Pangolin).  See templates/nginx.conf.j2.
+  nginx:
+    image: {{ forgejo_nginx_image }}
+    container_name: forgejo-nginx
+    ports:
+      - "{{ forgejo_nginx_port }}:443"
+    volumes:
+      - {{ forgejo_dir }}/nginx.conf:/etc/nginx/conf.d/forgejo.conf:ro
+      - {{ forgejo_tls_dir }}:/etc/nginx/tls:ro
+    depends_on:
+      - forgejo
+    restart: always
+
+{% if forgejo_runner_token | default('') | length > 0 %}
+  runner:
+    image: {{ forgejo_runner_image }}
+    container_name: forgejo-runner
+    environment:
+      - FORGEJO_URL=http://forgejo:3000
+      - RUNNER_TOKEN={{ forgejo_runner_token }}
+      - RUNNER_NAME=local-runner
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - forgejo
+    restart: always
+{% endif %}

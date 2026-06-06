@@ -1,0 +1,170 @@
+---
+# defaults/main.yml — ha-lxc role (OPS-585)
+#
+# Provisions a Home Assistant Container LXC on pve4-alienware.
+# Architecture: privileged LXC + Docker CE + HA Container image.
+#
+# HA Container is the REQUIRED install method (HA Core deprecated 2025.12).
+# Official HA blog 2025-05-22: "Beginning with HA 2025.6, support will end
+# in six months (with release 2025.12)" for HA Core.
+# Source: https://github.com/home-assistant/home-assistant.io/blob/current/source/_posts/2025-05-22-deprecating-core-and-supervised-installation-methods-and-32-bit-systems.markdown
+#
+# HA Container Docker run (from container/cli.md):
+#   docker run -d --name homeassistant --privileged --restart=unless-stopped
+#   -e TZ=MY_TIME_ZONE -v /config:/config -v /run/dbus:/run/dbus:ro
+#   --network=host homeassistant/home-assistant:stable
+#
+# Docker-in-LXC requirement: LXC must be privileged (unprivileged=0)
+# and have the nesting feature enabled.
+
+# ── LXC container parameters ──────────────────────────────────────────────────
+ha_lxc_id: 201
+ha_lxc_name: "home-assistant"
+
+# Storage: local-lvm (same as ai-tier1 pattern)
+ha_lxc_template_storage: "local"
+ha_lxc_rootfs_storage: "local-lvm"
+ha_lxc_rootfs_size: "32"  # GB
+# OPS-1010: discard (TRIM/UNMAP) mount option for local-lvm thinpool reclamation.
+# Mirrors OPS-1009 pattern from powerdns-lxc. mountoptions=discard tells Proxmox
+# to pass discard/UNMAP to the underlying LVM-thin device so guest fstrim calls
+# free blocks back to the thinpool.
+ha_lxc_rootfs_mountoptions: "discard"
+
+# Ubuntu 24.04 LXC template
+ha_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+
+# ── Network ───────────────────────────────────────────────────────────────────
+ha_lxc_ip: "192.168.12.81"
+ha_lxc_cidr: "24"
+ha_lxc_gateway: "192.168.12.1"
+ha_lxc_bridge: "vmbr0"
+ha_lxc_nameserver: "192.168.12.210"  # iac-control dnsmasq
+ha_lxc_searchdomain: "208.haist.farm"
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+ha_lxc_cores: 4
+ha_lxc_memory: 4096   # 4 GB (MiB)
+ha_lxc_swap: 1024     # 1 GB (MiB)
+
+# ── Privileged LXC (required for Docker inside LXC) ──────────────────────────
+# Docker needs privileged mode + nesting feature in Proxmox LXC.
+ha_lxc_unprivileged: 0  # 0 = privileged
+
+# ── Boot ordering ─────────────────────────────────────────────────────────────
+# onboot:  1 = auto-start when the PVE host boots (pct create --onboot 1).
+# startup: order=2 puts HA after infrastructure LXCs (order=1), up=60 gives
+#          HA 60s to initialise before PVE considers it "done".
+# Backflow from 2026-05-14 pve4 reboot event: LXC 201 stayed stopped because
+# the config lacked onboot, requiring a manual pct start by the operator.
+ha_lxc_onboot: 1
+ha_lxc_startup: "order=2,up=60"
+
+# ── Home Assistant Container ──────────────────────────────────────────────────
+ha_image: "ghcr.io/home-assistant/home-assistant:stable"
+ha_config_dir: "/config"
+ha_timezone: "America/Indiana/Indianapolis"
+
+# ── SSH access for pct exec target ────────────────────────────────────────────
+# Host user in the LXC (created during setup, for Ansible pct exec tasks)
+ha_lxc_admin_user: "ubuntu"
+
+# ── Z-Wave JS UI connection ───────────────────────────────────────────────────
+# Workstation IP — used only for HA integration documentation.
+zwave_host_ip: "192.168.12.55"
+zwave_ws_port: 3000
+
+# ── MQTT broker connection ────────────────────────────────────────────────────
+# 208-pi-001 IP — used only for HA integration documentation.
+# Do NOT use 208pi001.208.haist.farm — Pangolin wildcard DNS returns VIP.
+mqtt_host_ip: "192.168.12.197"
+mqtt_port: 1883
+
+# ── Reverse-proxy trusted_proxies (OPS-590) ──────────────────────────────────
+# Pangolin IP — HA trusts X-Forwarded-For from this host so it logs real
+# client IPs instead of treating all traffic as coming from the proxy.
+# Set to Pangolin's management-VLAN IP (192.168.12.168).
+ha_trusted_proxy_ip: "192.168.12.168"
+
+# ── Section E: Jellyfin integration (OPS-586) ────────────────────────────────
+# Jellyfin server on pve4 LXC 100 (OKD media namespace decommissioned OPS-610).
+# Ref: https://www.home-assistant.io/integrations/jellyfin/
+# Per feedback_seedbox_docker_dns_not_host_ip + feedback_pangolin_dns_wildcard:
+#   use direct IP (192.168.12.61) not jellyfin.208.haist.farm (Pangolin-routed).
+ha_jellyfin_url: "192.168.12.61:8096"
+
+# ── Section E: UniFi UDM integration (OPS-586) ───────────────────────────────
+# UDM is the default gateway at 192.168.12.1.
+# Ref: https://www.home-assistant.io/integrations/unifi/
+# Local user required (not Ubiquiti SSO) — see Prerequisites section upstream.
+# API key from Vault: secret/unifi.api_key (used in Lovelace docs, not template).
+# Per feedback_pangolin_dns_wildcard: use direct IP not DNS.
+ha_unifi_host: "192.168.12.1"
+
+# ── Section E: Telegram bot (OPS-586) ────────────────────────────────────────
+# Bot token sourced from Vault: secret/telegram/bot_token at Ansible runtime.
+# ha_telegram_bot_token is set by integrations.yml via Vault lookup (no_log).
+# ha_telegram_chat_ids: list of allowed Telegram chat IDs for the bot.
+# Leave empty → operator adds via HA UI (Settings → D&S → Telegram bot → Configure).
+# Ref: https://www.home-assistant.io/integrations/telegram_bot/
+ha_telegram_chat_ids: []
+
+# ── Section E: NWS weather (OPS-586) ─────────────────────────────────────────
+# Wabash County, Indiana coordinates per OPS-586 task spec.
+# Ref: https://www.home-assistant.io/integrations/nws/
+# NWS entity slug (slugified from "Home" or station name — may differ post-setup).
+# Operator: verify entity ID in HA Developer Tools → States after NWS setup.
+ha_nws_latitude: "39.4053"
+ha_nws_longitude: "85.8217"
+ha_nws_entity_slug: "home"  # adjust to actual entity if NWS creates different slug
+
+# ── Section E: TrueNAS HACS integration (OPS-586) ────────────────────────────
+# HACS TrueNAS integration: tomaae/homeassistant-truenas
+# (operator-provided repo name "ellis-rebernick/hass-truenas" does not exist
+#  on GitHub — verified 2026-05-13; using canonical tomaae repo instead)
+# Ref: https://github.com/tomaae/homeassistant-truenas
+# TrueNAS UI IP: use direct IP (per feedback_pangolin_dns_wildcard).
+# Operator must set ha_truenas_host to the actual TrueNAS management IP.
+ha_truenas_host: "192.168.12.1"  # FIXME: operator must set to actual TrueNAS IP
+
+# ── ProxmoxVE integration (OPS-836 / OPS-847) ────────────────────────────────
+# proxmoxve core integration auth configuration.
+# The proxmoxve integration is config-flow only (no YAML); credentials are stored
+# in HA's internal config store. The ha_proxmoxve.yml task reconfigures the
+# cluster entry via HA REST API with the PVEAuditor-scoped token from Vault.
+#
+# Vault paths:
+#   secret/proxmox-cluster — 3-node cluster (192.168.12.6) PVEAuditor token
+#     api_token_id:     root@pam!ha-monitor  (privsep=1, PVEAuditor @ /)
+#     api_token_secret: <uuid>
+#   secret/proxmox-pve4 — pve4 standalone (192.168.12.60) PVEAuditor token
+#     api_token_id:     root@pam!ha-monitor  (privsep=1, PVEAuditor @ /)
+#     api_token_secret: <uuid>
+#
+# Full-root token (root@pam!Claudette at secret/proxmox) is NO LONGER used
+# by HA proxmoxve. It may be revoked per OPS-271.
+#
+# HA URL: direct IP, not Pangolin hostname (per feedback_pangolin_dns_wildcard)
+ha_url: "http://192.168.12.81:8123"
+
+# Vault address for hashi_vault lookups (direct IP bypasses Pangolin SSO)
+vault_addr: "https://192.168.12.206:8200"
+
+# ProxmoxVE 3-node cluster config entry (set by OPS-836, verified 2026-05-22)
+ha_proxmoxve_cluster_entry_id: "01KS72JE8JJ10WHH55HJYKW9B4"
+ha_proxmoxve_cluster_host: "192.168.12.6"
+ha_proxmoxve_cluster_port: 8006
+
+# ── Recorder: SQLite DB retention (OPS-934) ──────────────────────────────────
+# Explicit purge config prevents the DB growing unbounded (OPS-922/OPS-934).
+# OPS-934 evidence: DB grew 854M → 1.6G in 2 days with no purge config.
+# purge_keep_days: 10 — mirrors HA default (10 days) but makes it explicit
+#   so any disruption to the daily purge cron is survivable.
+# commit_interval: 30 — flush every 30 seconds (HA default is 1s under load).
+ha_recorder_purge_keep_days: 10
+ha_recorder_commit_interval: 30
+
+# ── Journald: log size cap (OPS-934) ──────────────────────────────────────────
+# OPS-934 found kern.log.1 = 123M (storm from AppArmor audit messages).
+# Cap systemd-journald at 200M to prevent unbounded log growth in the LXC.
+ha_journald_system_max_use: "200M"

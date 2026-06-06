@@ -1,0 +1,77 @@
+# Ansible managed — OPS-586 Section B whisper-piper-host role
+# Wyoming Whisper (STT) + Piper (TTS) — privacy-local voice services
+# Deployed on ai-tier1 LXC (VMID {{ whisper_piper_lxc_id }}, 192.168.12.80)
+#
+# PRIVACY: No audio leaves the LAN. All STT/TTS processing runs on pve4 GPU LXC.
+# STT: rhasspy/wyoming-faster-whisper (NVIDIA RTX 3060, model: {{ wyoming_whisper_model }})
+# TTS: rhasspy/wyoming-piper (CPU, voice: {{ wyoming_piper_voice }})
+#
+# Upstream doc references:
+#   Whisper: github.com/home-assistant/addons/master/whisper/DOCS.md
+#   Piper:   github.com/home-assistant/addons/master/piper/DOCS.md
+#   Wyoming: home-assistant.io/integrations/wyoming/
+#
+# HA connection (configured via HA UI — Settings > Devices & Services > Wyoming Protocol):
+#   Whisper: host={{ ha_wyoming_whisper_host }} port={{ ha_wyoming_whisper_port }}
+#   Piper:   host={{ ha_wyoming_piper_host }} port={{ ha_wyoming_piper_port }}
+
+services:
+
+  # ── Wyoming Whisper (Speech-to-Text) ─────────────────────────────────────────
+  # Runs faster-whisper (CTranslate2 optimized) with NVIDIA GPU acceleration.
+  # Model "{{ wyoming_whisper_model }}" provides best accuracy/speed on RTX 3060 12GB VRAM.
+  # Downloads ~1.5GB model on first start to {{ wyoming_whisper_data_dir }}.
+  # GitHub: https://github.com/rhasspy/wyoming-faster-whisper
+  # Docker Hub: rhasspy/wyoming-whisper (image name differs from GitHub repo name)
+  wyoming-whisper:
+    container_name: wyoming-whisper
+    image: "{{ wyoming_whisper_image }}"
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    volumes:
+      - "{{ wyoming_whisper_data_dir }}:/data"
+    ports:
+      - "{{ wyoming_whisper_port }}:{{ wyoming_whisper_port }}"
+    command: >
+      --model {{ wyoming_whisper_model }}
+      --language {{ wyoming_whisper_language }}
+      --beam-size {{ wyoming_whisper_beam_size }}
+      --uri tcp://0.0.0.0:{{ wyoming_whisper_port }}
+      --data-dir /data
+      --download-dir /data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "{{ wyoming_whisper_port }}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # ── Wyoming Piper (Text-to-Speech) ────────────────────────────────────────────
+  # Runs piper TTS on CPU (fast enough for TTS; no GPU needed for inference latency).
+  # Voice "{{ wyoming_piper_voice }}" — warm, professional male voice (22.05KHz high quality).
+  # Downloads ~80MB voice model on first start to {{ wyoming_piper_data_dir }}.
+  # Source: https://github.com/rhasspy/wyoming-piper
+  # Voice samples: https://rhasspy.github.io/piper-samples/
+  wyoming-piper:
+    container_name: wyoming-piper
+    image: "{{ wyoming_piper_image }}"
+    volumes:
+      - "{{ wyoming_piper_data_dir }}:/data"
+    ports:
+      - "{{ wyoming_piper_port }}:{{ wyoming_piper_port }}"
+    command: >
+      --voice {{ wyoming_piper_voice }}
+      --length-scale {{ wyoming_piper_length_scale }}
+      --uri tcp://0.0.0.0:{{ wyoming_piper_port }}
+      --data-dir /data
+      --download-dir /data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "{{ wyoming_piper_port }}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s

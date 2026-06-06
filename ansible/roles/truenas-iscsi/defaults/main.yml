@@ -1,0 +1,71 @@
+---
+# truenas-iscsi role defaults (OPS-1011)
+#
+# This role wraps the TrueNAS SCALE REST API for repeatable iSCSI provisioning:
+# extent creation (zvol-backed or file-backed), target creation, and
+# target-to-extent association (LUN mapping). Destroy operations are
+# gated behind confirm_destroy: true.
+#
+# Required variables (no defaults — must be provided by playbook/inventory):
+#   truenas_api_token  — TrueNAS API key; pull from Vault:
+#                        lookup('community.hashi_vault.hashi_vault', 'secret/truenas:api_token')
+#
+# Task selection: set truenas_iscsi_tasks to a list of task files to include.
+# Default runs only the safe read-only list task.
+
+# --- Connection ---
+truenas_url: "https://data.haist.farm"
+# Override with IP if DNS not available: e.g. truenas_url: "https://192.168.12.205"
+truenas_validate_certs: false
+
+# --- Task selection ---
+# Which task groups to run. Available values:
+#   list                   — read-only: enumerate extents, targets, targetextents
+#   extent_create          — idempotent: create a zvol- or file-backed extent if absent
+#   target_create          — idempotent: create an iSCSI target if absent
+#   targetextent_create    — idempotent: link target to extent (LUN mapping) if absent
+#   extent_destroy         — delete extent by name (REQUIRES confirm_destroy: true)
+#   target_destroy         — delete target by name (REQUIRES confirm_destroy: true)
+#   targetextent_destroy   — delete targetextent by target+extent name (REQUIRES confirm_destroy: true)
+#
+# IMPORTANT destroy order: targetextent → target → extent
+# TrueNAS will reject deleting an extent that is still referenced by a targetextent,
+# and deleting a target that still has an associated targetextent.
+truenas_iscsi_tasks:
+  - list
+
+# --- Safety gate ---
+# Destroy-class operations require this to be explicitly true.
+# Default is false — destroy tasks skip with a warning unless operator sets this.
+confirm_destroy: false
+
+# --- Extent variables ---
+# Used by: extent_create, extent_destroy
+truenas_iscsi_extent_name: ""          # e.g. "okd-minio-replica-pg"
+truenas_iscsi_extent_type: "DISK"      # DISK (zvol-backed) or FILE (file-backed)
+# For DISK type: disk path format is "zvol/POOL/PATH" e.g. "zvol/SSD/iscsi-okd/minio-replica-pg"
+truenas_iscsi_extent_disk: ""
+# For FILE type: absolute path on TrueNAS filesystem e.g. "/mnt/DATA/iscsi-files/name.img"
+truenas_iscsi_extent_filepath: ""
+# For FILE type: size of the file-backed extent in bytes ("0" = uses filesize param on creation)
+truenas_iscsi_extent_filesize: "0"
+truenas_iscsi_extent_blocksize: 512    # 512 or 4096; 512 is the platform default
+truenas_iscsi_extent_rpm: "SSD"        # SSD, 5400, 7200, 10000, 15000; affects initiator hints
+truenas_iscsi_extent_comment: ""       # e.g. "OPS-1011 — minio replica data LUN"
+
+# --- Target variables ---
+# Used by: target_create, target_destroy
+truenas_iscsi_target_name: ""          # e.g. "okd-minio-replica-pg"
+                                       # Full IQN: iqn.2005-10.org.freenas.ctl:<name>
+truenas_iscsi_target_alias: ""         # optional alias string (pass "" to omit)
+truenas_iscsi_target_portal_id: 1      # Portal ID — 1 is the global OKD iSCSI portal
+truenas_iscsi_target_initiator_id: ~   # Initiator group ID; null/~ = allow all initiators
+                                       # Use 1 for OKD cluster nodes, 2 for pve4-alienware
+truenas_iscsi_target_authmethod: "NONE"  # NONE or CHAP
+
+# --- Target-to-extent association (LUN mapping) ---
+# Used by: targetextent_create, targetextent_destroy
+# Names are used to look up IDs dynamically — no hardcoded IDs required.
+truenas_iscsi_targetextent_target_name: ""    # target name to look up and link
+truenas_iscsi_targetextent_extent_name: ""    # extent name to look up and link
+truenas_iscsi_targetextent_lunid: 0           # LUN ID presented to initiator (typically 0)

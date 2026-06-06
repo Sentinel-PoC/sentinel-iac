@@ -1,0 +1,167 @@
+---
+- name: Create forgejo directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ forgejo_dir }}"
+    - "{{ forgejo_data_dir }}"
+    - "{{ forgejo_data_dir }}/gitea/conf"
+    - "{{ forgejo_postgres_dir }}"
+  tags: [forgejo]
+
+- name: Deploy forgejo docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ forgejo_dir }}/docker-compose.yml"
+    mode: "0640"
+  notify: Restart forgejo
+  tags: [forgejo]
+
+- name: Deploy forgejo app.ini
+  ansible.builtin.template:
+    src: app.ini.j2
+    dest: "{{ forgejo_data_dir }}/gitea/conf/app.ini"
+    mode: "0640"
+  notify: Restart forgejo
+  tags: [forgejo, config]
+
+# OPS-779: nginx TLS sidecar — provision cert + config before docker compose up
+- name: Provision TLS certificate for nginx sidecar
+  ansible.builtin.include_tasks: tls-cert-provision.yml
+  tags: [forgejo, forgejo-tls, tls]
+
+- name: Deploy nginx.conf for forgejo TLS sidecar
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ forgejo_dir }}/nginx.conf"
+    mode: "0644"
+  notify: Restart forgejo-nginx
+  tags: [forgejo, forgejo-nginx]
+
+- name: Allow HTTPS (443/tcp) through UFW for nginx sidecar
+  community.general.ufw:
+    rule: allow
+    port: "{{ forgejo_nginx_port }}"
+    proto: tcp
+    comment: "OPS-779: nginx TLS sidecar for Forgejo artifact uploads"
+  tags: [forgejo, forgejo-nginx, firewall]
+
+# [OPS-173] Harden permissions on /opt/forgejo/.env — world-readable as deployed
+# The file contains FORGEJO_DB_PASSWORD; docker compose auto-loads it from working dir.
+# Restricting to 0600 prevents unprivileged reads without affecting docker compose.
+- name: "[OPS-173] Restrict /opt/forgejo/.env permissions (DB password)"
+  ansible.builtin.file:
+    path: "{{ forgejo_dir }}/.env"
+    mode: "0600"
+    owner: root
+    group: root
+  failed_when: false
+  tags: [forgejo, security, ops-173]
+
+- name: Start forgejo services
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ forgejo_dir }}"
+  register: forgejo_compose_result
+  changed_when: "'Started' in forgejo_compose_result.stderr or 'Creating' in forgejo_compose_result.stderr"
+  tags: [forgejo]
+
+- name: Wait for forgejo to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/healthz"
+    method: GET
+    status_code: 200
+  register: forgejo_health
+  retries: 12
+  delay: 5
+  until: forgejo_health.status == 200
+  when: not ansible_check_mode
+  tags: [forgejo, verify]
+
+# --- OIDC provisioning ---
+
+- name: Declare Keycloak OIDC client
+  ansible.builtin.include_tasks: keycloak-client.yml
+  when: forgejo_oidc_enabled
+  tags: [forgejo, keycloak, oidc]
+
+- name: Provision Forgejo auth source
+  ansible.builtin.include_tasks: auth-source.yml
+  when: forgejo_oidc_enabled
+  tags: [forgejo, oidc, auth-source]
+
+- name: Canonicalise Forgejo OIDC auth source (one-time)
+  ansible.builtin.include_tasks: oidc-migration.yml
+  when: forgejo_oidc_migrate_capital_k | default(false)
+  tags: [forgejo, oidc, oidc-migration, never]
+
+# --- Authentik OIDC (OPS-605 Phase 3 — dual-running with Keycloak per OPS-604) ---
+
+- name: Provision Authentik OIDC auth source
+  ansible.builtin.include_tasks: authentik-source.yml
+  when: authentik_oidc_enabled | default(false)
+  tags: [forgejo, authentik, oidc, auth-source]
+
+# --- Repo collaborator provisioning ---
+
+- name: Ensure sentinel-worker collaborator access on required repos
+  ansible.builtin.include_tasks: repo-collaborators.yml
+  when: forgejo_worker_repos | default([]) | length > 0
+  tags: [forgejo, collaborators]
+
+# --- Action mirror provisioning (OPS-251) ---
+
+- name: Provision actions org and standard action mirrors
+  ansible.builtin.include_tasks: action-mirrors.yml
+  when: forgejo_action_mirrors_enabled | default(true)
+  tags: [forgejo, actions, action-mirrors]
+
+# --- Backup ---
+
+- name: Create forgejo backup directory
+  ansible.builtin.file:
+    path: /opt/forgejo/backups
+    state: directory
+    mode: "0750"
+  tags: [forgejo, backup]
+
+- name: Download MinIO client (mc)
+  ansible.builtin.get_url:
+    url: https://dl.min.io/client/mc/release/linux-amd64/mc
+    dest: /usr/local/bin/mc
+    mode: "0755"
+  tags: [forgejo, backup]
+
+- name: Deploy forgejo-backup.sh
+  ansible.builtin.template:
+    src: forgejo-backup.sh.j2
+    dest: /usr/local/bin/forgejo-backup.sh
+    mode: "0755"
+  tags: [forgejo, backup]
+
+- name: Deploy forgejo-backup systemd service
+  ansible.builtin.template:
+    src: forgejo-backup.service.j2
+    dest: /etc/systemd/system/forgejo-backup.service
+    mode: "0644"
+  notify: Daemon reload
+  tags: [forgejo, backup]
+
+- name: Deploy forgejo-backup systemd timer
+  ansible.builtin.template:
+    src: forgejo-backup.timer.j2
+    dest: /etc/systemd/system/forgejo-backup.timer
+    mode: "0644"
+  notify: Daemon reload
+  tags: [forgejo, backup]
+
+- name: Enable forgejo-backup timer
+  ansible.builtin.systemd:
+    name: forgejo-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags: [forgejo, backup]

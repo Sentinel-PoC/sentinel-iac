@@ -1,0 +1,84 @@
+services:
+  traefik:
+    image: "{{ pangolin_traefik_image }}"
+    container_name: "traefik"
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # OPS-731: OKD API port 6443 TCP passthrough — kubeconfig uses :6443 not :443
+      - "--entrypoints.okdapi.address=:6443"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge=true"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers=1.1.1.1:53,1.0.0.1:53"
+      - "--certificatesresolvers.cloudflare.acme.email={{ pangolin_acme_email }}"
+      - "--certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json"
+      # OPS-800: access logs to stdout → journald (no local file accumulation)
+      - "--accesslog=true"
+      - "--accesslog.format=json"
+      - "--accesslog.bufferingsize=100"
+    # OPS-800: per-service journald log driver — Docker daemon defaults to json-file;
+    # this override routes traefik stdout to journald for Wazuh collection.
+    logging:
+      driver: journald
+    env_file:
+      - .env
+    environment:
+      - DOCKER_API_VERSION=1.44
+    ports:
+      - "80:80"
+      - "443:443"
+      - "6443:6443"  # OPS-731: OKD API TCP passthrough
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+      - "./dynamic:/etc/traefik/dynamic:ro"
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: "{{ pangolin_oauth2_proxy_image }}"
+    container_name: "oauth2-proxy"
+    command:
+      - "--http-address=0.0.0.0:4180"
+      - "--reverse-proxy=true"
+      - "--provider=oidc"
+      - "--client-id={{ pangolin_oauth2_client_id }}"
+      - "--redirect-url={{ pangolin_oauth2_redirect_url }}"
+      - "--oidc-issuer-url={{ pangolin_oauth2_oidc_issuer_url }}"
+      - "--email-domain=*"
+      - "--cookie-domain={{ pangolin_oauth2_cookie_domain }}"
+      - "--cookie-secure=true"
+      - "--cookie-httponly=true"
+      - "--cookie-samesite=lax"
+      - "--cookie-name={{ pangolin_oauth2_cookie_name }}"
+      - "--cookie-expire={{ pangolin_oauth2_cookie_expire }}"
+      - "--cookie-refresh={{ pangolin_oauth2_cookie_refresh }}"
+      - "--set-xauthrequest=true"
+      - "--skip-provider-button=true"
+      - "--upstream=static://202"
+      - "--scope=openid email profile"
+      - "--allowed-group={{ pangolin_oauth2_allowed_groups }}"
+      - "--oidc-groups-claim=groups"
+      - "--whitelist-domain={{ pangolin_oauth2_whitelist_domain }}"
+      - "--silence-ping-logging=true"
+      - "--ssl-insecure-skip-verify=true"
+      # OPS-832: per-request CSRF cookies prevent concurrent login flows from
+      # overwriting the shared _oauth2_proxy_csrf cookie -> eliminates intermittent
+      # 403 AuthFailure on fresh page loads with multiple parallel requests.
+      # Limit caps cookie count to avoid 431 Request Header Too Large.
+      - "--cookie-csrf-per-request=true"
+      - "--cookie-csrf-per-request-limit=3"
+    extra_hosts:
+{% for host_entry in pangolin_oauth2_extra_hosts %}
+      - "{{ host_entry }}"
+{% endfor %}
+    env_file:
+      - .env.oauth2-proxy
+    expose:
+      - "4180"
+    restart: unless-stopped

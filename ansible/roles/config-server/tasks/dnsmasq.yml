@@ -1,0 +1,104 @@
+---
+# config-server - dnsmasq configuration
+# DNS-only (no DHCP) for HA failover
+
+- name: Remove ubuntu-fan dnsmasq config (conflicts with bind-dynamic)
+  ansible.builtin.file:
+    path: /etc/dnsmasq.d/ubuntu-fan
+    state: absent
+  notify: Restart dnsmasq
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Disable systemd-resolved (conflicts with dnsmasq on port 53)
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: stopped
+    enabled: false
+  failed_when: false
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Set static resolv.conf (systemd-resolved disabled)
+  ansible.builtin.copy:
+    content: |
+      nameserver 1.1.1.1
+      nameserver 8.8.8.8
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Disable resolvconf integration for dnsmasq
+  ansible.builtin.lineinfile:
+    path: /etc/default/dnsmasq
+    regexp: '^#?IGNORE_RESOLVCONF='
+    line: 'IGNORE_RESOLVCONF=yes'
+  notify: Restart dnsmasq
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Deploy dnsmasq configuration
+  ansible.builtin.template:
+    src: dnsmasq-config-server.conf.j2
+    dest: /etc/dnsmasq.d/overwatch.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Deploy Sentinel service DNS (LAN DNS HA - CP-7)
+  ansible.builtin.template:
+    src: dnsmasq-sentinel-services.conf.j2
+    dest: /etc/dnsmasq.d/sentinel-services.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Allow DNS from management network (UDP)
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: udp
+    from_ip: 192.168.12.0/24
+    comment: "DNS HA - allow LAN queries (CP-7)"
+  when: firewall_enabled | default(true) | bool
+  tags:
+    - config-server
+    - dnsmasq
+    - firewall
+
+- name: Allow DNS from management network (TCP)
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: tcp
+    from_ip: 192.168.12.0/24
+    comment: "DNS HA - allow LAN queries (CP-7)"
+  when: firewall_enabled | default(true) | bool
+  tags:
+    - config-server
+    - dnsmasq
+    - firewall
+
+- name: Enable and start dnsmasq
+  ansible.builtin.systemd:
+    name: dnsmasq
+    state: started
+    enabled: true
+  tags:
+    - config-server
+    - dnsmasq

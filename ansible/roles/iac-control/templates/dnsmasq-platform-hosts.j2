@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Platform-specific host DNS overrides for dnsmasq
+# Loaded via addn-hosts= directive in platform-hosts.conf
+# NIST SC-7(16): Internal DNS prevents topology leakage
+#
+# These entries OVERRIDE the *.208.haist.farm → Pangolin wildcard in sentinel-services.conf.
+# addn-hosts takes precedence over address= directives (tested: dnsmasq 2.90).
+# Format: <IP> <FQDN> [<alias>...]
+{% for host in dnsmasq_platform_hosts %}
+{{ host.ip }} {{ host.fqdn }}{% if host.aliases is defined and host.aliases %} {{ host.aliases | join(' ') }}{% endif %}  # {{ host.comment | default(host.fqdn) }}
+{% endfor %}

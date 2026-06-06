@@ -1,0 +1,20 @@
+---
+# chrony-client role defaults — OPS-288
+# Internal NTP servers for client hosts to point at
+# NOTE: Using IPs not FQDNs because *.208.haist.farm is a wildcard DNS
+# pointing to pangolin-proxy (192.168.12.168), not the actual server IPs.
+# iac-control = 192.168.12.210, vault-server = 192.168.12.206
+chrony_internal_servers:
+  - server: 192.168.12.210
+    options: iburst
+  - server: 192.168.12.206
+    options: iburst
+
+# Step clock at any offset > this threshold (seconds); -1 = unlimited step count
+# Defeats the "active but never stepping" failure mode from the 2026-04-21 outage
+chrony_makestep_threshold: 1.0
+chrony_makestep_limit: -1
+
+# Proxmox hosts serve time to VMs — disable VM clock sync
+# to avoid fighting chrony (override to true on Proxmox hosts)
+chrony_disable_vm_timesync: false

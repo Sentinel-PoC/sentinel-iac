@@ -1,0 +1,148 @@
+# {{ ansible_managed }}
+# HAProxy configuration for OKD 4 Overwatch cluster
+# NIST SC-7: Boundary Protection - load balancing
+
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+    stats timeout 30s
+    user haproxy
+    group haproxy
+    daemon
+    # SC-5 SEC-108: Global connection limit (DoS protection)
+    maxconn 10000
+
+    # Default SSL material locations
+    ca-base /etc/ssl/certs
+    crt-base /etc/ssl/private
+
+    # SSL Settings
+    ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
+    ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    timeout connect 5000
+    timeout client  50000
+    timeout server  50000
+    # SC-5 SEC-108: Per-frontend connection limit (DoS protection)
+    maxconn 2000
+    errorfile 400 /etc/haproxy/errors/400.http
+    errorfile 403 /etc/haproxy/errors/403.http
+    errorfile 408 /etc/haproxy/errors/408.http
+    errorfile 500 /etc/haproxy/errors/500.http
+    errorfile 502 /etc/haproxy/errors/502.http
+    errorfile 503 /etc/haproxy/errors/503.http
+    errorfile 504 /etc/haproxy/errors/504.http
+
+# ---------------------------------------------------------------------
+# OKD 4 Overwatch Cluster Load Balancing
+# ---------------------------------------------------------------------
+
+# --- API Server ({{ haproxy_api_port }}) ---
+frontend okd4_api_frontend
+    bind *:{{ haproxy_api_port }}
+    default_backend okd4_api_backend
+    mode tcp
+    option tcplog
+
+backend okd4_api_backend
+    balance roundrobin
+    mode tcp
+    # server bootstrap {{ okd_bootstrap_node.ip }}:{{ haproxy_api_port }} check  # Removed - bootstrap VM powered off
+{% for master in okd_master_nodes %}
+    server {{ master.name | replace('-', '') }}   {{ master.ip }}:{{ haproxy_api_port }} check
+{% endfor %}
+
+# --- Machine Config Server ({{ haproxy_machine_config_port }}) ---
+frontend okd4_machine_config_frontend
+    bind *:{{ haproxy_machine_config_port }}
+    default_backend okd4_machine_config_backend
+    mode tcp
+    option tcplog
+
+backend okd4_machine_config_backend
+    balance roundrobin
+    mode tcp
+    # server bootstrap {{ okd_bootstrap_node.ip }}:{{ haproxy_machine_config_port }} check  # Removed - bootstrap VM powered off
+{% for master in okd_master_nodes %}
+    server {{ master.name | replace('-', '') }}   {{ master.ip }}:{{ haproxy_machine_config_port }} check
+{% endfor %}
+
+# --- Ingress HTTP ({{ haproxy_http_port }}) ---
+frontend okd4_http_ingress_frontend
+    bind *:{{ haproxy_http_port }}
+{% if sc5_connection_ratelimit_enabled | default(false) %}
+    # SC-5 SEC-108: Per-source-IP connection rate limiting (DoS protection)
+    # DISABLED BY DEFAULT — all external traffic arrives via Pangolin/Cloudflare
+    # edge proxy; HAProxy only sees the proxy source IP, not real client IPs.
+    # Under load, the single proxy IP exceeds conn_rate>200/30s and legitimate
+    # users are rejected. Enable only after verifying real client IPs are visible
+    # to HAProxy (proxy protocol or X-Forwarded-For passthrough configured).
+    # Set sc5_connection_ratelimit_enabled: true in host_vars after live testing.
+    # Exemption: management workstation 192.168.12.55 is never rate-limited.
+    stick-table type ip size 1m expire 30s store conn_rate(30s)
+    tcp-request connection track-sc0 src
+    tcp-request connection reject if { sc_conn_rate(0) gt 200 } !{ src 192.168.12.55 }
+{% endif %}
+    default_backend okd4_http_ingress_backend
+    mode tcp
+    option tcplog
+
+backend okd4_http_ingress_backend
+    balance roundrobin
+    mode tcp
+{% for master in okd_master_nodes %}
+    server {{ master.name | replace('-', '') }} {{ master.ip }}:{{ haproxy_http_port }} check
+{% endfor %}
+
+# --- Ingress HTTPS ({{ haproxy_https_port }}) ---
+frontend okd4_https_ingress_frontend
+    bind *:{{ haproxy_https_port }}
+{% if sc5_connection_ratelimit_enabled | default(false) %}
+    # SC-5 SEC-108: Per-source-IP connection rate limiting (DoS protection)
+    # DISABLED BY DEFAULT — same edge-proxy aggregation risk as HTTP frontend above.
+    # See http frontend comment for enable conditions and operator review steps.
+    stick-table type ip size 1m expire 30s store conn_rate(30s)
+    tcp-request connection track-sc0 src
+    tcp-request connection reject if { sc_conn_rate(0) gt 200 } !{ src 192.168.12.55 }
+{% endif %}
+    default_backend okd4_https_ingress_backend
+    mode tcp
+    option tcplog
+
+backend okd4_https_ingress_backend
+    balance roundrobin
+    mode tcp
+{% for master in okd_master_nodes %}
+    server {{ master.name | replace('-', '') }} {{ master.ip }}:{{ haproxy_https_port }} check
+{% endfor %}
+
+# --- Istio IngressGateway HTTP ({{ haproxy_istio_gateway_port | default(8081) }}) ---
+# Routes meshed service traffic through Istio IngressGateway for mTLS
+frontend istio_gateway_http_frontend
+    bind *:{{ haproxy_istio_gateway_port | default(8081) }}
+    default_backend istio_gateway_http_backend
+    mode tcp
+    option tcplog
+
+backend istio_gateway_http_backend
+    balance roundrobin
+    mode tcp
+{% for master in okd_master_nodes %}
+    server {{ master.name | replace('-', '') }} {{ master.ip }}:31080 check
+{% endfor %}
+
+# --- Statistics (Optional, internal only) ---
+listen stats
+    bind {{ haproxy_stats_bind }}
+    mode http
+    stats enable
+    stats uri /
+    stats hide-version

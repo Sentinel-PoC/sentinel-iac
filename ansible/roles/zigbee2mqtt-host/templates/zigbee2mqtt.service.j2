@@ -1,0 +1,42 @@
+# Ansible managed — OPS-585 zigbee2mqtt-host role
+# zigbee2mqtt systemd service unit
+#
+# Based on upstream template from:
+# https://raw.githubusercontent.com/Koenkk/zigbee2mqtt.io/master/docs/guide/installation/01_linux.md
+# Key upstream fields preserved: Type=notify, WatchdogSec=10s,
+# Restart=always, RestartSec=10s
+
+[Unit]
+Description=zigbee2mqtt
+Documentation=https://www.zigbee2mqtt.io/
+After=network.target mosquitto.service
+
+[Service]
+Environment=NODE_ENV=production
+
+# ZIGBEE2MQTT_DATA: persistent state directory (database, logs, config).
+# Upstream tip: "If you want to use another directory to place all
+# Zigbee2MQTT data, add Environment=ZIGBEE2MQTT_DATA=/path/to/data"
+Environment=ZIGBEE2MQTT_DATA={{ zigbee2mqtt_data_dir }}
+
+# EnvironmentFile: MQTT credentials (from Vault, no plaintext in repo).
+EnvironmentFile={{ zigbee2mqtt_data_dir }}/.env
+
+# Type=notify: "makes systemd aware of when Zigbee2MQTT has started up
+# and is e.g. listening on its Frontend sockets." (upstream tip)
+Type=notify
+
+ExecStart=/usr/bin/node index.js
+WorkingDirectory={{ zigbee2mqtt_dir }}
+
+StandardOutput=inherit
+StandardError=inherit
+
+# WatchdogSec from upstream template (01_linux.md).
+WatchdogSec=10s
+Restart=always
+RestartSec=10s
+User={{ zigbee2mqtt_user }}
+
+[Install]
+WantedBy=multi-user.target

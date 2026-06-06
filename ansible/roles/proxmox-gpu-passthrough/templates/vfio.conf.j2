@@ -1,0 +1,13 @@
+# /etc/modprobe.d/vfio.conf
+# OPS-492 Phase 4: VFIO PCI ID binding for GPU passthrough
+# Managed by proxmox-gpu-passthrough Ansible role — do not edit manually
+#
+# Binds the specified PCI devices to vfio-pci so the host kernel does not
+# claim them. The VM hypervisor (QEMU/KVM) presents them directly to the guest.
+#
+# PCI IDs bound: {{ gpu_passthrough_pci_ids | join(', ') }}
+
+options vfio-pci ids={{ gpu_passthrough_pci_ids | join(',') }}
+softdep nouveau pre: vfio-pci
+softdep nvidia pre: vfio-pci
+softdep nvidia* pre: vfio-pci

@@ -1,0 +1,311 @@
+<!--
+  Wazuh Agent Configuration - Deployed by Ansible
+  Manager: {{ wazuh_manager_ip }}
+-->
+
+<ossec_config>
+  <client>
+    <server>
+      <address>{{ wazuh_manager_ip }}</address>
+      <port>1514</port>
+      <protocol>tcp</protocol>
+    </server>
+    <config-profile>ubuntu, ubuntu24, ubuntu24.04</config-profile>
+    <notify_time>20</notify_time>
+    <time-reconnect>60</time-reconnect>
+    <auto_restart>yes</auto_restart>
+    <crypto_method>aes</crypto_method>
+    <enrollment>
+      <enabled>yes</enabled>
+      <agent_name>{{ inventory_hostname }}</agent_name>
+      <authorization_pass_path>etc/authd.pass</authorization_pass_path>
+    </enrollment>
+  </client>
+
+  <client_buffer>
+    <disabled>no</disabled>
+    <queue_size>5000</queue_size>
+    <events_per_second>500</events_per_second>
+  </client_buffer>
+
+  <rootcheck>
+    <disabled>no</disabled>
+    <check_files>yes</check_files>
+    <check_trojans>yes</check_trojans>
+    <check_dev>yes</check_dev>
+    <check_sys>yes</check_sys>
+    <check_pids>yes</check_pids>
+    <check_ports>yes</check_ports>
+    <check_if>yes</check_if>
+    <frequency>43200</frequency>
+    <rootkit_files>etc/shared/rootkit_files.txt</rootkit_files>
+    <rootkit_trojans>etc/shared/rootkit_trojans.txt</rootkit_trojans>
+    <skip_nfs>yes</skip_nfs>
+    <ignore>/var/lib/containerd</ignore>
+    <ignore>/var/lib/docker/overlay2</ignore>
+  </rootcheck>
+
+  <wodle name="cis-cat">
+    <disabled>yes</disabled>
+    <timeout>1800</timeout>
+    <interval>1d</interval>
+    <scan-on-start>yes</scan-on-start>
+    <java_path>wodles/java</java_path>
+    <ciscat_path>wodles/ciscat</ciscat_path>
+  </wodle>
+
+  <wodle name="osquery">
+    <disabled>yes</disabled>
+    <run_daemon>yes</run_daemon>
+    <log_path>/var/log/osquery/osqueryd.results.log</log_path>
+    <config_path>/etc/osquery/osquery.conf</config_path>
+    <add_labels>yes</add_labels>
+  </wodle>
+
+  <wodle name="syscollector">
+    <disabled>no</disabled>
+    <interval>1h</interval>
+    <scan_on_start>yes</scan_on_start>
+    <hardware>yes</hardware>
+    <os>yes</os>
+    <network>yes</network>
+    <packages>yes</packages>
+    <ports all="yes">yes</ports>
+    <processes>yes</processes>
+    <users>yes</users>
+    <groups>yes</groups>
+    <services>yes</services>
+    <browser_extensions>yes</browser_extensions>
+    <synchronization>
+      <max_eps>10</max_eps>
+    </synchronization>
+  </wodle>
+
+  <sca>
+    <enabled>yes</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>12h</interval>
+    <skip_nfs>yes</skip_nfs>
+  </sca>
+
+  <syscheck>
+    <disabled>no</disabled>
+    <frequency>43200</frequency>
+    <scan_on_start>yes</scan_on_start>
+    <directories>/etc,/usr/bin,/usr/sbin</directories>
+    <directories>/bin,/sbin,/boot</directories>
+    <ignore>/etc/mtab</ignore>
+    <ignore>/etc/hosts.deny</ignore>
+    <ignore>/etc/mail/statistics</ignore>
+    <ignore>/etc/random-seed</ignore>
+    <ignore>/etc/random.seed</ignore>
+    <ignore>/etc/adjtime</ignore>
+    <ignore>/etc/httpd/logs</ignore>
+    <ignore>/etc/utmpx</ignore>
+    <ignore>/etc/wtmpx</ignore>
+    <ignore>/etc/cups/certs</ignore>
+    <ignore>/etc/dumpdates</ignore>
+    <ignore>/etc/svc/volatile</ignore>
+    <ignore type="sregex">.log$|.swp$</ignore>
+    <nodiff>/etc/ssl/private.key</nodiff>
+    <skip_nfs>yes</skip_nfs>
+    <skip_dev>yes</skip_dev>
+    <skip_proc>yes</skip_proc>
+    <skip_sys>yes</skip_sys>
+    <process_priority>10</process_priority>
+    <max_eps>50</max_eps>
+    <synchronization>
+      <enabled>yes</enabled>
+      <interval>5m</interval>
+      <max_eps>10</max_eps>
+    </synchronization>
+
+    <!-- AU-9 SEC-108: Audit log tamper detection via FIM -->
+    <!-- Monitors /var/log/audit and /opt/vault/logs at the DIRECTORY level.      -->
+    <!-- The <ignore type="sregex">.log$</ignore> below suppresses per-file        -->
+    <!-- tracking of audit.log (files ending in .log are excluded from syscheck   -->
+    <!-- DB by that pattern). However, syscheck DOES track the directory node      -->
+    <!-- itself — when files are added, deleted, or renamed inside the directory   -->
+    <!-- the directory mtime changes, triggering a syscheck event matched by local -->
+    <!-- rules 101200-101201 in wazuh-server/files/local_rules.xml (level 12).    -->
+    <!-- This provides deletion/creation/permission-change coverage for the audit  -->
+    <!-- log directory. Truncation detection requires supplementary auditd FIM     -->
+    <!-- kernel rules (separate from Wazuh syscheck; tracked as SEC-108 follow-up) -->
+    <!-- report_changes="yes" on /var/log/audit enables diff output in alerts.     -->
+    <directories realtime="yes" check_all="yes" report_changes="yes">/var/log/audit</directories>
+    <!-- Vault audit log directory — deletion or permission change is critical     -->
+    <directories realtime="yes" check_all="yes">/opt/vault/logs</directories>
+  </syscheck>
+
+  <localfile>
+    <log_format>command</log_format>
+    <command>df -P</command>
+    <frequency>360</frequency>
+  </localfile>
+
+  <localfile>
+    <log_format>full_command</log_format>
+    <command>netstat -tulpn | sed 's/\([[:alnum:]]\+\)\ \+[[:digit:]]\+\ \+[[:digit:]]\+\ \+\(.*\):\([[:digit:]]*\)\ \+\([0-9\.\:\*]\+\).\+\ \([[:digit:]]*\/[[:alnum:]\-]*\).*/\1 \2 == \3 == \4 \5/' | sort -k 4 -g | sed 's/ == \(.*\) ==/:\1/' | sed 1,2d</command>
+    <alias>netstat listening ports</alias>
+    <frequency>360</frequency>
+  </localfile>
+
+  <localfile>
+    <log_format>full_command</log_format>
+    <command>last -n 20</command>
+    <frequency>360</frequency>
+  </localfile>
+
+  <active-response>
+    <disabled>no</disabled>
+    <ca_store>etc/wpk_root.pem</ca_store>
+    <ca_verification>yes</ca_verification>
+  </active-response>
+
+  <logging>
+    <log_format>plain</log_format>
+  </logging>
+
+</ossec_config>
+
+<ossec_config>
+  <localfile>
+    <log_format>journald</log_format>
+    <location>journald</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/ossec/logs/active-responses.log</location>
+  </localfile>
+
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/dpkg.log</location>
+  </localfile>
+
+{% if inventory_hostname == 'vault-server' %}
+  <!-- Vault audit log (SEC-39) -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>/opt/vault/logs/audit.log</location>
+    <label key="source">vault-audit</label>
+  </localfile>
+{% endif %}
+
+{% if inventory_hostname == 'iac-control' %}
+  <!-- sentinel-agent LLM decision log (OPS-107) -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>/opt/sentinel-agent/llm-decisions.jsonl</location>
+    <label key="source">sentinel-agent-llm</label>
+  </localfile>
+
+  <!-- sentinel-agent main log -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/sentinel-agent/agent.log</location>
+    <label key="source">sentinel-agent</label>
+  </localfile>
+
+  <!-- OPS-130: forward auditd events to Wazuh manager on iac-control.
+       Root cause of 8.5 GB accumulation: auditd events were retained
+       locally only with no forwarding to central SIEM. Without Wazuh
+       agent forwarding, audit events stayed on iac-control's root
+       partition and grew unbounded.
+       log_format=audit: Wazuh parses Linux audit format natively; events
+       appear in the Wazuh dashboard under Security Events for this agent.
+       Mirrors the OPS-799 pattern used on pangolin-proxy and the
+       OPS-995 pattern used on forgejo-server. -->
+  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+  </localfile>
+{% endif %}
+
+{% if inventory_hostname == 'seedbox' %}
+  <!-- OPS-356: seedbox disk overflow guard — emits JSON when any filesystem >85% used.
+       Frequency: every 300 seconds (5 minutes).
+       Output format (one JSON line per over-threshold filesystem, or no output):
+         {"event":"seedbox_disk_high","filesystem":"<dev>","percent_used":<N>,"mount":"<path>"}
+       Matched by Wazuh rule 101000 in local_rules.xml (level 10).
+       Uses `command` log_format so Wazuh fires only on output CHANGES (delta-based),
+       preventing repeated alerts when the disk stays at the same high percentage.
+       XML: > is written as &gt; to satisfy ossec.conf XML parser. -->
+  <localfile>
+    <log_format>command</log_format>
+    <command>python3 -c "import subprocess; [print('{\"event\":\"seedbox_disk_high\",\"filesystem\":\"%s\",\"percent_used\":%d,\"mount\":\"%s\"}' % (r[0],int(r[4].rstrip('%')),r[5])) for r in [l.split() for l in subprocess.check_output(['df','-P']).decode().splitlines()[1:]] if len(r)&gt;=6 and r[4].rstrip('%').isdigit() and int(r[4].rstrip('%'))&gt;85]"</command>
+    <alias>seedbox-disk-overflow-guard</alias>
+    <frequency>300</frequency>
+  </localfile>
+{% endif %}
+
+{% if inventory_hostname == 'pangolin-proxy' %}
+  <!-- OPS-799: pangolin-proxy disk guard — two-tier alerting on root FS.
+       Root cause of 2026-05-21 outage: Traefik access logs filled / to 100%,
+       triggering auditd admin_space_left_action=HALT and crashing the VM.
+       This probe catches the problem before it reaches the halt threshold.
+       Events emitted (one JSON line per breach, or no output):
+         {"event":"pangolin_disk_warn","filesystem":"<dev>","percent_used":<N>,"mount":"<path>"}
+           -> root FS >=70% — Wazuh rule 101001 (level 7, Discord warn)
+         {"event":"pangolin_disk_crit","filesystem":"<dev>","percent_used":<N>,"mount":"<path>"}
+           -> root FS >=85% — Wazuh rule 101002 (level 12, urgent Discord)
+       Only the root mount (mount="/") is checked — that is the filesystem that filled.
+       Uses `command` log_format (delta-based): alert fires when % changes, not every interval.
+       XML: > is written as &gt; to satisfy ossec.conf XML parser. -->
+  <localfile>
+    <log_format>command</log_format>
+    <command>python3 -c "
+import subprocess
+rows=[l.split() for l in subprocess.check_output(['df','-P']).decode().splitlines()[1:]]
+for r in rows:
+    if len(r)&gt;=6 and r[5]=='/' and r[4].rstrip('%').isdigit():
+        pct=int(r[4].rstrip('%'))
+        if pct&gt;=85:
+            print('{\"event\":\"pangolin_disk_crit\",\"filesystem\":\"%s\",\"percent_used\":%d,\"mount\":\"%s\"}' % (r[0],pct,r[5]))
+        elif pct&gt;=70:
+            print('{\"event\":\"pangolin_disk_warn\",\"filesystem\":\"%s\",\"percent_used\":%d,\"mount\":\"%s\"}' % (r[0],pct,r[5]))
+"
+    </command>
+    <alias>pangolin-disk-guard</alias>
+    <frequency>300</frequency>
+  </localfile>
+
+  <!-- OPS-799: auditd audit.log monitor on pangolin-proxy.
+       Provides post-event visibility: when pangolin reboots after an auditd HALT,
+       Wazuh replays the audit.log and fires rule 101003 on any DAEMON_ABORT record.
+       This confirms the halt trigger and creates an alert in the Wazuh dashboard. -->
+  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+  </localfile>
+
+  <!-- OPS-800: Traefik access logs via journald.
+       Traefik is configured with `logging.driver: journald` in docker-compose so
+       stdout (JSON access log) routes to the system journal instead of a local file.
+       (Root cause of OPS-798: 24 GB local file filled root FS in 22 days.)
+       The CONTAINER_NAME filter scopes this reader to the traefik container only.
+       only-future-events: yes prevents replaying old journal entries on agent restart. -->
+  <localfile>
+    <location>journald</location>
+    <log_format>journald</log_format>
+    <only-future-events>yes</only-future-events>
+    <filter field="CONTAINER_NAME">traefik</filter>
+  </localfile>
+{% endif %}
+
+{% if inventory_hostname == 'forgejo-server' %}
+  <!-- OPS-995: forward auditd events to Wazuh manager on forgejo-server.
+       Root cause of 7.3G accumulation: auditd max_log_file_action=keep_logs had never
+       been overridden on this host (IaC rotate policy from OPS-778 not yet deployed).
+       Without Wazuh forwarding, audit events stayed local only and grew unbounded.
+       log_format=audit: Wazuh parses Linux audit format natively; events appear in
+       the Wazuh dashboard under Security Events for agent 008 (forgejo-server).
+       Mirrors the OPS-799 pattern used on pangolin-proxy. -->
+  <localfile>
+    <log_format>audit</log_format>
+    <location>/var/log/audit/audit.log</location>
+  </localfile>
+{% endif %}
+
+</ossec_config>

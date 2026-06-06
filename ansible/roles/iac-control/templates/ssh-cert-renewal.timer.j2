@@ -1,0 +1,13 @@
+[Unit]
+Description=Renew Vault SSH certificate (runs before cert expiry)
+
+[Timer]
+# Run every 90 minutes to stay ahead of 2h cert TTL
+# Also fire at 5:50 AM UTC (10 min before compliance check at 6:00 AM)
+OnCalendar=*-*-* 00/1:30:00
+OnCalendar=*-*-* 05:50:00 UTC
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

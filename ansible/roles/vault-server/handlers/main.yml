@@ -1,0 +1,12 @@
+---
+- name: Restart vault
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: /opt/vault
+  changed_when: false
+  tags: [vault]
+
+- name: Daemon reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  tags: [vault]

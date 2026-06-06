@@ -1,0 +1,31 @@
+---
+# OPS-940: vault-agent now populates /run/minio-secrets at boot via AppRole auth.
+# minio_root_user / minio_root_password are no longer required as Ansible vars
+# for the main minio service — vault-agent fetches them from Vault autonomously.
+#
+# These vars are still accepted (optional) for the mc alias + bucket management
+# tasks at the bottom of the role (setup tasks only, not service runtime).
+#
+# Usage (full deploy, vault-agent provision + minio start):
+#   ansible-playbook ansible/playbooks/minio-replica.yml
+#
+# Usage (vault-agent only — re-provision or rotate credentials):
+#   ansible-playbook ansible/playbooks/minio-replica.yml --tags minio-approle
+#
+# Usage (with optional mc setup):
+#   ansible-playbook ansible/playbooks/minio-replica.yml \
+#     -e "minio_root_user=$(vault kv get -tls-skip-verify -field=access_key secret/minio/admin)" \
+#     -e "minio_root_password=$(vault kv get -tls-skip-verify -field=secret_key secret/minio/admin)" \
+#     -e minio_skip_b2_backup=true
+
+- name: Configure MinIO replica server
+  hosts: minio-replica
+  become: true
+  roles:
+    - role: minio-server
+      tags: [minio]
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

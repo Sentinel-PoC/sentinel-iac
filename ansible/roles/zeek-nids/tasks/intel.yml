@@ -1,0 +1,36 @@
+---
+# zeek-nids/tasks/intel.yml — JA3/JA4 TLS fingerprinting intel framework
+# OPS-568 — JA3 is bundled >=5.x; JA4 via zkg package manager
+
+- name: Check if zkg is available
+  ansible.builtin.command: "{{ zeek_install_prefix }}/bin/zkg --version"
+  register: zkg_check
+  changed_when: false
+  failed_when: false
+
+- name: Install JA4 package via zkg
+  ansible.builtin.command:
+    cmd: "{{ zeek_install_prefix }}/bin/zkg install --force {{ zeek_ja4_pkg }}"
+  register: ja4_install
+  changed_when: "'is up to date' not in ja4_install.stdout | lower"
+  when:
+    - zeek_enable_ja4 | bool
+    - zkg_check.rc == 0
+
+- name: Note if zkg unavailable (JA4 skipped)
+  ansible.builtin.debug:
+    msg: >-
+      zkg not found at {{ zeek_install_prefix }}/bin/zkg — JA4 package install skipped.
+      JA4 fingerprinting requires zkg; install manually if needed.
+  when:
+    - zeek_enable_ja4 | bool
+    - zkg_check.rc != 0
+
+- name: Deploy intel framework local.zeek loader (ensures JA3/JA4 loaded)
+  ansible.builtin.template:
+    src: local.zeek.j2
+    dest: "{{ zeek_site_dir }}/local.zeek"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Deploy zeek

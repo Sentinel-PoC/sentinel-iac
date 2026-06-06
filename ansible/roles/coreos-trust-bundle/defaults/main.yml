@@ -1,0 +1,49 @@
+---
+# ansible/roles/coreos-trust-bundle/defaults/main.yml
+#
+# OPS-238: Vault root CA trust bundle for OKD CoreOS nodes
+
+# --- Vault settings ---
+# Vault API endpoint (direct IP bypasses Pangolin SSO; required for token auth)
+vault_addr: "https://192.168.12.206:8200"
+
+# Vault paths for CA certificates
+# pki: Root CA (CN=Vault Root CA 208.haist.farm) — self-signed, 10-year validity
+# pki_int: Intermediate CA (CN=Vault Intermediate CA 208.haist.farm) — signed by root
+vault_pki_root_path: "pki/cert/ca"
+vault_pki_int_path: "pki_int/cert/ca"
+
+# Whether to include the intermediate CA in the trust bundle (recommended: true)
+# Including both root + intermediate ensures full chain is available to CRI-O
+coreos_trust_bundle_include_intermediate: true
+
+# --- MachineConfig settings ---
+# MachineConfig name — follows OKD MC naming convention (NN-role-description)
+# 99-prefix: runs after default MCO configs (lower prefix = higher precedence)
+coreos_trust_bundle_mc_name: "99-master-vault-root-ca"
+
+# MCP (MachineConfigPool) role label — "master" covers all 3 converged nodes
+# in the overwatch cluster (compact cluster: all nodes carry both master+worker role)
+coreos_trust_bundle_mcp_role: "master"
+
+# Destination path on CoreOS nodes
+# /etc/pki/ca-trust/source/anchors/ is the standard location for added CAs;
+# update-ca-trust (triggered by MCO on reboot) promotes them to the extracted stores
+coreos_trust_bundle_ca_dest: "/etc/pki/ca-trust/source/anchors/vault-root-ca.pem"
+coreos_trust_bundle_ca_mode: "0644"
+
+# --- oc / kubeconfig settings ---
+# oc binary location on iac-control (where this playbook runs)
+coreos_trust_bundle_oc_bin: "/usr/local/bin/oc"
+
+# Kubeconfig for the overwatch OKD cluster
+# Authoritative path per OPS-450 (kubeconfig-drift role)
+coreos_trust_bundle_kubeconfig: "/home/ubuntu/.kube/config"
+
+# Directory on iac-control where the rendered MachineConfig YAML is written
+# before being applied via `oc apply`
+coreos_trust_bundle_workdir: "/tmp/coreos-trust-bundle"
+
+# Set to true to perform a dry-run (oc apply --dry-run=client) without
+# actually submitting the MachineConfig. Useful for validation.
+coreos_trust_bundle_dry_run: false

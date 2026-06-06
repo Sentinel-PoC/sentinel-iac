@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# [OPS-566] Attacker Intelligence DB backup — systemd service unit
+
+[Unit]
+Description=Attacker Intelligence DB nightly backup to S3
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/attacker-intel-backup.sh
+StandardOutput=journal
+StandardError=journal
+User=root

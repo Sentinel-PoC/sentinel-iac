@@ -1,0 +1,361 @@
+---
+# tasks/main.yml — zigbee2mqtt-host role (OPS-585)
+#
+# Install zigbee2mqtt + mosquitto as systemd services on 208-pi-001.
+# Upstream install guide verified 2026-05-13:
+# https://raw.githubusercontent.com/Koenkk/zigbee2mqtt.io/master/docs/guide/installation/01_linux.md
+
+# ── Phase 1: System packages ──────────────────────────────────────────────────
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  tags: [zigbee2mqtt, apt, mosquitto]
+
+- name: Install mosquitto broker and clients
+  ansible.builtin.apt:
+    name:
+      - mosquitto
+      - mosquitto-clients
+    state: present
+  tags: [zigbee2mqtt, mosquitto]
+
+- name: Install build dependencies for zigbee2mqtt
+  ansible.builtin.apt:
+    name:
+      - curl
+      - git
+      - make
+      - g++
+      - gcc
+      - libsystemd-dev
+    state: present
+  tags: [zigbee2mqtt, apt, build]
+
+# ── Phase 2: Node.js 20+ via NodeSource ──────────────────────────────────────
+# Upstream: "sudo curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -"
+# then "sudo apt-get install -y nodejs" (01_linux.md Installing section)
+# NodeSource required because Ubuntu 24.04 distro nodejs is 18.x (< 20).
+
+- name: Download NodeSource setup script
+  ansible.builtin.get_url:
+    url: "https://deb.nodesource.com/setup_lts.x"
+    dest: /tmp/nodesource_setup.sh
+    mode: "0755"
+  tags: [zigbee2mqtt, nodejs]
+
+- name: Run NodeSource setup script
+  ansible.builtin.command:
+    cmd: bash /tmp/nodesource_setup.sh
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  args:
+    creates: /etc/apt/sources.list.d/nodesource.list
+  tags: [zigbee2mqtt, nodejs]
+
+- name: Install Node.js from NodeSource
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+  tags: [zigbee2mqtt, nodejs]
+
+- name: Verify Node.js version >= 20
+  ansible.builtin.command:
+    cmd: node --version
+  register: node_version_result
+  changed_when: false
+  tags: [zigbee2mqtt, nodejs, verify]
+
+- name: Assert Node.js major version >= 20
+  ansible.builtin.assert:
+    that:
+      - "(node_version_result.stdout | trim | regex_replace('^v(\\d+)\\..*', '\\1') | int) >= 20"
+    fail_msg: >
+      Node.js version {{ node_version_result.stdout }} is < 20.
+      zigbee2mqtt requires Node 20+ (01_linux.md verified 2026-05-13).
+      NodeSource setup may have failed — check /etc/apt/sources.list.d/nodesource.list.
+  tags: [zigbee2mqtt, nodejs, verify]
+
+- name: Enable corepack (provides pnpm)
+  # Upstream: "corepack enable" — enables pnpm bundled with Node.js.
+  # zigbee2mqtt uses pnpm for package management.
+  ansible.builtin.command:
+    cmd: corepack enable
+  changed_when: false
+  tags: [zigbee2mqtt, nodejs, pnpm]
+
+# ── Phase 3: Service users ────────────────────────────────────────────────────
+
+- name: Create zigbee2mqtt system group
+  ansible.builtin.group:
+    name: "{{ zigbee2mqtt_group }}"
+    system: true
+    state: present
+  tags: [zigbee2mqtt, users]
+
+- name: Create zigbee2mqtt system user
+  ansible.builtin.user:
+    name: "{{ zigbee2mqtt_user }}"
+    group: "{{ zigbee2mqtt_group }}"
+    groups:
+      - "{{ zigbee2mqtt_serial_group }}"  # dialout — serial port access
+    system: true
+    create_home: false
+    home: "{{ zigbee2mqtt_dir }}"
+    shell: /usr/sbin/nologin
+    state: present
+  tags: [zigbee2mqtt, users]
+
+# ── Phase 4: Mosquitto configuration ─────────────────────────────────────────
+
+- name: Deploy mosquitto configuration
+  ansible.builtin.template:
+    src: mosquitto.conf.j2
+    dest: /etc/mosquitto/conf.d/zigbee2mqtt.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [zigbee2mqtt, mosquitto]
+  notify: Restart mosquitto
+
+# ── Phase 5: MQTT credentials (Vault) ────────────────────────────────────────
+
+- name: Check if MQTT credentials exist in Vault
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -field=password
+      {{ mqtt_vault_path }}
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: mqtt_vault_check
+  failed_when: false
+  changed_when: false
+  no_log: true
+  tags: [zigbee2mqtt, vault, mqtt]
+
+- name: Generate MQTT password for homeassistant user
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      openssl rand -base64 24 | tr -d '/+=' | head -c 32
+    executable: /bin/bash
+  register: mqtt_password_gen
+  when: mqtt_vault_check.rc != 0
+  no_log: true
+  changed_when: false
+  tags: [zigbee2mqtt, vault, mqtt]
+
+- name: Store MQTT credentials in Vault (first run only)
+  ansible.builtin.shell:
+    cmd: >
+      vault kv put {{ mqtt_vault_path }}
+      username="{{ mqtt_ha_user }}"
+      password="{{ mqtt_password_gen.stdout }}"
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  when: mqtt_vault_check.rc != 0
+  no_log: true
+  changed_when: true
+  tags: [zigbee2mqtt, vault, mqtt]
+
+- name: Fetch MQTT credentials from Vault
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -format=json {{ mqtt_vault_path }}
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: mqtt_vault_secrets_raw
+  changed_when: false
+  no_log: true
+  tags: [zigbee2mqtt, vault, mqtt]
+
+- name: Parse MQTT credentials
+  ansible.builtin.set_fact:
+    mqtt_secrets: "{{ (mqtt_vault_secrets_raw.stdout | from_json).data.data }}"
+  no_log: true
+  tags: [zigbee2mqtt, vault, mqtt]
+
+- name: Ensure mosquitto passwd file exists before first use
+  ansible.builtin.file:
+    path: /etc/mosquitto/passwd
+    state: touch
+    owner: mosquitto
+    group: mosquitto
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  tags: [zigbee2mqtt, mosquitto, mqtt]
+
+- name: Set mosquitto password for homeassistant user
+  ansible.builtin.shell:
+    cmd: >
+      mosquitto_passwd -b /etc/mosquitto/passwd
+      {{ mqtt_secrets.username }}
+      {{ mqtt_secrets.password }}
+  no_log: true
+  changed_when: true
+  tags: [zigbee2mqtt, mosquitto, mqtt]
+  notify: Restart mosquitto
+
+- name: Set mosquitto password file permissions
+  ansible.builtin.file:
+    path: /etc/mosquitto/passwd
+    owner: mosquitto
+    group: mosquitto
+    mode: "0640"
+  tags: [zigbee2mqtt, mosquitto, mqtt]
+
+# ── Phase 6: Enable and start mosquitto ───────────────────────────────────────
+
+- name: Enable and start mosquitto
+  ansible.builtin.systemd:
+    name: mosquitto
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [zigbee2mqtt, mosquitto]
+
+# ── Phase 7: zigbee2mqtt install ──────────────────────────────────────────────
+# Upstream: "sudo mkdir /opt/zigbee2mqtt; sudo chown -R ${USER}: /opt/zigbee2mqtt;
+#  git clone --depth 1 https://github.com/Koenkk/zigbee2mqtt.git /opt/zigbee2mqtt;
+#  cd /opt/zigbee2mqtt; pnpm install --frozen-lockfile" (01_linux.md)
+
+- name: Create zigbee2mqtt install directory
+  ansible.builtin.file:
+    path: "{{ zigbee2mqtt_dir }}"
+    state: directory
+    owner: "{{ zigbee2mqtt_user }}"
+    group: "{{ zigbee2mqtt_group }}"
+    mode: "0755"
+  tags: [zigbee2mqtt, install]
+
+- name: Create zigbee2mqtt data directory
+  ansible.builtin.file:
+    path: "{{ zigbee2mqtt_data_dir }}"
+    state: directory
+    owner: "{{ zigbee2mqtt_user }}"
+    group: "{{ zigbee2mqtt_group }}"
+    mode: "0750"
+  tags: [zigbee2mqtt, install]
+
+- name: Clone zigbee2mqtt repository (depth 1)
+  ansible.builtin.git:
+    repo: "{{ zigbee2mqtt_repo }}"
+    dest: "{{ zigbee2mqtt_dir }}"
+    depth: 1
+    version: master
+    force: false
+  become: true
+  become_user: "{{ zigbee2mqtt_user }}"
+  register: zigbee2mqtt_git_clone
+  tags: [zigbee2mqtt, install, git]
+
+- name: Install zigbee2mqtt dependencies via pnpm
+  # noqa no-handler — pnpm install must complete before subsequent configuration
+  # and systemd tasks that depend on the installed node_modules being present.
+  # Deferring to a handler would leave dependencies uninstalled during the play.
+  ansible.builtin.command:
+    cmd: pnpm install --frozen-lockfile
+    chdir: "{{ zigbee2mqtt_dir }}"
+  become: true
+  become_user: "{{ zigbee2mqtt_user }}"
+  when: zigbee2mqtt_git_clone.changed
+  changed_when: true
+  tags: [zigbee2mqtt, install, pnpm]
+
+# ── Phase 8: zigbee2mqtt configuration ───────────────────────────────────────
+
+- name: Deploy zigbee2mqtt EnvironmentFile (MQTT credentials)
+  ansible.builtin.template:
+    src: zigbee2mqtt.env.j2
+    dest: "{{ zigbee2mqtt_data_dir }}/.env"
+    owner: "{{ zigbee2mqtt_user }}"
+    group: "{{ zigbee2mqtt_group }}"
+    mode: "0640"
+  no_log: true
+  tags: [zigbee2mqtt, config]
+  notify: Restart zigbee2mqtt
+
+- name: Deploy zigbee2mqtt configuration.yaml
+  ansible.builtin.template:
+    src: zigbee2mqtt-configuration.yaml.j2
+    dest: "{{ zigbee2mqtt_data_dir }}/configuration.yaml"
+    owner: "{{ zigbee2mqtt_user }}"
+    group: "{{ zigbee2mqtt_group }}"
+    mode: "0640"
+    force: false  # Don't overwrite if operator has made UI changes
+  tags: [zigbee2mqtt, config]
+  notify: Restart zigbee2mqtt
+
+# ── Phase 9: systemd unit ─────────────────────────────────────────────────────
+# Upstream unit template from 01_linux.md:
+#   Type=notify, WatchdogSec=10s, Restart=always, RestartSec=10s
+# User set to zigbee2mqtt (not pi as in upstream example — we use a system user).
+
+- name: Deploy zigbee2mqtt systemd unit
+  ansible.builtin.template:
+    src: zigbee2mqtt.service.j2
+    dest: /etc/systemd/system/zigbee2mqtt.service
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [zigbee2mqtt, systemd]
+  notify:
+    - Reload systemd
+    - Restart zigbee2mqtt
+
+- name: Enable and start zigbee2mqtt
+  ansible.builtin.systemd:
+    name: zigbee2mqtt
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [zigbee2mqtt, systemd]
+
+# ── Phase 10: UFW firewall rules ──────────────────────────────────────────────
+# Allow HA LXC to reach MQTT broker and zigbee2mqtt frontend.
+
+- name: Allow MQTT from HA LXC (UFW)
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ ha_lxc_ip }}"
+    to_port: "{{ mqtt_port | string }}"
+    proto: tcp
+    comment: "OPS-585 — MQTT from HA LXC"
+  tags: [zigbee2mqtt, firewall]
+
+- name: Allow zigbee2mqtt frontend from LAN (UFW)
+  community.general.ufw:
+    rule: allow
+    to_port: "{{ zigbee2mqtt_frontend_port | string }}"
+    proto: tcp
+    comment: "OPS-585 — zigbee2mqtt frontend"
+  tags: [zigbee2mqtt, firewall]
+
+# ── Phase 11: Smoke checks ────────────────────────────────────────────────────
+
+- name: Wait for MQTT port to be available (max 30s)
+  ansible.builtin.wait_for:
+    port: "{{ mqtt_port }}"
+    host: "127.0.0.1"
+    timeout: 30
+    state: started
+  tags: [zigbee2mqtt, verify]
+
+- name: Check zigbee2mqtt service status
+  # noqa command-instead-of-module — read-only status query; systemd module
+  # manages state but cannot report current active status directly.
+  ansible.builtin.command:
+    cmd: systemctl is-active zigbee2mqtt
+  register: z2m_service_status
+  changed_when: false
+  failed_when: z2m_service_status.stdout != "active"
+  tags: [zigbee2mqtt, verify]

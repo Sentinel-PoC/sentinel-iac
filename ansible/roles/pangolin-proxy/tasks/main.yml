@@ -1,0 +1,83 @@
+---
+# OPS-818: Fetch oauth2-proxy secrets from Vault before templating env file.
+# Without this, both OAUTH2_PROXY_COOKIE_SECRET and OAUTH2_PROXY_CLIENT_SECRET
+# default to "" (empty string), causing oauth2-proxy to crash at startup (exit 1).
+- name: Include vault-secrets tasks
+  ansible.builtin.import_tasks: vault-secrets.yml
+  tags: [pangolin, vault, secrets]
+
+- name: Ensure pangolin directory exists
+  ansible.builtin.file:
+    path: "{{ pangolin_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags: [pangolin]
+
+- name: Deploy pangolin docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ pangolin_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Restart pangolin
+  tags: [pangolin]
+
+- name: Deploy pangolin oauth2-proxy env file
+  ansible.builtin.template:
+    src: env.oauth2-proxy.j2
+    dest: "{{ pangolin_dir }}/.env.oauth2-proxy"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart pangolin
+  tags: [pangolin, secrets]
+
+- name: Deploy Traefik dynamic configuration files
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../pangolin/dynamic/"
+    dest: "{{ pangolin_dir }}/dynamic/"
+    owner: root
+    group: root
+    mode: "0640"
+  tags: [pangolin, routes]
+
+# [OPS-173] Harden permissions on .env (Cloudflare DNS token) — world-readable as deployed
+- name: "[OPS-173] Restrict /opt/pangolin/.env permissions (Cloudflare token)"
+  ansible.builtin.file:
+    path: "{{ pangolin_dir }}/.env"
+    mode: "0600"
+    owner: root
+    group: root
+  # File may not exist if it was never written by Ansible (manually placed).
+  # Use failed_when: false so this task is a hardener, not a blocker.
+  failed_when: false
+  tags: [pangolin, security, ops-173]
+
+- name: Start pangolin services
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ pangolin_dir }}"
+  register: pangolin_compose_result
+  changed_when: "'Started' in pangolin_compose_result.stderr or 'Creating' in pangolin_compose_result.stderr"
+  tags: [pangolin]
+
+# OPS-685: Weekly restart forces oauth2-proxy to re-fetch the OIDC discovery document.
+# oauth2-proxy caches .well-known/openid-configuration at startup only — if Authentik
+# rotates keys or restarts, cached discovery becomes stale. No upstream flag addresses
+# this (--oidc-jwks-url-refresh-interval only refreshes JWKS keys, not the full doc).
+# A cron-driven restart is the canonical mitigation per oauth2-proxy upstream issues.
+- name: Schedule weekly oauth2-proxy restart for OIDC discovery refresh (OPS-685)
+  ansible.builtin.cron:
+    name: "oauth2-proxy weekly OIDC discovery refresh"
+    minute: "{{ pangolin_oauth2_proxy_restart_minute }}"
+    hour: "{{ pangolin_oauth2_proxy_restart_hour }}"
+    weekday: "{{ pangolin_oauth2_proxy_restart_weekday }}"
+    user: root
+    job: >-
+      docker compose -f {{ pangolin_dir }}/docker-compose.yml restart oauth2-proxy
+      >> /var/log/pangolin-oauth2-proxy-restart.log 2>&1
+    state: present
+  tags: [pangolin, oauth2-proxy]

@@ -1,0 +1,108 @@
+---
+# configure.yml — OPS-571
+# Post-deploy MISP configuration via REST API:
+#   - Verify admin key works against /users/heartbeat
+#   - Assert federation is DISABLED (acceptance criteria)
+#   - OIDC configured via env vars in misp.env.j2 — no API action needed
+#
+# MISP REST API server settings endpoint (correct path):
+#   POST /admin/serverSettings/edit
+#   body: {"setting": "SETTING_NAME", "value": VALUE}
+# The /servers/serverSettingsEdit/<name> form may work in some versions but is not
+# documented in the MISP API spec. Using /admin/serverSettings/edit is canonical.
+
+- name: Verify MISP admin API key is functional
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/users/heartbeat"
+    method: GET
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+    status_code: 200
+    validate_certs: false
+  register: misp_api_check
+  retries: 6
+  delay: 10
+  until: misp_api_check.status == 200
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, configure, verify]
+
+# ── Federation: DISABLED ────────────────────────────────────────────────────
+# Acceptance criteria: no outbound IoC sharing (SELECT enabled FROM servers; all 0)
+# Fresh deploy has an empty server list — this assertion confirms that.
+
+- name: Query MISP server list (federation peers)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/servers/index.json"
+    method: GET
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+    validate_certs: false
+    status_code: 200
+  register: misp_servers
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, configure, federation]
+
+- name: Assert federation is disabled (no enabled server entries)
+  ansible.builtin.assert:
+    that:
+      - >-
+        misp_servers.json | selectattr('Server.push', 'equalto', true) | list | length == 0
+        and
+        misp_servers.json | selectattr('Server.pull', 'equalto', true) | list | length == 0
+    fail_msg: >-
+      Federation servers with push/pull enabled found. Disable them in MISP UI
+      and re-run with tag: misp,configure,federation
+    success_msg: "Federation confirmed DISABLED — no active push/pull server entries"
+  when:
+    - not ansible_check_mode
+    - misp_servers.json is defined
+  tags: [misp, configure, federation]
+
+# ── MISP Settings via admin API ─────────────────────────────────────────────
+# Canonical endpoint: POST /admin/serverSettings/edit
+# body: {"setting": "<dot.notation.setting>", "value": <value>}
+
+- name: Set MISP BASEURL via admin API
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/admin/serverSettings/edit"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      setting: "MISP.baseurl"
+      value: "{{ misp_base_url }}"
+    validate_certs: false
+    status_code: [200, 204]
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, configure]
+
+- name: Enable MISP feed worker (background sync)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/admin/serverSettings/edit"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      setting: "Plugin.Feed_services_enable"
+      value: true
+    validate_certs: false
+    status_code: [200, 204]
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, configure, feeds]
+
+# ── OIDC note ──────────────────────────────────────────────────────────────
+# OIDC is configured entirely via env vars (OIDC_ENABLE, OIDC_PROVIDER_URL, etc.)
+# in misp.env.j2 (upstream OidcAuth plugin pattern). No API call is needed here.
+# Operator must pre-create the "misp" Keycloak client before first deploy.

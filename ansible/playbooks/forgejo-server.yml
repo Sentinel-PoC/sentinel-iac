@@ -1,0 +1,34 @@
+---
+- name: Configure Forgejo server
+  hosts: forgejo
+  become: true
+  vars:
+    docker_users: [koiakoia]
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker-host
+      tags: [docker]
+    - role: forgejo-server
+      tags: [forgejo]
+
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Forgejo was missed in PR #281 (host in hosts.ini,
+    # not hosts.yml). common role already sets TrustedUserCAKeys; this adds the missing
+    # AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh
+  post_tasks:
+    - name: Reminder - Forgejo post-deploy steps
+      ansible.builtin.debug:
+        msg: >
+          Forgejo is deployed. Next steps:
+          1. Create Keycloak OIDC client 'forgejo' in sentinel realm
+          2. Store secrets in Vault at secret/forgejo
+          3. Re-run with -e flags for OIDC and DB credentials
+          4. Visit {{ forgejo_root_url }} to verify
+          5. Create organization structure and agent accounts
+      tags: [forgejo]

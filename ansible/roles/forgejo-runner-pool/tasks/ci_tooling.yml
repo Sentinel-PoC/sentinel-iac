@@ -1,0 +1,442 @@
+---
+# ci_tooling.yml — Phase 3.5: Install CI security-scan tools in each runner LXC
+# OPS-780, OPS-801
+#
+# Installs the toolchain required by .forgejo/workflows/security-scan.yml so
+# the LXC runners reach parity with iac-control's supply-chain tooling.
+#
+# Tool inventory (matches iac-control supply-chain-tooling.yml):
+#   semgrep      1.161.0  — pip (PEP 668: --break-system-packages)
+#   checkov      3.2.502  — pip
+#   bandit       1.9.4    — pip
+#   gitleaks     8.30.0   — pre-existing on runner base image; idempotency check only
+#   ansible-lint 6.17.2   — apt (ansible-lint_6.17.2-1, Ubuntu 24.04 noble/universe)
+#                            Uses apt-managed ansible-core 2.16.3 to avoid the
+#                            ansible-core 2.21.0 / ansible.parsing.yaml.constructor
+#                            compatibility break introduced by pip's dependency resolver.
+#   jq           1.7.1    — apt (noble-updates/main)
+#   shellcheck   0.9.0    — apt (noble/universe) — OPS-441
+#   tflint       0.61.0   — binary download from GitHub releases
+#   osv-scanner  1.9.2    — binary download from GitHub releases (OPS-801)
+#   trivy        0.69.3   — binary download from GitHub releases (OPS-833, active-install)
+#   pip3         24.0     — apt (already present on Ubuntu 24.04 base)
+#
+# Dependency conflict note (OPS-780):
+#   pip install ansible-lint installs ansible-core 2.21.0 into /usr/local/lib/
+#   python3.12/dist-packages. ansible-core 2.21.0 removed the module
+#   ansible.parsing.yaml.constructor, which ansible-lint 6.17.2 requires at
+#   startup. Fix: install ansible-lint via apt (which pins ansible-core 2.16.3-
+#   0ubuntu2) and explicitly remove any pip-installed ansible-core that would
+#   shadow the apt version.
+#
+# All pct commands run on the PVE host (ansible target = pve4-alienware).
+
+# ── Step 1: Apt packages ───────────────────────────────────────────────────────
+
+- name: Install apt CI tooling packages in each runner LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} --
+      apt-get install -y -q python3-pip ansible-lint jq shellcheck
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+# ── Step 1.5: buildah ─────────────────────────────────────────────────────────
+# OPS-913: Install buildah (container image build tool) so all 6 pve4 runner
+# LXCs can pick up build-and-push CI jobs routed via runs-on: buildah.
+# buildah 1.33.7 is in Ubuntu 24.04 noble/main — no additional repo required.
+# Idempotent: apt-get install is a no-op if already installed.
+
+- name: Install buildah in each runner LXC  # OPS-913
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} --
+      apt-get install -y -q buildah
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling, buildah]
+
+- name: Verify buildah installed in each runner LXC  # OPS-913
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- buildah --version"
+  register: buildah_verify
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling, buildah]
+
+# ── Step 2: Remove pip-installed ansible-core that shadows apt 2.16.3 ─────────
+# pip install ansible-lint (if ever invoked) pulls ansible-core 2.21.0 into
+# /usr/local/lib/python3.12/dist-packages, which takes precedence over apt's
+# ansible-core 2.16.3 and breaks ansible-lint at import. Remove the pip copy.
+
+- name: Remove pip-installed ansible-core (shadows apt ansible-core 2.16.3)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} --
+      pip3 uninstall -y --break-system-packages ansible-core ansible ansible-compat
+  register: pip_uninstall_result
+  failed_when: false
+  changed_when: "'Successfully uninstalled' in pip_uninstall_result.stdout"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+# ── Step 3: pip-installed tools ────────────────────────────────────────────────
+# PEP 668 externally-managed guard: --break-system-packages is intentional and
+# accepted for these runner nodes (not developer workstations).
+# semgrep 1.161.0 requires ruamel.yaml>=0.18.15; the dependency-resolver WARNING
+# about ansible-lint 6.17.2 requiring <0.18 is a metadata artifact — runtime is
+# compatible as confirmed on iac-control (ruamel-yaml:0.19.1 shown in
+# `ansible-lint --version` output on iac-control).
+#
+# Ubuntu 24.04 LXC compatibility (OPS-826):
+#   Fresh Ubuntu 24.04 LXC images ship ruamel.yaml.clib as an apt-managed
+#   distutils package. pip refuses to uninstall distutils packages (it cannot
+#   track their file ownership), causing install to abort without
+#   --ignore-installed. Adding --ignore-installed skips the uninstall step
+#   and overlays the pip-managed version, which is safe here because
+#   --break-system-packages already accepts ownership of system-site-packages.
+
+- name: Install pip CI tools in each runner LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} --
+      pip3 install --break-system-packages --ignore-installed --quiet
+      semgrep=={{ ci_tooling_semgrep_version }}
+      checkov=={{ ci_tooling_checkov_version }}
+      bandit=={{ ci_tooling_bandit_version }}
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+# ── Step 4: gitleaks idempotency check ────────────────────────────────────────
+# gitleaks is pre-installed on the runner base image. This task asserts the
+# correct version is present and warns if it is not (no auto-install: binary
+# distribution requires SHA256 verification, handled by a separate playbook run
+# via supply-chain-tooling).
+# ── Step 4.25: trivy binary ────────────────────────────────────────────────
+# OPS-833: trivy was check-only (OPS-801, idempotency) but pve4-4/5/6 were added by
+# OPS-762 after OPS-801’s install run, so they lacked trivy. Convert to active-install
+# matching the osv-scanner/tflint pattern: tarball download with SHA256 verification.
+# Tarball (not single binary): extract trivy binary before pushing.
+# Version + SHA256: keep in sync with defaults/main.yml ci_tooling_trivy_*.
+
+- name: Check trivy version in each runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- /usr/local/bin/trivy --version"
+  register: trivy_version_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Download trivy tarball to PVE host (once)
+  ansible.builtin.get_url:
+    url: "{{ ci_tooling_trivy_download_url }}"
+    dest: "/tmp/trivy_{{ ci_tooling_trivy_version }}_Linux-64bit.tar.gz"
+    checksum: "sha256:{{ ci_tooling_trivy_sha256 }}"
+    mode: "0644"
+  when: >
+    trivy_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or trivy_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_trivy_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Create trivy extract directory on PVE host
+  ansible.builtin.file:
+    path: "/tmp/trivy_{{ ci_tooling_trivy_version }}_extract"
+    state: directory
+    mode: "0755"
+  when: >
+    trivy_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or trivy_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_trivy_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Extract trivy binary from tarball on PVE host
+  # noqa command-instead-of-module — uses shell:+creates: for idempotency with
+  # selective single-file extraction. ansible.builtin.unarchive does not support
+  # the include: + creates: combination cleanly for this use case.
+  ansible.builtin.shell:
+    cmd: >
+      tar -xzf /tmp/trivy_{{ ci_tooling_trivy_version }}_Linux-64bit.tar.gz
+      -C /tmp/trivy_{{ ci_tooling_trivy_version }}_extract
+      trivy
+    creates: "/tmp/trivy_{{ ci_tooling_trivy_version }}_extract/trivy"
+  args:
+    executable: /bin/bash
+  vars:
+    _extract_dir: "/tmp/trivy_{{ ci_tooling_trivy_version }}_extract"
+  when: >
+    trivy_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or trivy_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_trivy_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Push trivy binary into each runner LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/trivy_{{ ci_tooling_trivy_version }}_extract/trivy
+      /usr/local/bin/trivy
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (trivy_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_trivy_version not in
+    (trivy_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Set trivy executable bit in each runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- chmod +x /usr/local/bin/trivy"
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (trivy_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_trivy_version not in
+    (trivy_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Clean up trivy download from PVE host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/trivy_{{ ci_tooling_trivy_version }}_Linux-64bit.tar.gz"
+    - "/tmp/trivy_{{ ci_tooling_trivy_version }}_extract"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+# ── Step 4.5: tflint binary ───────────────────────────────────────────────────
+# tflint is a Terraform linter used by the CI security-scan workflow.
+# Not available in Ubuntu apt repos; install as a pre-built binary from GitHub.
+# Pattern: download zip to PVE host once, push via pct push into each LXC.
+# This task is idempotent: the version check gate skips download+push if the
+# correct version is already installed.
+
+- name: Check tflint version in each runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- /usr/local/bin/tflint --version"
+  register: tflint_version_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Download tflint binary zip to PVE host (once)
+  ansible.builtin.get_url:
+    url: "{{ ci_tooling_tflint_download_url }}"
+    dest: "/tmp/tflint_linux_amd64_{{ ci_tooling_tflint_version }}.zip"
+    mode: "0644"
+  when: >
+    tflint_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or tflint_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_tflint_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Extract tflint binary from zip on PVE host
+  ansible.builtin.shell:
+    cmd: >
+      python3 -c "import zipfile;
+      zipfile.ZipFile('/tmp/tflint_linux_amd64_{{ ci_tooling_tflint_version }}.zip')
+      .extractall('/tmp/tflint_{{ ci_tooling_tflint_version }}_extract')"
+    creates: "/tmp/tflint_{{ ci_tooling_tflint_version }}_extract/tflint"
+  when: >
+    tflint_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or tflint_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_tflint_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Push tflint binary into each runner LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/tflint_{{ ci_tooling_tflint_version }}_extract/tflint
+      /usr/local/bin/tflint
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (tflint_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_tflint_version not in
+    (tflint_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Set tflint executable bit in each runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- chmod +x /usr/local/bin/tflint"
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (tflint_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_tflint_version not in
+    (tflint_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, ci-tooling]
+
+# ── Step 4.75: osv-scanner binary ─────────────────────────────────────────────
+# osv-scanner is a supply-chain vulnerability scanner (google/osv-scanner).
+# Required by .forgejo/workflows/security-scan.yml (cfwc-website, haists-website,
+# overwatch-console). Not available in Ubuntu apt repos; install as a pre-built
+# binary from GitHub releases. Pattern mirrors tflint above.
+# This task is idempotent: the version check gate skips download+push if the
+# correct version is already installed.
+# Version + SHA256: keep in sync with roles/iac-control/vars/main.yml
+#   (osv_scanner_version / osv_scanner_sha256).
+# OPS-801: initial install — all 3 pve4 runners were missing osv-scanner.
+
+- name: Check osv-scanner version in each runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- /usr/local/bin/osv-scanner --version"
+  register: osv_scanner_version_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Download osv-scanner binary to PVE host (once)
+  ansible.builtin.get_url:
+    url: "{{ ci_tooling_osv_scanner_download_url }}"
+    dest: "/tmp/osv-scanner_linux_amd64_{{ ci_tooling_osv_scanner_version }}"
+    checksum: "sha256:{{ ci_tooling_osv_scanner_sha256 }}"
+    mode: "0755"
+  when: >
+    osv_scanner_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or osv_scanner_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_osv_scanner_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Push osv-scanner binary into each runner LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/osv-scanner_linux_amd64_{{ ci_tooling_osv_scanner_version }}
+      /usr/local/bin/osv-scanner
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (osv_scanner_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_osv_scanner_version not in
+    (osv_scanner_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Set osv-scanner executable bit in each runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- chmod +x /usr/local/bin/osv-scanner"
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (osv_scanner_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_osv_scanner_version not in
+    (osv_scanner_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, ci-tooling]
+
+- name: Clean up osv-scanner download from PVE host
+  ansible.builtin.file:
+    path: "/tmp/osv-scanner_linux_amd64_{{ ci_tooling_osv_scanner_version }}"
+    state: absent
+  tags: [forgejo-runner-pool, ci-tooling]
+
+# ── Step 5: Verify ─────────────────────────────────────────────────────────────
+
+- name: Verify CI tools installed correctly in each runner LXC
+  # OPS-824: Use argv list form so Ansible does not fold the bash script through
+  # YAML's `>` scalar (which collapses newlines to spaces, breaking set -e and
+  # export PATH). argv passes each element as a discrete argument; the bash -c
+  # script is the third element and is passed verbatim without folding.
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - bash
+      - "-c"
+      - |
+        set -e
+        export PATH=/usr/local/bin:/usr/bin:/bin
+        ansible-lint --version | grep -F '{{ ci_tooling_ansible_lint_version }}'
+        semgrep --version 2>&1 | grep -F '{{ ci_tooling_semgrep_version }}'
+        checkov --version | grep -F '{{ ci_tooling_checkov_version }}'
+        bandit --version 2>&1 | grep -F '{{ ci_tooling_bandit_version }}'
+        jq --version | grep -F '{{ ci_tooling_jq_version }}'
+        shellcheck --version | grep -F '{{ ci_tooling_shellcheck_version }}'
+        tflint --version | grep -F '{{ ci_tooling_tflint_version }}'
+        osv-scanner --version | grep -F '{{ ci_tooling_osv_scanner_version }}'
+        trivy --version | grep -F '{{ ci_tooling_trivy_version }}'
+        syft --version | grep -F '{{ ci_tooling_syft_version }}'
+        cosign version | grep -F '{{ ci_tooling_cosign_version }}'
+  register: ci_tooling_verify
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, ci-tooling]

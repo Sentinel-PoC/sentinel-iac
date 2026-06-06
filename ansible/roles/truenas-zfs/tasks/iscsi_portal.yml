@@ -1,0 +1,82 @@
+---
+# truenas-zfs | iscsi_portal — ensure iSCSI portal binding (OPS-947)
+#
+# Reads the portal with truenas_zfs_iscsi_portal_tag and ensures it is bound
+# to truenas_zfs_iscsi_portal_listen_ip:truenas_zfs_iscsi_portal_port.
+# Idempotent: PUT only when current binding differs from desired.
+# Does NOT create a new portal — operates on the existing tag=1 portal only.
+
+- name: truenas-zfs/iscsi_portal | read current iSCSI portals
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/portal"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_zfs_portals
+  changed_when: false
+
+- name: truenas-zfs/iscsi_portal | assert target portal exists
+  ansible.builtin.assert:
+    that:
+      - truenas_zfs_portals.json | selectattr('tag', 'equalto', truenas_zfs_iscsi_portal_tag | int) | list | length > 0
+    fail_msg: >
+      No iSCSI portal with tag={{ truenas_zfs_iscsi_portal_tag }} found.
+      Use TrueNAS UI to create the portal first, then this role will manage its binding.
+
+- name: truenas-zfs/iscsi_portal | extract target portal record
+  ansible.builtin.set_fact:
+    truenas_zfs_target_portal: >-
+      {{
+        truenas_zfs_portals.json
+        | selectattr('tag', 'equalto', truenas_zfs_iscsi_portal_tag | int)
+        | first
+      }}
+
+- name: truenas-zfs/iscsi_portal | display current portal state
+  ansible.builtin.debug:
+    msg: >-
+      Portal tag={{ truenas_zfs_target_portal.tag }}
+      id={{ truenas_zfs_target_portal.id }}
+      listen={{ truenas_zfs_target_portal.listen }}
+      desired={{ truenas_zfs_iscsi_portal_listen_ip }}:{{ truenas_zfs_iscsi_portal_port }}
+  changed_when: false
+
+- name: truenas-zfs/iscsi_portal | check if binding matches desired state
+  ansible.builtin.set_fact:
+    truenas_zfs_portal_needs_update: >-
+      {{
+        not (
+          truenas_zfs_target_portal.listen | length == 1
+          and truenas_zfs_target_portal.listen[0].ip == truenas_zfs_iscsi_portal_listen_ip
+          and truenas_zfs_target_portal.listen[0].port == truenas_zfs_iscsi_portal_port | int
+        )
+      }}
+
+- name: truenas-zfs/iscsi_portal | update portal binding if needed
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/portal/id/{{ truenas_zfs_target_portal.id }}"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      listen:
+        - ip: "{{ truenas_zfs_iscsi_portal_listen_ip }}"
+          port: "{{ truenas_zfs_iscsi_portal_port }}"
+      comment: "{{ truenas_zfs_iscsi_portal_comment }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  when: truenas_zfs_portal_needs_update | bool
+  register: truenas_zfs_portal_update
+
+- name: truenas-zfs/iscsi_portal | report portal state
+  ansible.builtin.debug:
+    msg: >-
+      Portal tag={{ truenas_zfs_iscsi_portal_tag }}:
+      {{ 'updated binding to ' + truenas_zfs_iscsi_portal_listen_ip + ':' + truenas_zfs_iscsi_portal_port | string
+         if truenas_zfs_portal_needs_update | bool
+         else 'already correctly bound to ' + truenas_zfs_iscsi_portal_listen_ip + ':' + truenas_zfs_iscsi_portal_port | string }}
+  changed_when: false

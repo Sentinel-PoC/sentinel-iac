@@ -1,0 +1,14 @@
+# Sentinel sysctl re-apply after network init - deployed by Ansible
+# Workaround: cloud-init/netplan resets network sysctl values on interface bring-up
+[Unit]
+Description=Re-apply Sentinel sysctl hardening after network
+After=network-online.target cloud-init.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/sysctl -p /etc/sysctl.d/99-sentinel-hardening.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

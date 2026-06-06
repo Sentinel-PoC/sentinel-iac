@@ -1,0 +1,19 @@
+# Ansible managed — OPS-585 zigbee2mqtt-host role
+# Mosquitto MQTT broker configuration for zigbee2mqtt + HA
+# Location: /etc/mosquitto/conf.d/zigbee2mqtt.conf
+
+# ── Listener ──────────────────────────────────────────────────────────────────
+# Bind to all interfaces on port {{ mqtt_port }}.
+# UFW rules restrict access to HA LXC and local.
+listener {{ mqtt_port }}
+
+# ── Authentication ────────────────────────────────────────────────────────────
+# Require username/password for all connections.
+# Password file managed by Ansible (mosquitto_passwd task).
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+
+# ── Persistence ───────────────────────────────────────────────────────────────
+# persistence directives removed — already set in /etc/mosquitto/mosquitto.conf.
+# conf.d includes are merged with the main config; duplicate persistence_location
+# causes mosquitto to reject the configuration on startup (OPS-589 bug 4).

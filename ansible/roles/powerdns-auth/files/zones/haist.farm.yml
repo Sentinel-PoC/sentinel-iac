@@ -1,0 +1,356 @@
+---
+# OPS-675: haist.farm authoritative zone definition
+# Source-of-truth for records applied via PowerDNS API (zone_apply.yml).
+#
+# Zone: haist.farm.  (single zone covering haist.farm + 208.haist.farm + subdomains)
+# Primary: ns1.208.haist.farm (192.168.12.253)
+# Secondary: ns2.208.haist.farm (192.168.12.254) — loaded via AXFR in Phase 6
+#
+# Format: rrsets in PowerDNS API format; zone_apply.yml adds changetype: REPLACE.
+# To update: edit records below, bump SOA serial, re-run playbook --tags zone.
+#
+# Record sources (as of 2026-05-16):
+#   STATIC   — operator-decided architecture (SOA, NS, wildcards, Pangolin routes)
+#   NETBOX   — pulled from netbox.208.haist.farm (29 IPs, 20 with dns_name in .12.x)
+#   PLATFORM — hosts in iac-control dnsmasq not yet in NetBox (child issue filed)
+#
+# gitlab.haist.farm intentionally omitted — GitLab (.68) decommissioned.
+# gitlab.208.haist.farm included from NetBox (stale but harmless — host powered off).
+
+zone: "haist.farm."
+
+rrsets:
+
+  # ---------------------------------------------------------------------------
+  # SOA — serial YYYYMMDDNN (01 = first edit on 2026-05-16)
+  # Refresh 3h, Retry 1h, Expire 7d, Minimum (negative cache TTL) 1h
+  # Bump serial and re-run zone apply whenever records change.
+  # ---------------------------------------------------------------------------
+  - name: "haist.farm."
+    type: SOA
+    ttl: 3600
+    records:
+      - content: "ns1.208.haist.farm. hostmaster.haist.farm. 2026052901 10800 3600 604800 3600"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # NS — zone apex nameservers
+  # ---------------------------------------------------------------------------
+  - name: "haist.farm."
+    type: NS
+    ttl: 3600
+    records:
+      - content: "ns1.208.haist.farm."
+        disabled: false
+      - content: "ns2.208.haist.farm."
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # STATIC: Nameserver self-records (ns1 + ns2 not in NetBox yet)
+  # ---------------------------------------------------------------------------
+  - name: "ns1.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.253"
+        disabled: false
+
+  - name: "ns2.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.254"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # STATIC: Wildcards — Pangolin VIP (192.168.12.168)
+  # Lower TTL (300s) intentional — wildcards may shift during active migration work
+  # ---------------------------------------------------------------------------
+  - name: "*.208.haist.farm."
+    type: A
+    ttl: 300
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  - name: "*.apps.overwatch.haist.farm."
+    type: A
+    ttl: 300
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # STATIC: Specific haist.farm records — SSO routes + IoT VLAN
+  # (gitlab.haist.farm intentionally omitted — GitLab decommissioned)
+  # ---------------------------------------------------------------------------
+  - name: "auth.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  - name: "matrix.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  - name: "oauth2.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  - name: "derp.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.50.130"
+        disabled: false
+
+  - name: "208-str-001.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.205"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # STATIC: Specific 208.haist.farm infrastructure records
+  # api.overwatch: split-horizon LAN view — Pangolin. OKD internal uses
+  #   iac-control dnsmasq override (Phase 8). This record serves LAN clients only.
+  # ---------------------------------------------------------------------------
+  - name: "api.overwatch.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  - name: "mirror.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.215"
+        disabled: false
+
+  - name: "mirror-registry-01.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.215"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # NETBOX: 192.168.12.x hosts with dns_name set
+  # Pulled 2026-05-16 from https://netbox.208.haist.farm/api/ipam/ip-addresses/
+  # Duplicates against STATIC records above (ns1, ns2, mirror, mirror-registry-01)
+  # are omitted — STATIC definitions take precedence.
+  # ---------------------------------------------------------------------------
+
+  - name: "ucg-fiber.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.1"
+        disabled: false
+
+  - name: "pve.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.6"
+        disabled: false
+
+  - name: "idrac-pve.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.10"
+        disabled: false
+
+  - name: "haistswebsrv.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.17"
+        disabled: false
+
+  - name: "usw-pro-48-poe.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.22"
+        disabled: false
+
+  - name: "usw-24-g2.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.40"
+        disabled: false
+
+  - name: "idrac-208-pve2.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.50"
+        disabled: false
+
+  - name: "208-pve2.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.56"
+        disabled: false
+
+  - name: "pve3.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.57"
+        disabled: false
+
+  - name: "minio.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.58"
+        disabled: false
+
+  - name: "minio-replica.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.59"
+        disabled: false
+
+  # .68 — GitLab (decommissioned; record retained from NetBox, host powered off)
+  - name: "gitlab.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.68"
+        disabled: false
+
+  - name: "seedbox.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.69"
+        disabled: false
+
+  - name: "208pc001.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.84"
+        disabled: false
+
+  - name: "wazuh.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.100"
+        disabled: false
+
+  - name: "uap-ac-pro.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.146"
+        disabled: false
+
+  - name: "pangolin.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.168"
+        disabled: false
+
+  - name: "idrac-pve3.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.202"
+        disabled: false
+
+  - name: "vault.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.206"
+        disabled: false
+
+  - name: "iac-control.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.210"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # PLATFORM: dnsmasq-platform-hosts not yet in NetBox — child issue filed
+  # ---------------------------------------------------------------------------
+
+  # .60 — pve4-alienware (standalone Proxmox, OPS-492)
+  - name: "pve4-alienware.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.60"
+        disabled: false
+
+  # .210 — SPIRE OIDC discovery provider (co-hosted on iac-control)
+  - name: "spire-oidc.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.210"
+        disabled: false
+
+  # 208-pi-001: in NetBox brief list but dns_name not populated; child issue filed
+  - name: "208-pi-001.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.197"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # OPS-1033: Jellyfin — explicit LAN record overrides wildcard (*.208.haist.farm → .168)
+  # Pangolin route removed OPS-974 (2026-05-26); OPS-1032 cancelled (LAN-only).
+  # Without this record, jellyfin.208.haist.farm resolves to 192.168.12.168 (dead route).
+  # .61 = pve4-alienware LXC 100 (jellyfin-lxc); confirmed by ha-lxc/defaults/main.yml.
+  # ---------------------------------------------------------------------------
+  - name: "jellyfin.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.61"
+        disabled: false
+
+  # ---------------------------------------------------------------------------
+  # SEC-88: S3 API FQDNs — direct host IPs (NOT Pangolin VIP).
+  # Wildcard *.208.haist.farm routes to Pangolin (:168), which fronts only the
+  # console (:9001).  These explicit records bypass the wildcard so that the
+  # wildcard TLS cert (CN=*.208.haist.farm) resolves to the MinIO data-plane
+  # hosts directly, enabling TLS termination without SNI mismatch.
+  # ---------------------------------------------------------------------------
+  - name: "s3.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.58"
+        disabled: false
+
+  - name: "s3-replica.208.haist.farm."
+    type: A
+    ttl: 3600
+    records:
+      - content: "192.168.12.59"
+        disabled: false

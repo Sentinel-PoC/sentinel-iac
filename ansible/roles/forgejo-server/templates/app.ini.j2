@@ -1,0 +1,120 @@
+APP_NAME = Forgejo: Project Sentinel
+RUN_MODE = prod
+RUN_USER = git
+
+[server]
+DOMAIN           = {{ forgejo_domain }}
+ROOT_URL         = {{ forgejo_root_url }}/
+; LOCAL_ROOT_URL: internal URL Forgejo hands to runners for API/artifact calls.
+; Must use HTTP + direct port (bypasses Pangolin TLS terminator) to prevent
+; artifact-upload 500s. Defaults to ROOT_URL when unset — that's the bug fixed
+; by OPS-779 (artifact uploads were hitting https://forgejo.208.haist.farm/→Pangolin→500).
+LOCAL_ROOT_URL   = http://{{ forgejo_domain }}:{{ forgejo_http_port }}/
+HTTP_PORT        = 3000
+SSH_DOMAIN       = {{ forgejo_domain }}
+SSH_PORT         = 22
+SSH_LISTEN_PORT  = 22
+LFS_START_SERVER = true
+OFFLINE_MODE     = false
+
+[database]
+DB_TYPE  = postgres
+HOST     = postgres:5432
+NAME     = {{ forgejo_db_name }}
+USER     = {{ forgejo_db_user }}
+PASSWD   = {{ forgejo_db_password }}
+SSL_MODE = disable
+; OPS-1063: connection pool (also set via compose env vars as belt-and-suspenders).
+; MAX_IDLE_CONNS default=2 causes TCP+auth churn on every agent burst; 20 warm idle
+; connections absorb burst without teardown.  MAX_OPEN_CONNS=80 keeps headroom for
+; admin/backup sessions within postgres max_connections=100.
+MAX_OPEN_CONNS    = {{ forgejo_db_max_open_conns }}
+MAX_IDLE_CONNS    = {{ forgejo_db_max_idle_conns }}
+CONN_MAX_LIFETIME = {{ forgejo_db_conn_max_lifetime }}
+
+[service]
+DISABLE_REGISTRATION              = true
+REQUIRE_SIGNIN_VIEW               = true
+ENABLE_NOTIFY_MAIL                = false
+ALLOW_ONLY_EXTERNAL_REGISTRATION  = true
+
+[openid]
+ENABLE_OPENID_SIGNIN = false
+ENABLE_OPENID_SIGNUP = false
+
+{% if forgejo_oidc_enabled %}
+[oauth2]
+ENABLED = true
+
+[oauth2_client]
+OPENID_CONNECT_SCOPES = {{ forgejo_oidc_scopes }}
+ENABLE_AUTO_REGISTRATION = true
+USERNAME = nickname
+{% endif %}
+
+[log]
+MODE      = console
+LEVEL     = info
+ROOT_PATH = /data/gitea/log
+
+[security]
+INSTALL_LOCK   = true
+REVERSE_PROXY_LIMIT = 1
+; Trust Pangolin (external TLS terminator) AND the Docker network (nginx sidecar — OPS-779)
+REVERSE_PROXY_TRUSTED_PROXIES = 192.168.12.168/32,{{ forgejo_nginx_docker_subnet }}
+
+[repository]
+DEFAULT_BRANCH = main
+
+[migrations]
+ALLOW_LOCAL_NETWORKS = true
+ALLOWED_DOMAINS =
+
+[api]
+ENABLE_SWAGGER = false
+
+[other]
+SHOW_FOOTER_VERSION = false
+
+[actions]
+ENABLED = true
+; OPS-251: resolve all `uses:` action references from this Forgejo instance.
+; The runner receives this URL as `gitea_default_actions_url` in each task context
+; and uses it as the git clone base for unqualified `uses: org/repo/path@ref`.
+; Setting to `self` means:
+;   - uses: sentinel-admin/sentinel-iac/...@main → https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac ✓
+;   - uses: actions/checkout@v4 → https://forgejo.208.haist.farm/actions/checkout (mirror, see action-mirrors.yml)
+; Companion change: tasks/action-mirrors.yml creates forgejo.208.haist.farm/actions/* mirrors from code.forgejo.org.
+DEFAULT_ACTIONS_URL = self
+
+; OPS-1063: agentic-scale tuning — git timeouts, redis queue/cache/session.
+; Applied on-host 2026-05-29 under OPS-1061; codified here to survive playbook re-runs.
+
+[git.timeout]
+; 120s fast-fails stuck goroutines under I/O contention (each holds 1-2 DB connections).
+; Prevents connection-pool exhaustion when 10+ agents clone simultaneously.
+; MIGRATE/MIRROR kept at 300s for large-repo operations.
+DEFAULT  = {{ forgejo_git_timeout_default }}
+CLONE    = {{ forgejo_git_timeout_clone }}
+FETCH    = {{ forgejo_git_timeout_fetch }}
+GC       = {{ forgejo_git_timeout_gc }}
+MIGRATE  = {{ forgejo_git_timeout_migrate }}
+MIRROR   = {{ forgejo_git_timeout_mirror }}
+
+[queue]
+; Redis replaces LevelDB single-writer queue (depth 20) with depth {{ forgejo_queue_length }},
+; eliminating webhook/CI-dispatch 500s when 10+ agents push concurrently.
+TYPE         = redis
+CONN_STR     = redis://redis:6379/0
+LENGTH       = {{ forgejo_queue_length }}
+BATCH_LENGTH = {{ forgejo_queue_batch_length }}
+
+[cache]
+; Redis cache offloads token/permission/repo lookups from postgres (~60-80% fewer
+; DB reads under API-heavy agent load).
+ADAPTER = redis
+HOST    = redis://redis:6379/1
+
+[session]
+PROVIDER        = redis
+PROVIDER_CONFIG = redis://redis:6379/2

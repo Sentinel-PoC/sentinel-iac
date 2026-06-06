@@ -1,0 +1,37 @@
+# yk-ssh-cert-renew.service — systemd user service to renew YubiKey PIV SSH cert.
+#
+# This is a USER-SCOPE service (install under ~/.config/systemd/user/).
+# It calls scripts/yk-ssh-renew to re-sign the PIV pubkey via Vault SSH CA.
+#
+# Mirrors the system-scope jit-ssh-cert-renew.service pattern used on iac-control,
+# but adapted for the operator workstation user session.
+#
+# Setup (one-time):
+#   mkdir -p ~/.config/systemd/user/
+#   cp scripts/systemd/yk-ssh-cert-renew.service ~/.config/systemd/user/
+#   cp scripts/systemd/yk-ssh-cert-renew.timer ~/.config/systemd/user/
+#   cp scripts/yk-ssh-renew ~/yk-ssh-renew
+#   chmod +x ~/yk-ssh-renew
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now yk-ssh-cert-renew.timer
+#
+# Prereqs:
+#   - VAULT_TOKEN must be available to the user session
+#   - Pass it via ~/.vault-env sourced from ~/.profile, or via a credential helper
+#   - opensc package installed
+#   - YubiKey inserted when the timer fires
+#
+# OPS-744 — [hardware-key] Phase B2: YubiKey PIV uses Vault SSH CA certs
+
+[Unit]
+Description=Renew YubiKey PIV SSH cert via Vault SSH CA (OPS-744)
+Documentation=file://%h/yk-ssh-renew
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/yk-ssh-renew
+StandardOutput=journal
+StandardError=journal
+# Pass Vault token from credential file if set
+EnvironmentFile=-%h/.vault-env

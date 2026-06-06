@@ -1,0 +1,76 @@
+---
+# main.yml — frigate-lxc role entry point (OPS-840 / OPS-956)
+#
+# This role runs against pve4-alienware (the Proxmox host), NOT inside LXC 203.
+# Container interactions happen via pct exec / pct push from the host.
+#
+# Prerequisites:
+#   - LXC 203 already provisioned and running (done by OPS-840)
+#   - TrueNAS iSCSI target provisioned (IQN: iqn.2026-03.farm.haist:frigate-recordings)
+#   - open-iscsi installed on pve4 host
+#   - VAULT_TOKEN with access to: secret/reolink, secret/home-assistant
+#
+# Tags:
+#   frigate-iscsi  — iSCSI mount + LXC bind mount (host-side)
+#   frigate-config — Frigate config.yml + docker-compose.yml (pushed to LXC)
+#   frigate-lxc    — all tasks
+
+# ── 0. Ensure rootfs mountoptions=discard on LXC 203 (idempotent) ────────────
+# OPS-1010: CT 203 (frigate) was provisioned manually (OPS-840) without
+# mountoptions=discard. Apply the discard mountoption to enable TRIM/UNMAP
+# passthrough to LVM-thin so guest fstrim calls free blocks in the thinpool.
+# Mirrors OPS-1009/OPS-1010 pattern from powerdns-lxc and ha-lxc roles.
+# pct set writes a [pve:pending] delta — active after next container restart.
+
+- name: Ensure rootfs mountoptions=discard is set on frigate LXC (idempotent)
+  ansible.builtin.shell: |
+    current=$(pct config {{ frigate_lxc_id }} | grep '^rootfs:' | grep -o 'mountoptions=[^ ,]*' || true)
+    if echo "$current" | grep -q 'discard'; then
+      echo "already_set"
+    else
+      pct set {{ frigate_lxc_id }} \
+        -rootfs $(pct config {{ frigate_lxc_id }} | grep '^rootfs:' | sed 's/rootfs: //' | sed 's/,mountoptions=[^ ,]*//'| tr -d '\n'),mountoptions={{ frigate_lxc_rootfs_mountoptions }}
+      echo "applied"
+    fi
+  register: _discard_result
+  changed_when: "'applied' in _discard_result.stdout"
+  tags: [frigate-lxc, discard]
+
+# ── 1. Fetch Vault secrets ─────────────────────────────────────────────────────
+
+- name: Fetch Reolink hub credentials from Vault
+  ansible.builtin.set_fact:
+    frigate_hub_user: "{{ lookup('community.hashi_vault.hashi_vault',
+      'secret/reolink:hub_user
+       url=' ~ vault_addr ~
+       ' token=' ~ lookup('env', 'VAULT_TOKEN') ~
+       ' validate_certs=false') }}"
+    frigate_hub_password: "{{ lookup('community.hashi_vault.hashi_vault',
+      'secret/reolink:hub_password
+       url=' ~ vault_addr ~
+       ' token=' ~ lookup('env', 'VAULT_TOKEN') ~
+       ' validate_certs=false') }}"
+  no_log: true
+  tags: [frigate-lxc, frigate-config]
+
+- name: Fetch MQTT password from Vault
+  ansible.builtin.set_fact:
+    frigate_mqtt_password: "{{ lookup('community.hashi_vault.hashi_vault',
+      'secret/home-assistant:mqtt_password
+       url=' ~ vault_addr ~
+       ' token=' ~ lookup('env', 'VAULT_TOKEN') ~
+       ' validate_certs=false') }}"
+  no_log: true
+  tags: [frigate-lxc, frigate-config]
+
+# ── 2. iSCSI host-side mount ──────────────────────────────────────────────────
+
+- name: Configure iSCSI mount and LXC bind mount
+  ansible.builtin.include_tasks: iscsi_host_mount.yml
+  tags: [frigate-lxc, frigate-iscsi]
+
+# ── 3. Deploy Frigate config + docker-compose ─────────────────────────────────
+
+- name: Deploy Frigate config and docker-compose to LXC 203
+  ansible.builtin.include_tasks: config_deploy.yml
+  tags: [frigate-lxc, frigate-config]

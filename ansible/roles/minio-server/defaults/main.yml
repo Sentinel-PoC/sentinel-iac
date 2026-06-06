@@ -1,0 +1,90 @@
+---
+minio_root_user: "minio-admin"
+minio_root_password: ""
+minio_data_dir: "/data/minio"
+minio_port: 9000
+minio_console_port: 9001
+b2_account_id: ""
+b2_application_key: ""
+rclone_crypt_password: ""
+rclone_crypt_password2: ""
+b2_bucket: "sentinel-backups"
+b2_backup_interval: "hourly"
+minio_version: "RELEASE.2025-09-07T16-13-09Z"
+minio_buckets:
+  - terraform-state
+  - vault-backups
+  - gitlab-backups
+  - etcd-backups
+  - forgejo-backups
+  - compliance-reports
+  - langfuse-events
+  - langfuse-media
+  - backups
+
+# Set to true on replica nodes that don't need B2 backup (SEC-81)
+minio_skip_b2_backup: false
+
+# SEC-88: TLS termination on the MinIO S3 data-plane (:9000).
+# MinIO loads --certs-dir at startup; public.crt (fullchain) and private.key must
+# be present before the service starts.  The wildcard *.208.haist.farm cert from
+# Pangolin is extracted by tls-cert-provision.yml and written here.
+#
+# minio_server_url_fqdn: the FQDN clients use for :9000 S3 API access.
+#   - Must be a name covered by the wildcard cert (*.208.haist.farm).
+#   - Override per host in host_vars for the replica node (s3-replica.208.haist.farm).
+#   - Also used by readiness probe and mc alias setup.
+#
+# minio_tls_pangolin_host: Ansible inventory name of the Pangolin host that holds
+#   the Traefik acme.json (same pattern as forgejo-server/tasks/tls-cert-provision.yml).
+minio_certs_dir: "/opt/minio/certs"
+minio_server_url_fqdn: "s3.208.haist.farm"
+minio_tls_pangolin_host: "pangolin-proxy"
+minio_tls_acme_json_path: "/opt/pangolin/letsencrypt/acme.json"
+minio_tls_cert_domain: "*.208.haist.farm"
+
+# Authentik OIDC configuration (additive to root user auth — root access unaffected)
+# Set minio_oidc_enabled: true and supply client_id/secret from Vault
+# Vault path: secret/authentik/clients/minio
+minio_oidc_enabled: false
+minio_oidc_config_url: "https://auth-next.208.haist.farm/application/o/minio/.well-known/openid-configuration"
+minio_oidc_client_id: ""
+minio_oidc_client_secret: ""
+minio_oidc_display_name: "Authentik"
+minio_oidc_scopes: "openid,profile,email,groups"
+minio_oidc_role_policy: "consoleAdmin"
+
+# vault-agent boot auth (OPS-940)
+# vault-agent runs as a systemd service, authenticates to Vault via AppRole,
+# and renders /run/minio-secrets from secret/minio/admin before minio.service starts.
+# This eliminates the reboot gap introduced by SEC-81 Pattern B (Ansible-rendered tmpfs).
+#
+# AppRole role:   sentinel-minio-server
+# Policy:         sentinel-minio-server (read-only on secret/data/minio/admin)
+# Credentials KV: secret/minio/approle-credentials-lxc301 (minio-bootstrap)
+#                 secret/minio/approle-credentials-lxc302 (minio-replica)
+# Config dir:     /etc/vault-agent-minio/ (mode 0700, root:root)
+# CT template:    /etc/vault-agent-minio/minio-secrets.ctmpl
+# Secrets dest:   /run/minio-secrets (mode 0600, root:root, tmpfs — wiped on reboot)
+# PID file:       /run/vault-agent-minio.pid
+#
+# Vault API used by vault-agent (direct IP, bypasses Pangolin SSO):
+vault_agent_minio_vault_addr: "https://192.168.12.206:8200"
+vault_agent_minio_tls_skip_verify: true
+
+# Directory for vault-agent config files and credentials (persistent, mode 0700)
+vault_agent_minio_config_dir: "/etc/vault-agent-minio"
+
+# vault-agent HCL config path on target host
+vault_agent_minio_config_file: "/etc/vault-agent-minio/vault-agent.hcl"
+
+# CT template source path on target host (rendered by Ansible, then read by vault-agent)
+vault_agent_minio_ctmpl_file: "/etc/vault-agent-minio/minio-secrets.ctmpl"
+
+# Vault KV path for AppRole credentials — resolved per inventory_hostname
+# LXC 301 (minio-bootstrap): secret/data/minio/approle-credentials-lxc301
+# LXC 302 (minio-replica):   secret/data/minio/approle-credentials-lxc302
+vault_agent_minio_bootstrap_hostname: "minio-bootstrap"
+
+# Static secret re-render interval (how often vault-agent polls Vault for secret changes)
+vault_agent_minio_render_interval: "5m"

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none">
+  <!-- Haists IT Consulting H+I lockup — sourced from https://www.haist.farm/favicon-32.svg 2026-05-13 -->
+  <!-- NOT the Home Assistant blue house logo. Original Haists branding. OPS-586. -->
+  <!-- Background: --bark #3D3425 -->
+  <rect width="32" height="32" rx="4" fill="#3D3425"/>
+  <!-- H left vertical bar — --warm-white #FAF8F4 -->
+  <rect x="5" y="7" width="4.5" height="19" fill="#FAF8F4"/>
+  <!-- H crossbar -->
+  <rect x="5" y="14" width="13" height="4" fill="#FAF8F4"/>
+  <!-- H right vertical bar -->
+  <rect x="13.5" y="7" width="4.5" height="19" fill="#FAF8F4"/>
+  <!-- I bar — --logo-i #5CBA7D (brand green) -->
+  <rect x="22" y="7" width="4.5" height="19" fill="#5CBA7D"/>
+  <!-- Accent dot — amber/rust -->
+  <circle cx="24.25" cy="4" r="2.5" fill="#D4883A"/>
+</svg>

@@ -1,0 +1,93 @@
+# Ansible managed — OPS-586 Section E ha-lxc role
+# HA Package: Section E media + presence + comms automations
+#
+# Ref: https://www.home-assistant.io/docs/configuration/packages/
+# Loaded via: homeassistant.packages: !include_dir_named packages
+#
+# Automations in this package:
+#   1. Telegram /status command → reply with HA version + current time
+#   2. NWS morning weather summary → Telegram message at 07:00
+#
+# PREREQUISITES:
+#   - Telegram bot configured via HA UI (OPS-617: YAML config removed)
+#     Settings → Devices & Services → Add Integration → Telegram bot
+#     Then: three-dot menu → Add allowed chat ID
+#   - NWS entity: weather.{{ ha_nws_entity_slug }} (after operator UI setup)
+#   - At least one allowed chat ID registered in HA Telegram bot integration
+#
+# Telegram bot refs:
+#   telegram_bot.send_message:
+#     https://www.home-assistant.io/integrations/telegram_bot/#action-telegram_botsend_message
+#   telegram_command event:
+#     https://www.home-assistant.io/integrations/telegram_bot/#event-command-received
+# NWS ref:
+#   https://www.home-assistant.io/integrations/nws/
+
+automation:
+  # ── Telegram /status inbound command test ─────────────────────────────────
+  # Fires when any allowlisted chat sends "/status" to the bot.
+  # Replies inline to the same chat with current HA timestamp.
+  # This automation verifies inbound Telegram command handling works end-to-end.
+  # Ref: https://www.home-assistant.io/integrations/telegram_bot/#event-command-received
+  - alias: "Telegram: /status command reply (OPS-586 Section E)"
+    id: "ops586e_telegram_status_cmd"
+    description: >
+      Respond to /status Telegram command with current HA time and state.
+      Test automation verifying inbound Telegram command handling works.
+    trigger:
+      - platform: event
+        event_type: telegram_command
+        event_data:
+          command: "/status"
+    condition: []
+    action:
+      - action: telegram_bot.send_message
+        data:
+          target: "{{ '{{' }} trigger.event.data.chat_id {{ '}}' }}"
+          message: >-
+            {{ '{{' }} '\U0001F7E2' {{ '}}' }} *Home Assistant online*
+            Time: {{ '{{' }} now().strftime('%Y-%m-%d %H:%M %Z') {{ '}}' }}
+            Version: {{ '{{' }} states('sensor.current_version') | default('unknown') {{ '}}' }}
+          parse_mode: markdown
+    mode: single
+
+  # ── NWS morning weather summary via Telegram ──────────────────────────────
+  # Fires at 07:00 local time daily.
+  # NWS entity: weather.{{ ha_nws_entity_slug }}
+  # Sends weather briefing to first chat ID in ha_telegram_chat_ids.
+  # Ref: https://www.home-assistant.io/integrations/nws/
+{% if ha_telegram_chat_ids | default([]) | length > 0 %}
+  - alias: "NWS: Morning weather summary to Telegram (OPS-586 Section E)"
+    id: "ops586e_nws_morning_summary"
+    description: >
+      Daily 07:00 weather summary from NWS (Wabash County, {{ ha_nws_latitude }}N {{ ha_nws_longitude }}W)
+      to Telegram chat {{ ha_telegram_chat_ids[0] }}.
+      Requires NWS integration: weather.{{ ha_nws_entity_slug }}
+    trigger:
+      - platform: time
+        at: "07:00:00"
+    condition:
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: "weather.{{ ha_nws_entity_slug }}"
+            state: "unavailable"
+    action:
+      - action: telegram_bot.send_message
+        data:
+          target: {{ ha_telegram_chat_ids[0] }}
+          message: >-
+            {{ '{{' }} '☀️' {{ '}}' }} *Wabash County Morning Weather*
+            Condition: {{ '{{' }} states('weather.{{ ha_nws_entity_slug }}') {{ '}}' }}
+            Temp: {{ '{{' }} state_attr('weather.{{ ha_nws_entity_slug }}', 'temperature') {{ '}}' }}°F
+            Humidity: {{ '{{' }} state_attr('weather.{{ ha_nws_entity_slug }}', 'humidity') {{ '}}' }}%
+            Wind: {{ '{{' }} state_attr('weather.{{ ha_nws_entity_slug }}', 'wind_speed') {{ '}}' }} mph
+          parse_mode: markdown
+    mode: single
+{% else %}
+  # NWS morning summary automation SKIPPED — ha_telegram_chat_ids is empty.
+  # To enable: set ha_telegram_chat_ids in Ansible inventory and re-run role.
+  # Example (inventory/host_vars/pve4-alienware.yml):
+  #   ha_telegram_chat_ids:
+  #     - 123456789
+{% endif %}

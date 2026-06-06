@@ -1,0 +1,87 @@
+http:
+  serversTransports:
+    transport-api:
+      insecureSkipVerify: true
+    transport-console:
+      insecureSkipVerify: true
+      serverName: "console-openshift-console.apps.overwatch.haist.farm"
+    transport-oauth:
+      insecureSkipVerify: true
+      serverName: "oauth-openshift.apps.overwatch.haist.farm"
+
+  routers:
+    router-api:
+      rule: "Host(`api.overwatch.haist.farm`) || Host(`api-int.overwatch.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-api"
+      tls:
+        certResolver: "cloudflare"
+    router-console:
+      rule: "Host(`console-openshift-console.apps.overwatch.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-console"
+      tls:
+        certResolver: "cloudflare"
+    router-oauth:
+      rule: "Host(`oauth-openshift.apps.overwatch.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-oauth"
+      tls:
+        certResolver: "cloudflare"
+
+  services:
+    service-api:
+      loadBalancer:
+        serversTransport: "transport-api"
+        servers:
+          - url: "https://192.168.12.210:6443"
+    service-console:
+      loadBalancer:
+        serversTransport: "transport-console"
+        servers:
+          - url: "https://192.168.12.210:443"
+    service-oauth:
+      loadBalancer:
+        serversTransport: "transport-oauth"
+        servers:
+          - url: "https://192.168.12.210:443"
+
+tcp:
+  routers:
+    # OPS-731: OKD API port 6443 TCP passthrough.
+    # Clients using kubeconfig with server: https://api.overwatch.haist.farm:6443
+    # (e.g. kubectl, oc, Ansible okd/k8s modules) connect to port 6443.
+    # Traefik passthrough preserves the OKD internal TLS cert so kubeconfig
+    # certificate-authority-data (kube-apiserver-lb-signer) validates correctly.
+    # Priority 10 > apps-wildcard priority 1 to avoid SNI ambiguity.
+    router-okd-api-6443:
+      rule: "HostSNI(`api.overwatch.haist.farm`) || HostSNI(`api-int.overwatch.haist.farm`)"
+      entryPoints:
+        - "okdapi"
+      service: "service-okd-api-tcp"
+      tls:
+        passthrough: true
+      priority: 10
+
+    router-apps-wildcard:
+      rule: "HostSNIRegexp(`{subdomain:.+}.apps.overwatch.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-apps-tcp"
+      tls:
+        passthrough: true
+      priority: 1
+
+  services:
+    service-okd-api-tcp:
+      loadBalancer:
+        servers:
+          - address: "192.168.12.210:6443"
+
+    service-apps-tcp:
+      loadBalancer:
+        servers:
+          - address: "192.168.12.210:443"

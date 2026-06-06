@@ -1,0 +1,44 @@
+---
+# config-server role - main tasks
+# Configures HAProxy, dnsmasq, nginx, keepalived for HA failover
+# NIST CP-7: Alternate Processing Site
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name: "{{ required_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - config-server
+    - packages
+
+- name: Include HAProxy configuration
+  ansible.builtin.include_tasks: haproxy.yml
+  tags:
+    - config-server
+    - haproxy
+
+- name: Include dnsmasq configuration
+  ansible.builtin.include_tasks: dnsmasq.yml
+  tags:
+    - config-server
+    - dnsmasq
+
+- name: Include nginx configuration
+  ansible.builtin.include_tasks: nginx.yml
+  tags:
+    - config-server
+    - nginx
+
+- name: Include keepalived configuration
+  ansible.builtin.include_tasks: keepalived.yml
+  tags:
+    - config-server
+    - keepalived
+
+- name: Include PXE sync configuration
+  ansible.builtin.include_tasks: pxe-sync.yml
+  tags:
+    - config-server
+    - pxe-sync

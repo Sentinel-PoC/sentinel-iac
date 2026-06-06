@@ -1,0 +1,231 @@
+---
+# iscsi_storage.yml — iSCSI initiator + Proxmox storage registration for pve4
+# OPS-972 (child of OPS-961, Decision B.2): TrueNAS SSD pool exposed to pve4 via raw iSCSI
+#
+# Runs on: pve4-alienware only (guarded by pve4_iscsi_storage_enabled var)
+# Storage type: pvesm iscsi (raw, no LVM-thin, no QEMU snapshots)
+#
+# Prerequisite: TrueNAS side must be provisioned before this role executes:
+#   - Dataset:    SSD/iscsi-pve4
+#   - Zvol:       SSD/iscsi-pve4/pve4-ssd (200 GiB, sparse/thin, LZ4, STANDARD)
+#   - Extent:     pve4-ssd → zvol/SSD/iscsi-pve4/pve4-ssd
+#   - Initiator:  named group with iqn.1993-08.org.debian:01:fa92d8ebe1d7
+#   - Target:     iqn.2026-03.farm.haist:pve4-ssd on portal 192.168.12.205:3260
+#   See OPS-972 issue for exact TrueNAS API provisioning steps.
+#
+# Pattern: clones ansible/roles/frigate-lxc/tasks/iscsi_host_mount.yml (OPS-956)
+# Key difference: registers as Proxmox storage backend (pvesm add iscsi) rather than
+# fstab + LXC bind-mount. Because pvesm owns the session, we also set node.startup=automatic
+# so iscsid auto-logs in after reboot (not needed in Frigate role which uses _netdev fstab).
+
+# ── 1. Ensure open-iscsi is installed ─────────────────────────────────────────
+# Idempotent: already present from OPS-956 Frigate iSCSI setup on this host.
+
+- name: Ensure open-iscsi is installed on pve4 host
+  ansible.builtin.apt:
+    name: open-iscsi
+    state: present
+    update_cache: false
+  tags: [proxmox, iscsi-storage]
+
+# ── 2. Discover iSCSI target ──────────────────────────────────────────────────
+
+- name: Discover iSCSI targets from TrueNAS portal
+  ansible.builtin.command:
+    cmd: "iscsiadm -m discovery -t sendtargets -p {{ pve4_iscsi_portal }}:{{ pve4_iscsi_port }}"
+  register: iscsi_discovery
+  changed_when: false
+  failed_when: iscsi_discovery.rc != 0
+  tags: [proxmox, iscsi-storage]
+
+- name: Log iSCSI discovery result
+  ansible.builtin.debug:
+    msg: "iSCSI discovery: {{ iscsi_discovery.stdout_lines }}"
+  tags: [proxmox, iscsi-storage]
+
+# ── 3. Login to iSCSI target ──────────────────────────────────────────────────
+
+- name: Login to pve4 SSD iSCSI target (no-op if already logged in)
+  ansible.builtin.command:
+    cmd: >
+      iscsiadm -m node
+      --targetname {{ pve4_iscsi_target_iqn }}
+      --portal {{ pve4_iscsi_portal }}
+      --login
+  register: iscsi_login
+  changed_when: "'successful' in iscsi_login.stdout"
+  failed_when: iscsi_login.rc != 0 and 'already present' not in iscsi_login.stderr
+  tags: [proxmox, iscsi-storage]
+
+# ── 4. Configure automatic login on reboot ────────────────────────────────────
+# node.startup=automatic → iscsid logs in on reboot without manual intervention.
+# Required for persistent pvesm availability (Frigate role uses _netdev fstab
+# instead; pvesm does not manage fstab entries).
+
+- name: Enable automatic iSCSI login on reboot
+  ansible.builtin.command:
+    cmd: >
+      iscsiadm -m node
+      --targetname {{ pve4_iscsi_target_iqn }}
+      --portal {{ pve4_iscsi_portal }}
+      --op update -n node.startup -v automatic
+  changed_when: false
+  tags: [proxmox, iscsi-storage]
+
+# ── 5. Register Proxmox iSCSI storage backend ─────────────────────────────────
+# Adds entry to /etc/pve/storage.cfg via pvesm. Content=images: raw iSCSI LUNs
+# presented as VM disk images. rootdir is not valid for iSCSI type (requires FS).
+# Idempotent: pvesh get pre-check avoids duplicate pvesm add error.
+#
+# OPS-979 fix: --nodes now uses {{ ansible_nodename }} (resolves to "pve4" at
+# runtime) instead of hardcoded "pve4-alienware" (inventory name, not PVE cluster
+# node name). The PVE cluster identifies this host as "pve4" per /etc/hostname.
+
+- name: Check if Proxmox iSCSI storage is already registered
+  ansible.builtin.command:
+    cmd: "pvesh get /storage/{{ pve4_iscsi_storage_name }}"
+  register: pvesm_check
+  changed_when: false
+  failed_when: false
+  tags: [proxmox, iscsi-storage]
+
+- name: Register iSCSI storage in Proxmox (pvesm add iscsi)
+  ansible.builtin.command:
+    cmd: >
+      pvesm add iscsi {{ pve4_iscsi_storage_name }}
+      --portal {{ pve4_iscsi_portal }}
+      --target {{ pve4_iscsi_target_iqn }}
+      --nodes {{ ansible_nodename }}
+      --content {{ pve4_iscsi_storage_content }}
+  when: pvesm_check.rc != 0
+  register: pvesm_add
+  changed_when: pvesm_add.rc == 0
+  tags: [proxmox, iscsi-storage]
+
+- name: Verify Proxmox storage is active
+  ansible.builtin.command:
+    cmd: "pvesh get /nodes/{{ ansible_nodename }}/storage/{{ pve4_iscsi_storage_name }}/status"
+  register: pvesm_status
+  changed_when: false
+  tags: [proxmox, iscsi-storage, verify]
+
+- name: Show Proxmox storage status
+  ansible.builtin.debug:
+    msg: "Storage {{ pve4_iscsi_storage_name }} status: {{ pvesm_status.stdout }}"
+  tags: [proxmox, iscsi-storage, verify]
+
+# ── 6. LVM-thin pool over iSCSI block device (optional) ───────────────────────
+# When pve4_iscsi_lvmthin_enabled=true: creates an LVM thin pool on top of the
+# iSCSI block device and registers it as a second Proxmox storage backend.
+#
+# Background: raw pvesm iscsi storage presents whole LUNs only and cannot
+# allocate sub-images (pvesm alloc returns "can't allocate space in iscsi
+# storage"). LVM-thin on top enables per-VM thin-provisioned disk allocation.
+#
+# Manual equivalents (for reference / rollback):
+#   pvcreate /dev/sdc
+#   vgcreate <vgname> /dev/sdc
+#   lvcreate -l 95%FREE --thinpool <pool> <vgname>
+#   pvesm add lvmthin <storage-name> --vgname <vg> --thinpool <pool> --nodes <node>
+#
+# Idempotent: each step pre-checks for existing PV/VG/LV/storage.
+# Default: pve4_iscsi_lvmthin_enabled=false — hosts without this requirement
+# are unaffected. Set to true in host_vars when LVM-thin layer is needed.
+#
+# OPS-979: added after discovering raw iSCSI can't allocate sub-images.
+# Verified working on pve4 (2026-05-26) during OPS-976 wazuh VM migration.
+
+- name: Check if LVM physical volume already exists on iSCSI device
+  ansible.builtin.command:
+    cmd: "pvs {{ pve4_iscsi_lvmthin_device }}"
+  register: lvm_pv_check
+  changed_when: false
+  failed_when: false
+  when: pve4_iscsi_lvmthin_enabled | default(false)
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Create LVM physical volume on iSCSI block device
+  ansible.builtin.command:
+    cmd: "pvcreate {{ pve4_iscsi_lvmthin_device }}"
+  register: pvcreate_result
+  changed_when: pvcreate_result.rc == 0
+  when:
+    - pve4_iscsi_lvmthin_enabled | default(false)
+    - lvm_pv_check.rc != 0
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Check if LVM volume group already exists
+  ansible.builtin.command:
+    cmd: "vgdisplay {{ pve4_iscsi_lvmthin_vg }}"
+  register: lvm_vg_check
+  changed_when: false
+  failed_when: false
+  when: pve4_iscsi_lvmthin_enabled | default(false)
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Create LVM volume group on iSCSI physical volume
+  ansible.builtin.command:
+    cmd: "vgcreate {{ pve4_iscsi_lvmthin_vg }} {{ pve4_iscsi_lvmthin_device }}"
+  register: vgcreate_result
+  changed_when: vgcreate_result.rc == 0
+  when:
+    - pve4_iscsi_lvmthin_enabled | default(false)
+    - lvm_vg_check.rc != 0
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Check if LVM thin pool already exists
+  ansible.builtin.command:
+    cmd: "lvdisplay {{ pve4_iscsi_lvmthin_vg }}/{{ pve4_iscsi_lvmthin_pool }}"
+  register: lvm_lv_check
+  changed_when: false
+  failed_when: false
+  when: pve4_iscsi_lvmthin_enabled | default(false)
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Create LVM thin pool on volume group (95% of VG free space)
+  ansible.builtin.command:
+    cmd: "lvcreate -l 95%FREE --thinpool {{ pve4_iscsi_lvmthin_pool }} {{ pve4_iscsi_lvmthin_vg }}"
+  register: lvcreate_result
+  changed_when: lvcreate_result.rc == 0
+  when:
+    - pve4_iscsi_lvmthin_enabled | default(false)
+    - lvm_lv_check.rc != 0
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Check if Proxmox LVM-thin storage is already registered
+  ansible.builtin.command:
+    cmd: "pvesh get /storage/{{ pve4_iscsi_lvmthin_storage_name }}"
+  register: lvmthin_storage_check
+  changed_when: false
+  failed_when: false
+  when: pve4_iscsi_lvmthin_enabled | default(false)
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Register LVM-thin storage in Proxmox (pvesm add lvmthin)
+  ansible.builtin.command:
+    cmd: >
+      pvesm add lvmthin {{ pve4_iscsi_lvmthin_storage_name }}
+      --vgname {{ pve4_iscsi_lvmthin_vg }}
+      --thinpool {{ pve4_iscsi_lvmthin_pool }}
+      --nodes {{ ansible_nodename }}
+      --content images
+  register: lvmthin_add_result
+  changed_when: lvmthin_add_result.rc == 0
+  when:
+    - pve4_iscsi_lvmthin_enabled | default(false)
+    - lvmthin_storage_check.rc != 0
+  tags: [proxmox, iscsi-storage, lvmthin]
+
+- name: Verify LVM-thin storage is active in Proxmox
+  ansible.builtin.command:
+    cmd: "pvesh get /nodes/{{ ansible_nodename }}/storage/{{ pve4_iscsi_lvmthin_storage_name }}/status"
+  register: lvmthin_status
+  changed_when: false
+  when: pve4_iscsi_lvmthin_enabled | default(false)
+  tags: [proxmox, iscsi-storage, lvmthin, verify]
+
+- name: Show LVM-thin storage status
+  ansible.builtin.debug:
+    msg: "LVM-thin storage {{ pve4_iscsi_lvmthin_storage_name }} status: {{ lvmthin_status.stdout }}"
+  when: pve4_iscsi_lvmthin_enabled | default(false)
+  tags: [proxmox, iscsi-storage, lvmthin, verify]

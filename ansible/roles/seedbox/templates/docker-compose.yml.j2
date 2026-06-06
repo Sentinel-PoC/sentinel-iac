@@ -1,0 +1,186 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - VPN_SERVICE_PROVIDER={{ vpn_provider }}
+      - VPN_TYPE=wireguard
+      - VPN_PORT_FORWARDING={{ seedbox_vpn_port_forwarding }}
+      - VPN_PORT_FORWARDING_PROVIDER={{ seedbox_vpn_port_forwarding_provider }}
+      - VPN_PORT_FORWARDING_UP_COMMAND=/bin/sh -c "wget -qO- --post-data=json={listen_port:{{ '{{PORTS}}' }}} http://localhost:{{ qbittorrent_port }}/api/v2/app/setPreferences || true"
+      - VPN_PORT_FORWARDING_STATUS_FILE=/gluetun/forwarded_port
+      - PUID=0
+      - PGID=0
+      - FIREWALL_OUTBOUND_SUBNETS={{ seedbox_firewall_outbound_subnets }}
+      - FIREWALL_INPUT_PORTS={{ seedbox_firewall_input_ports }}
+      - FIREWALL=on
+      - BLOCK_MALICIOUS=off
+      - BLOCK_SURVEILLANCE=off
+      - BLOCK_ADS=off
+      - BLOCK_IPV6={{ seedbox_block_ipv6 }}
+      - TZ=Etc/UTC
+      - DNS_UPSTREAM_RESOLVER_TYPE=DoH
+      - DNS_UPSTREAM_RESOLVERS=cloudflare,quad9,google
+    env_file:
+      - {{ seedbox_gluetun_env_file }}
+    volumes:
+      - ./gluetun:/gluetun
+    ports:
+      - "{{ qbittorrent_port }}:{{ qbittorrent_port }}"
+      # SEC-73: prowlarr and cross-seed moved to gluetun namespace.
+      # Their ports must be exposed here (on gluetun) — network_mode: service:X is
+      # exclusive with ports: on child containers.
+      - "{{ prowlarr_port }}:{{ prowlarr_port }}"
+      - "{{ cross_seed_port }}:{{ cross_seed_port }}"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:{{ seedbox_gluetun_control_port }}/v1/publicip/ip | grep -q 'public_ip'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: service:gluetun
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT={{ qbittorrent_port }}
+    volumes:
+      - {{ seedbox_qbittorrent_config_dir }}:/config
+      - {{ seedbox_data_dir }}:/data
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    # OPS-711: healthcheck verifies gluetun netns is intact by probing gluetun's
+    # control port from within the shared namespace. Fails if the namespace is
+    # orphaned (gluetun restarted). gluetun-watcher.service detects the unhealthy
+    # state at startup and triggers force-recreate.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:{{ seedbox_gluetun_control_port }}/v1/publicip/ip | grep -q 'public_ip'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  # OPS-321 Phase 2 — cross-seed: match existing local torrents against other trackers via Prowlarr.
+  # Runs in daemon mode (HTTP API on {{ cross_seed_port }}).
+  # SEC-73: moved to gluetun network namespace (was: seedbox_default bridge, leaked real IP via Prowlarr).
+  # In the gluetun namespace, qBit and Prowlarr are reachable at localhost (shared namespace).
+  # Port {{ cross_seed_port }} exposed via gluetun ports: — NOT on this service (exclusive with network_mode).
+  # Volumes: /config (state + config.js), /torrents (qBit BT_backup, read-only), /data (media, read-only).
+  # Config lives at {{ cross_seed_config_file }} (mode 0600) — rendered by Ansible, contains Prowlarr API key.
+  # Initial action: "save" (dry-run). Operator flips to "inject" after reviewing /config/cross-seeds/ output.
+  cross-seed:
+    image: ghcr.io/cross-seed/cross-seed:latest
+    container_name: cross-seed
+    network_mode: "service:gluetun"
+    command: daemon
+    environment:
+      - TZ=Etc/UTC
+    volumes:
+      - {{ cross_seed_config_dir }}:/config
+      - {{ cross_seed_config_file }}:/config/config.js:ro
+      - {{ seedbox_qbittorrent_config_dir }}/qBittorrent/BT_backup:/torrents:ro
+      - {{ seedbox_data_dir }}:/data:ro
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    # OPS-711: same netns healthcheck pattern as qbittorrent above.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:{{ seedbox_gluetun_control_port }}/v1/publicip/ip | grep -q 'public_ip'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+  # SEC-73: prowlarr moved from docker-compose.override.yml (OPS-180 unmanaged) into main IaC.
+  # Now in gluetun network namespace — torrent indexer queries go through VPN, not real IP.
+  # Port {{ prowlarr_port }} exposed via gluetun ports: (above). No ports: key here.
+  # sonarr/radarr on bridge must update their Prowlarr URL to http://gluetun:{{ prowlarr_port }}
+  # after first Ansible run (Settings → Indexers → Prowlarr → URL).
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - {{ prowlarr_config_dir }}:/config
+      - {{ seedbox_data_dir }}:/data
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    # OPS-711: same netns healthcheck pattern as qbittorrent above.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:{{ seedbox_gluetun_control_port }}/v1/publicip/ip | grep -q 'public_ip'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    restart: unless-stopped
+
+{% if autobrr_enabled | default(false) %}
+  # OPS-321 Phase 1 — autobrr: IRC announce + RSS/push-based torrent grabber.
+  # Does NOT run behind gluetun — talks directly to IRC and to qBit API via gluetun:{{ qbittorrent_port }}.
+  # LAN access only on port {{ autobrr_port }} — not exposed externally via Pangolin.
+  # session_secret is NOT in this file; it lives in {{ autobrr_env_file }} (mode 0600).
+  # OPS-469: disabled 2026-05-09 (freeleech 3.7TiB incident). Set autobrr_enabled: true to re-enable.
+  autobrr:
+    image: ghcr.io/autobrr/autobrr:latest
+    container_name: autobrr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - AUTOBRR__HOST=0.0.0.0
+      - AUTOBRR__PORT={{ autobrr_port }}
+      - AUTOBRR__DATABASE_TYPE=sqlite
+    env_file:
+      - {{ autobrr_env_file }}
+    volumes:
+      - {{ autobrr_config_dir }}:/config
+    ports:
+      - "{{ autobrr_port }}:{{ autobrr_port }}"
+    depends_on:
+      - qbittorrent
+    restart: unless-stopped
+{% endif %}
+
+  # OPS-356: TQM (qbit_manage) — torrent queue manager / storage-overflow guard.
+  # Removes freeleech torrents when: (ratio > {{ tqm_max_ratio }} OR seeding >= {{ tqm_max_seeding_days }}d)
+  #   AND /data free space < {{ tqm_min_free_space_gb }}GB.
+  # Runs on a {{ tqm_schedule_minutes }}-minute schedule (QBT_SCHEDULE).
+  # Connects to qBit at gluetun:{{ qbittorrent_port }} via Docker DNS — NOT the host IP.
+  # Auth bypassed: Docker bridge subnet (172.x.x.x) is in qBit AuthSubnetWhitelist.
+  # Config at {{ tqm_config_file }} (mode 0644, rendered by Ansible — no secrets).
+  # /data mounted read-only for free-space monitoring; all torrent ops via qBit API.
+  tqm:
+    image: ghcr.io/stuffanthings/qbit_manage:latest
+    container_name: tqm
+    environment:
+      - QBT_RUN=false
+      - QBT_SCHEDULE={{ tqm_schedule_minutes }}
+      - QBT_LOG_LEVEL=INFO
+      - TZ=Etc/UTC
+    volumes:
+      - {{ tqm_config_dir }}:/app/config
+      - {{ seedbox_data_dir }}:/data:ro
+    depends_on:
+      - qbittorrent
+    restart: unless-stopped

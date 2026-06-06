@@ -1,0 +1,80 @@
+# Ansible managed — OPS-590 ha-lxc role
+# Home Assistant main configuration
+# Source: https://www.home-assistant.io/docs/configuration/
+#
+# IMPORTANT: This file is managed by Ansible (ha-lxc role, OPS-590).
+# Changes made via the HA UI to configuration.yaml WILL be overwritten on
+# next Ansible role run. Use !include files for persistent UI-driven config.
+#
+# Trusted proxies: HA trusts X-Forwarded-For from Pangolin (.168) so it
+# logs real client IPs and IP-based rate-limiting / login protection works
+# correctly when accessed via https://ha.208.haist.farm.
+# Ref: https://www.home-assistant.io/integrations/http/#trusted_proxies
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Reverse proxy support — required for Pangolin (ha.208.haist.farm)
+# Without this HA sees all traffic as coming from 192.168.12.168 (Pangolin)
+# which breaks login-attempt detection and IP-based blocking.
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - {{ ha_trusted_proxy_ip }}
+
+# Load frontend themes from the themes folder.
+# extra_module_url: loads haists-favicon.js from HA's www/ directory (/local/ path)
+# to replace HA's default blue-house favicon with the Haists H+I lockup (OPS-586).
+# Ref: https://www.home-assistant.io/integrations/frontend/#loading-extra-javascript
+frontend:
+  themes: !include_dir_merge_named themes
+  extra_module_url:
+    - /local/haists-favicon.js
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+# ── Recorder: explicit SQLite DB retention (OPS-934) ─────────────────────────
+# Without this section HA uses default purge settings only. The DB reached
+# 1.6G and was growing ~375M/day (OPS-922 fleet audit finding, OPS-934 fix).
+# purge_keep_days: retain this many days of history; older rows are pruned
+#   by the daily purge scheduled at 04:12 local time.
+# commit_interval: flush every N seconds (reduces WAL size under normal load).
+# auto_purge: true = also purge expired entities on each purge run.
+# Ref: https://www.home-assistant.io/integrations/recorder/
+recorder:
+  purge_keep_days: {{ ha_recorder_purge_keep_days }}
+  commit_interval: {{ ha_recorder_commit_interval }}
+  auto_purge: true
+
+# ── Packages — modular integration configs (OPS-586) ─────────────────────────
+# Each section worker (Section C Wazuh, Section E media/comms) drops a YAML
+# file into /config/packages/ in the HA LXC. HA merges all package files at
+# startup so each section's sensors/automations are independently manageable.
+# Ref: https://www.home-assistant.io/docs/configuration/packages/
+homeassistant:
+  packages: !include_dir_named packages
+
+# ── Lovelace YAML dashboards (OPS-586 Section E + Section F) ─────────────────
+# Section E (PR #209): "Media & Comms" side-dashboard (media_player / calendar)
+# Section F (PR #211): "Haists IT" primary dashboard (Home/Security/Infra/Today)
+# Both are YAML-managed; default storage dashboard is unaffected.
+# Ref: https://www.home-assistant.io/dashboards/dashboards/
+# Ref: https://www.home-assistant.io/dashboards/views/
+lovelace:
+  dashboards:
+    lovelace-media-comms:
+      mode: yaml
+      filename: lovelace/section_e.yaml
+      title: Media & Comms
+      icon: mdi:television-play
+      show_in_sidebar: true
+      require_admin: false
+    lovelace-main:
+      mode: yaml
+      filename: dashboards/main.yaml
+      title: Haists IT
+      icon: mdi:home-assistant
+      show_in_sidebar: true
+      require_admin: false

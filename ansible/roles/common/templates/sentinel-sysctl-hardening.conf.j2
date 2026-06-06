@@ -1,0 +1,57 @@
+# Sentinel network security hardening - deployed by Ansible
+# CIS Ubuntu 24.04 LTS - Section 3.3
+
+# Log suspicious packets (CIS 3.3.4)
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+
+# Disable ICMP redirects (CIS 3.3.2)
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+
+# Enable reverse path filtering (CIS 3.3.7)
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Disable source routing (CIS 3.3.1)
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+
+# IPv6 hardening (CIS 3.3.3, 3.3.5)
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.default.accept_ra = 0
+
+# Disable core dumps for SUID programs (CIS 1.5.4)
+fs.suid_dumpable = 0
+
+# Enable SYN cookies for SYN flood protection (CIS 3.3.8)
+net.ipv4.tcp_syncookies = 1
+
+# SC-5 SEC-108: ICMP DoS mitigations
+# Ignore broadcast ICMP echo requests (Smurf attack defense)
+# Smurf attacks amplify ping floods by sending to broadcast addresses
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+# Rate-limit outgoing ICMP error messages (prevents ICMP-based amplification)
+# Value is in milliseconds between packets; 100ms = max 10 ICMP errors/sec outbound
+# Default Linux value is 1000 (1000 ICMP errors/sec); 100 is more restrictive
+net.ipv4.icmp_ratelimit = 100
+
+# Full ASLR randomization (CIS 1.5.3)
+kernel.randomize_va_space = 2
+
+# Restrict dmesg access to root (CIS 1.5.1)
+kernel.dmesg_restrict = 1
+
+# Restrict kernel performance events (CIS 1.5.2)
+kernel.perf_event_paranoid = 3
+
+# Restrict kernel pointer exposure (CIS 1.5.2)
+kernel.kptr_restrict = 2

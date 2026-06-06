@@ -1,0 +1,45 @@
+# {{ ansible_managed }}
+ui = true
+disable_mlock = true
+
+storage "file" {
+  path = "/vault/file"
+}
+
+listener "tcp" {
+  address       = "0.0.0.0:8200"
+{% if vault_tls_enabled %}
+  tls_cert_file = "/vault/tls/cert.pem"
+  tls_key_file  = "/vault/tls/key.pem"
+{% else %}
+  tls_disable = 1
+{% endif %}
+}
+
+{% if vault_transit_unseal_enabled | default(false) %}
+seal "transit" {
+  address         = "{{ vault_transit_address }}"
+  token           = "{{ vault_transit_token }}"
+  disable_renewal = "false"
+  key_name        = "{{ vault_transit_key_name }}"
+  mount_path      = "{{ vault_transit_mount_path }}"
+  # SEC-89: explicit CA cert for transit listener TLS — avoids system trust store
+  # dependency and works regardless of whether transit cert is in system trust.
+  tls_ca_cert     = "{{ vault_transit_ca_cert }}"
+}
+{% endif %}
+
+{% if vault_telemetry_enabled | default(false) %}
+telemetry {
+  prometheus_retention_time = "{{ vault_telemetry_retention | default('30s') }}"
+  disable_hostname         = true
+}
+{% endif %}
+
+{% if vault_tls_enabled %}
+api_addr     = "https://{{ vault_api_addr }}:8200"
+cluster_addr = "https://{{ vault_api_addr }}:8201"
+{% else %}
+api_addr     = "http://{{ vault_api_addr }}:8200"
+cluster_addr = "http://{{ vault_api_addr }}:8201"
+{% endif %}

@@ -1,0 +1,64 @@
+---
+# OPS-293 — Sandbox cluster node-level CoreDNS forwarder for harbor.208.haist.farm
+#
+# Problem: kubelet/CRI-O on sandbox nodes query node-level CoreDNS (at the node
+# IP:53, served by static pod openshift-kni-infra/coredns). That CoreDNS had no
+# forwarder for harbor.208.haist.farm — queries fell through to 1.1.1.1/8.8.8.8
+# (public DNS), which has no internal records → NXDOMAIN → ImagePullBackOff.
+#
+# Root cause of round-1 failure: round-1 patched dns.operator/default (cluster-
+# services CoreDNS at 172.30.0.10) which fixed pod-side DNS. But kubelet/CRI-O
+# use node-level CoreDNS (192.168.12.220-222:53 on each node), not the cluster-
+# services CoreDNS. Pod-side test was a false-pass due to ndots:5 + search domain
+# expansion catching queries at the haist.farm forwarder.
+#
+# Fix: prepend a harbor.208.haist.farm:53 server block to the node-level Corefile.tmpl
+# that forwards to iac-control dnsmasq (192.168.12.210), which serves:
+#   address=/.208.haist.farm/192.168.12.168  (Pangolin — harbor, vault, forgejo etc.)
+#
+# WHY harbor-specific, NOT broad 208.haist.farm zone:
+# CoreDNS longest-suffix match means a broad "208.haist.farm:53" zone would intercept
+# ALL *.208.haist.farm queries including api.okd-sandbox.sandbox.208.haist.farm and
+# api-int.okd-sandbox.sandbox.208.haist.farm. iac-control dnsmasq has only a wildcard
+# address=/.208.haist.farm/192.168.12.168 (Pangolin VIP) — it would return 192.168.12.168
+# for the API VIPs instead of 192.168.12.223, breaking kubelet-to-API connectivity.
+# Using harbor.208.haist.farm:53 (specific zone) leaves api/api-int resolution to the
+# existing "." zone template stanzas which return the correct VIPs directly.
+#
+# IMPORTANT — targets Corefile.tmpl, NOT the rendered Corefile:
+# The static pod openshift-kni-infra/coredns has an initContainer (render-config-
+# coredns) that runs `runtimecfg render` to regenerate /etc/coredns/Corefile from
+# /etc/kubernetes/static-pod-resources/coredns/Corefile.tmpl on EVERY pod start.
+# A MachineConfig targeting the rendered /etc/coredns/Corefile would be immediately
+# overwritten by the initContainer on pod restart. This MC targets the TEMPLATE,
+# which is the persistent source of truth.
+#
+# Applies to: master pool only (worker pool has 0 machines; all 3 sandbox masters
+# also carry the worker role — compact/converged cluster).
+#
+# New rendered Corefile.tmpl (prepended zone only — existing . zone is unchanged):
+#   harbor.208.haist.farm:53 {
+#       errors
+#       forward . 192.168.12.210
+#       cache 30
+#   }
+#
+# Applied: 2026-05-02 — OPS-293 round 2 worker (corrected from broad 208.haist.farm zone)
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-master-coredns-208-haist-farm
+  labels:
+    machineconfiguration.openshift.io/role: master
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - path: /etc/kubernetes/static-pod-resources/coredns/Corefile.tmpl
+          mode: 0644
+          overwrite: true
+          contents:
+            source: >-
+              data:text/plain;charset=utf-8;base64,aGFyYm9yLjIwOC5oYWlzdC5mYXJtOjUzIHsKICAgIGVycm9ycwogICAgZm9yd2FyZCAuIDE5Mi4xNjguMTIuMjEwCiAgICBjYWNoZSAzMAp9Ci4gewogICAgZXJyb3JzCiAgICBidWZzaXplIDUxMgogICAgaGVhbHRoIDoxODA4MAogICAgZm9yd2FyZCAuIHt7LSByYW5nZSAkdXBzdHJlYW0gOj0gLkROU1Vwc3RyZWFtc319IHt7JHVwc3RyZWFtfX17ey0gZW5kfX0gewogICAgICAgIHBvbGljeSBzZXF1ZW50aWFsCiAgICB9CiAgICBjYWNoZSAzMAogICAgcmVsb2FkCiAgICB0ZW1wbGF0ZSBJTiB7eyAuQ2x1c3Rlci5JbmdyZXNzVklQUmVjb3JkVHlwZSB9fSBva2Qtc2FuZGJveC5zYW5kYm94LjIwOC5oYWlzdC5mYXJtIHsKICAgICAgICBhbnN3ZXIgInt7Int7IC5OYW1lIH19In19IDYwIGluIHt7Int7IC5UeXBlIH19In19IDE5Mi4xNjguMTIuMjI0IgogICAgICAgIGZhbGx0aHJvdWdoCiAgICB9CiAgICB0ZW1wbGF0ZSBJTiB7eyAuQ2x1c3Rlci5JbmdyZXNzVklQRW1wdHlUeXBlIH19IG9rZC1zYW5kYm94LnNhbmRib3guMjA4LmhhaXN0LmZhcm0gewogICAgICAgIAogICAgICAgIGZhbGx0aHJvdWdoCiAgICB9CiAgICB0ZW1wbGF0ZSBJTiB7eyAuQ2x1c3Rlci5BUElWSVBSZWNvcmRUeXBlIH19IG9rZC1zYW5kYm94LnNhbmRib3guMjA4LmhhaXN0LmZhcm0gewogICAgICAgIG1hdGNoIF5hcGkub2tkLXNhbmRib3guc2FuZGJveC4yMDguaGFpc3QuZmFybQogICAgICAgIGFuc3dlciAie3sie3sgLk5hbWUgfX0ifX0gNjAgaW4ge3sie3sgLlR5cGUgfX0ifX0gMTkyLjE2OC4xMi4yMjMiCiAgICAgICAgZmFsbHRocm91Z2gKICAgIH0KICAgIHRlbXBsYXRlIElOIHt7IC5DbHVzdGVyLkFQSVZJUEVtcHR5VHlwZSB9fSBva2Qtc2FuZGJveC5zYW5kYm94LjIwOC5oYWlzdC5mYXJtIHsKICAgICAgICBtYXRjaCBeYXBpLm9rZC1zYW5kYm94LnNhbmRib3guMjA4LmhhaXN0LmZhcm0KICAgICAgICAKICAgICAgICBmYWxsdGhyb3VnaAogICAgfQogICAgdGVtcGxhdGUgSU4ge3sgLkNsdXN0ZXIuQVBJVklQUmVjb3JkVHlwZSB9fSBva2Qtc2FuZGJveC5zYW5kYm94LjIwOC5oYWlzdC5mYXJtIHsKICAgICAgICBtYXRjaCBeYXBpLWludC5va2Qtc2FuZGJveC5zYW5kYm94LjIwOC5oYWlzdC5mYXJtCiAgICAgICAgYW5zd2VyICJ7eyJ7eyAuTmFtZSB9fSJ9fSA2MCBpbiB7eyJ7eyAuVHlwZSB9fSJ9fSAxOTIuMTY4LjEyLjIyMyIKICAgICAgICBmYWxsdGhyb3VnaAogICAgfQogICAgdGVtcGxhdGUgSU4ge3sgLkNsdXN0ZXIuQVBJVklQRW1wdHlUeXBlIH19IG9rZC1zYW5kYm94LnNhbmRib3guMjA4LmhhaXN0LmZhcm0gewogICAgICAgIG1hdGNoIF5hcGktaW50Lm9rZC1zYW5kYm94LnNhbmRib3guMjA4LmhhaXN0LmZhcm0KICAgICAgICAKICAgICAgICBmYWxsdGhyb3VnaAogICAgfQogICAgaG9zdHMgewogICAgICAgIHt7LSByYW5nZSAuQ2x1c3Rlci5Ob2RlQWRkcmVzc2VzIH19CiAgICAgICAge3sgLkFkZHJlc3MgfX0ge3sgLk5hbWUgfX0ge3sgLk5hbWUgfX0ue3sgJC5DbHVzdGVyLk5hbWUgfX0ue3sgJC5DbHVzdGVyLkRvbWFpbiB9fQogICAgICAgIHt7LSBlbmQgfX0KICAgICAgICBmYWxsdGhyb3VnaAogICAgfQp9Cg==

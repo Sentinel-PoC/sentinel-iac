@@ -1,0 +1,14 @@
+---
+# suricata-nids handlers — OPS-569
+
+- name: Restart suricata
+  ansible.builtin.service:
+    name: suricata
+    state: restarted
+  listen: "restart suricata"
+
+- name: Reload suricata rules
+  ansible.builtin.command:
+    cmd: suricatasc -c reload-rules
+  changed_when: true
+  listen: "reload suricata rules"

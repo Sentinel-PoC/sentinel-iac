@@ -1,0 +1,80 @@
+# Ansible managed — wazuh-ha-bridge role (OPS-586 Section C)
+# Wazuh Security Posture — Lovelace Card YAML
+# Location: /config/www/wazuh-security-card.yaml (accessible via /local/)
+#
+# USAGE: In HA dashboard editor (YAML mode), paste this content as a card.
+# Or: Settings > Dashboards > (your dashboard) > Edit > + Add Card > Manual
+# Paste the YAML below (starting from 'type:').
+#
+# Ref: https://www.home-assistant.io/dashboards/
+# Requires: wazuh.yaml package loaded (packages/wazuh.yaml)
+# Sensors created by: custom-ha-mqtt script via MQTT auto-discovery
+
+# ── Security Posture Card ─────────────────────────────────────────────────────
+type: vertical-stack
+cards:
+  # Header card — security posture state
+  - type: markdown
+    content: |
+      ## 🛡️ Wazuh Security Posture
+      **Status:** {% raw %}{{ states('sensor.wazuh_security_posture') }}{% endraw %}
+      **Manager:** {% raw %}{{ 'Online ✅' if is_state('binary_sensor.wazuh_manager_online', 'on') else 'Offline ❌' }}{% endraw %}
+
+  # Alert counters row
+  - type: horizontal-stack
+    cards:
+      - type: entity
+        entity: counter.wazuh_critical_alerts
+        name: Critical (Level 10+)
+        icon: mdi:shield-alert
+        style: |
+          ha-card {
+            background: {% raw %}{{ '#c0392b' if states('counter.wazuh_critical_alerts') | int > 0 else '#2D6B4A' }}{% endraw %};
+            color: white;
+          }
+      - type: entity
+        entity: counter.wazuh_high_alerts
+        name: High (Level 7-9)
+        icon: mdi:shield-half-full
+      - type: entity
+        entity: counter.wazuh_medium_alerts
+        name: Medium (Level 4-6)
+        icon: mdi:shield-outline
+
+  # Last alert details
+  - type: entities
+    title: Last Alert
+    entities:
+      - entity: sensor.wazuh_last_alert_level
+        name: Level
+        icon: mdi:alert-circle-outline
+      - entity: sensor.wazuh_last_alert_host
+        name: Host
+        icon: mdi:server-security
+      - entity: sensor.wazuh_last_alert_desc
+        name: Description
+        icon: mdi:text-box-outline
+      - entity: sensor.wazuh_last_alert_time
+        name: Timestamp
+        icon: mdi:clock-alert-outline
+
+  # Manager status
+  - type: entities
+    title: Wazuh Manager
+    entities:
+      - entity: binary_sensor.wazuh_manager_online
+        name: Manager Online
+        icon: mdi:shield-check
+
+# ── Standalone Security Posture Badge Card ─────────────────────────────────
+# For embedding in the Security dashboard section header.
+# Paste this as a separate card to show just the posture indicator:
+#
+# type: button
+# entity: sensor.wazuh_security_posture
+# name: Security Posture
+# show_state: true
+# icon: mdi:shield
+# tap_action:
+#   action: navigate
+#   navigation_path: /lovelace/security

@@ -1,0 +1,215 @@
+---
+# vault-server role — Vault SSH role enforcement (SEC-78)
+#
+# Enforces the Vault SSH CA role configuration for both `admin` and
+# `claude-automation` SSH roles. Codifying these roles in IaC prevents
+# drift like the SEC-74 incident (allow_empty_principals=true set inadvertently).
+#
+# KEY SECURITY INVARIANTS enforced by these tasks:
+#   - allow_empty_principals: false — SSH certs MUST carry a principals field.
+#     Without this, a cert signed by the Vault CA is valid for any user account,
+#     bypassing per-user authorization. SEC-74 showed this can be set by accident.
+#   - key_type: ca — SSH signing mode is CA-based, not OTP. Changing this would
+#     invalidate all existing TrustedUserCAKeys deployments.
+#   - allowed_users — scoped to known-good system users; not wildcard.
+#
+# IDEMPOTENCY: Vault's POST /ssh/roles/<name> is an upsert. Each task writes
+# the complete role spec. Re-running applies the same values — no destructive
+# change. If drift occurs, the next run corrects it.
+#
+# SCOPE: This task file is opt-in (tag: ssh-roles). It is NOT included in the
+# default vault-server run to avoid accidental SSH cert disruption. Run with:
+#   ansible-playbook ansible/playbooks/vault-server.yml --tags ssh-roles
+#
+# PREREQUISITE: Vault must be unsealed and the controller must have a valid
+# ~/.vault-token with ssh/* write permissions.
+#
+# Config values reflect the live state read on 2026-05-20 (SEC-78 evidence).
+# Tracking: SEC-78
+
+# ── Shared auth setup ─────────────────────────────────────────────────────────
+
+- name: SSH-ROLES | Read Vault token from controller
+  ansible.builtin.set_fact:
+    _vault_root_token: "{{ lookup('file', '~/.vault-token') | trim }}"
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, ssh-roles, sec78]
+
+- name: SSH-ROLES | Set Vault API base URL (direct IP — bypasses Pangolin SSO)
+  ansible.builtin.set_fact:
+    _vault_api: "https://192.168.12.206:8200/v1"
+  delegate_to: localhost
+  run_once: true
+  tags: [vault, ssh-roles, sec78]
+
+# ── Enforce ssh/roles/admin ───────────────────────────────────────────────────
+#
+# Admin role: used for interactive JIT SSH sessions by humans (ubuntu, root,
+# koiakoia, core). Permits PTY + agent forwarding + port forwarding extensions.
+# No TTL cap from role (relies on token/server defaults).
+
+- name: SSH-ROLES | Enforce ssh/roles/admin configuration
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/ssh/roles/admin"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      # KEY_TYPE: ca — Vault signs the user's public key with the SSH CA.
+      # Changing to 'otp' would invalidate TrustedUserCAKeys on all SSH hosts.
+      key_type: "ca"
+      # ALLOW_USER_CERTIFICATES: true — sign user-facing certs (not host certs)
+      allow_user_certificates: true
+      allow_host_certificates: false
+      # ALLOW_EMPTY_PRINCIPALS: false — SEC-74 invariant. Certs must carry a
+      # principals field; a cert without principals would be accepted for any
+      # user matching TrustedUserCAKeys. This must never be true in production.
+      allow_empty_principals: false
+      # Restrict which unix accounts this role can mint certs for.
+      allowed_users: "ubuntu,root,koiakoia,core"
+      default_user: "ubuntu"
+      allowed_users_template: false
+      # Extensions permitted in signed certs.
+      # permit-agent-forwarding and permit-port-forwarding are included
+      # because admin sessions may need to hop to internal systems.
+      allowed_extensions: "permit-pty,permit-user-rc,permit-agent-forwarding,permit-port-forwarding"
+      # Default extensions included in every cert when caller does not request.
+      default_extensions:
+        permit-pty: ""
+        permit-user-rc: ""
+      # Signer algorithm: empty string = Vault server default (follows CA key algo)
+      algorithm_signer: ""
+      # TTL: 0 = no role-level cap; relies on vault server default_lease_ttl
+      ttl: "0"
+      max_ttl: "0"
+      # not_before_duration: 30s prevents clock-skew rejections at auth time
+      not_before_duration: "30s"
+      # Disallow user-controlled key IDs (prevents key_id spoofing in audit log)
+      allow_user_key_ids: false
+      allow_bare_domains: false
+      allow_subdomains: false
+    validate_certs: false
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, ssh-roles, sec78]
+
+- name: SSH-ROLES | Verify ssh/roles/admin — read back and assert allow_empty_principals=false
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/ssh/roles/admin"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: false
+    status_code: 200
+  register: _ssh_admin_role
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, ssh-roles, sec78]
+
+- name: SSH-ROLES | Assert ssh/roles/admin allow_empty_principals is false
+  ansible.builtin.assert:
+    that:
+      - not (_ssh_admin_role.json.data.allow_empty_principals | default(true) | bool)
+      - _ssh_admin_role.json.data.key_type == "ca"
+    fail_msg: >-
+      SEC-78 INVARIANT VIOLATION: ssh/roles/admin has allow_empty_principals=true
+      or key_type != 'ca'. Vault SSH role enforcement FAILED. Investigate immediately.
+    success_msg: "ssh/roles/admin: allow_empty_principals=false, key_type=ca — SEC-78 invariant satisfied."
+  delegate_to: localhost
+  run_once: true
+  tags: [vault, ssh-roles, sec78]
+
+# ── Enforce ssh/roles/claude-automation ──────────────────────────────────────
+#
+# claude-automation role: used by the claude-automation service account for
+# automation-initiated SSH sessions. Tighter TTL (30m/4h max). No interactive
+# extensions required (no PTY, no agent forwarding). rsa-sha2-256 signer enforced
+# for explicit modern algorithm (vs admin role's server-default).
+
+- name: SSH-ROLES | Enforce ssh/roles/claude-automation configuration
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/ssh/roles/claude-automation"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      # KEY_TYPE: ca — same CA signing mode as admin role.
+      key_type: "ca"
+      allow_user_certificates: true
+      allow_host_certificates: false
+      # ALLOW_EMPTY_PRINCIPALS: false — SEC-74 invariant. Same enforcement as admin.
+      allow_empty_principals: false
+      # Narrower user scope than admin: root excluded from automation certs.
+      allowed_users: "ubuntu,koiakoia,core"
+      default_user: "ubuntu"
+      allowed_users_template: false
+      # No extension restriction for claude-automation (allowed_extensions omitted
+      # means no constraint — callers specify what they need). Default extensions
+      # left empty; automation sessions don't need PTY.
+      default_extensions: {}
+      # rsa-sha2-256: explicit modern algorithm for automation (not just server default)
+      algorithm_signer: "rsa-sha2-256"
+      # Tighter TTL for automation: 30m default, 4h max.
+      # Prevents long-lived automation certs accumulating in the field.
+      ttl: "30m"
+      max_ttl: "4h"
+      not_before_duration: "30s"
+      allow_user_key_ids: false
+      allow_bare_domains: false
+      allow_subdomains: false
+    validate_certs: false
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, ssh-roles, sec78]
+
+- name: SSH-ROLES | Verify ssh/roles/claude-automation — read back and assert invariants
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/ssh/roles/claude-automation"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: false
+    status_code: 200
+  register: _ssh_claude_role
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, ssh-roles, sec78]
+
+- name: SSH-ROLES | Assert ssh/roles/claude-automation allow_empty_principals is false
+  ansible.builtin.assert:
+    that:
+      - not (_ssh_claude_role.json.data.allow_empty_principals | default(true) | bool)
+      - _ssh_claude_role.json.data.key_type == "ca"
+    fail_msg: >-
+      SEC-78 INVARIANT VIOLATION: ssh/roles/claude-automation has
+      allow_empty_principals=true or key_type != 'ca'. Vault SSH role enforcement
+      FAILED. Investigate immediately.
+    success_msg: "ssh/roles/claude-automation: allow_empty_principals=false, key_type=ca — SEC-78 invariant satisfied."
+  delegate_to: localhost
+  run_once: true
+  tags: [vault, ssh-roles, sec78]
+
+# ── Completion summary ────────────────────────────────────────────────────────
+
+- name: SSH-ROLES | Report enforcement result
+  ansible.builtin.debug:
+    msg: >
+      SEC-78 SSH role enforcement complete.
+      ssh/roles/admin: allow_empty_principals=false, key_type=ca, allowed_users=ubuntu,root,koiakoia,core.
+      ssh/roles/claude-automation: allow_empty_principals=false, key_type=ca, allowed_users=ubuntu,koiakoia,core, ttl=30m/max_ttl=4h.
+      Both roles verified via read-back assertion. IaC now codifies the SEC-74 invariant.
+  delegate_to: localhost
+  run_once: true
+  tags: [vault, ssh-roles, sec78]

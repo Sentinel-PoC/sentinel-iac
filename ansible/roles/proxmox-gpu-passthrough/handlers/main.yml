@@ -1,0 +1,30 @@
+---
+# proxmox-gpu-passthrough handlers
+# OPS-492 Phase 4
+#
+# Handler execution order (Ansible runs in definition order, deduplicated):
+#   1. Run update-grub
+#   2. Update initramfs
+#   3. Reboot for GPU passthrough
+#
+# The reboot handler uses ansible.builtin.reboot which handles reconnection
+# automatically (polls until SSH responds or timeout). Subsequent tasks in the
+# play run after the host comes back online.
+
+- name: Run update-grub
+  ansible.builtin.command:
+    cmd: update-grub
+  changed_when: false
+
+- name: Update initramfs
+  ansible.builtin.command:
+    cmd: update-initramfs -u -k all
+  changed_when: false
+
+- name: Reboot for GPU passthrough
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+    connect_timeout: 5
+    test_command: whoami
+    msg: "Ansible OPS-492 Phase 4: rebooting for IOMMU/VFIO changes"
+  when: gpu_passthrough_reboot_on_change | bool

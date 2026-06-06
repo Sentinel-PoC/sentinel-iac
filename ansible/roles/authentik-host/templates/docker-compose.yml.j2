@@ -1,0 +1,93 @@
+# Authentik Docker Compose — managed by Ansible (sentinel-iac roles/authentik-host)
+# Based on upstream: https://docs.goauthentik.io/compose.yml (version {{ authentik_version }})
+# Do not edit directly — changes will be overwritten.
+# Tracking: OPS-605
+#
+# Architecture (upstream 2026.2.x):
+#   - postgresql: postgres:16-alpine — Authentik's database backend
+#   - server:     ghcr.io/goauthentik/server:{{ authentik_version }} (cmd=server) — web UI + API
+#   - worker:     ghcr.io/goauthentik/server:{{ authentik_version }} (cmd=worker) — background tasks
+# Note: Redis removed as hard dependency in Authentik 2026.x — not included here.
+# Note: Worker runs as root and mounts Docker socket for outpost management.
+
+services:
+  postgresql:
+    image: {{ authentik_postgresql_image }}
+    container_name: authentik-postgresql
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: "{{ authentik_db_name }}"
+      POSTGRES_USER: "{{ authentik_db_user }}"
+      POSTGRES_PASSWORD: "${PG_PASS}"
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -d {{ authentik_db_name }} -U {{ authentik_db_user }}"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  server:
+    image: "{{ authentik_image }}:{{ authentik_version }}"
+    container_name: authentik-server
+    command: server
+    restart: unless-stopped
+    shm_size: 512mb
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: "{{ authentik_db_name }}"
+      AUTHENTIK_POSTGRESQL__USER: "{{ authentik_db_user }}"
+      AUTHENTIK_POSTGRESQL__PASSWORD: "${PG_PASS}"
+      AUTHENTIK_SECRET_KEY: "${AUTHENTIK_SECRET_KEY}"
+    ports:
+      - "{{ authentik_http_port }}:9000"
+      - "{{ authentik_https_port }}:9443"
+    volumes:
+      - "{{ authentik_compose_dir }}/data:/data"
+      - "{{ authentik_compose_dir }}/custom-templates:/templates"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -q --spider http://localhost:9000/-/health/ready/ || exit 1"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  worker:
+    image: "{{ authentik_image }}:{{ authentik_version }}"
+    container_name: authentik-worker
+    command: worker
+    restart: unless-stopped
+    shm_size: 512mb
+    user: root
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__NAME: "{{ authentik_db_name }}"
+      AUTHENTIK_POSTGRESQL__USER: "{{ authentik_db_user }}"
+      AUTHENTIK_POSTGRESQL__PASSWORD: "${PG_PASS}"
+      AUTHENTIK_SECRET_KEY: "${AUTHENTIK_SECRET_KEY}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - "{{ authentik_compose_dir }}/data:/data"
+      - "{{ authentik_compose_dir }}/certs:/certs"
+      - "{{ authentik_compose_dir }}/custom-templates:/templates"
+
+volumes:
+  database:
+    driver: local

@@ -1,0 +1,11 @@
+---
+# Example: INVALID entity — missing required spec.owner, spec.lifecycle, and spec.system
+# This SHOULD FAIL validation against tooling/catalog-schema/schema.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: broken-service
+  description: A component missing required spec fields
+spec:
+  type: service
+  # ERROR: missing required fields: lifecycle, owner, system

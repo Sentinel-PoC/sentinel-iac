@@ -1,0 +1,130 @@
+---
+# UniFi → NetBox drift detection automation (OPS-691, Phase 1)
+# Deploys a periodic script that reads UniFi + NetBox state, diffs them,
+# and writes a structured JSON report. Read-only — no auto-correction.
+#
+# Vault paths (KV v2 mount "secret"):
+#   secret/netbox   key: admin_api_token
+#   secret/unifi    keys: api_key, controller_url
+# Pattern mirrors netbox-sync.yml (OPS-303).
+
+- name: Fetch NetBox API token from Vault (unifi-netbox-drift)
+  ansible.builtin.set_fact:
+    vault_netbox_api_token: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'netbox',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.admin_api_token }}
+  no_log: true
+  when: vault_netbox_api_token | default('') | length == 0
+  tags:
+    - unifi-netbox-drift
+
+- name: Fetch UniFi API key from Vault
+  ansible.builtin.set_fact:
+    vault_unifi_api_key: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'unifi',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.api_key }}
+  no_log: true
+  when: vault_unifi_api_key | default('') | length == 0
+  tags:
+    - unifi-netbox-drift
+
+- name: Fetch UniFi controller URL from Vault
+  ansible.builtin.set_fact:
+    unifi_controller_url: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'unifi',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.controller_url }}
+  when: unifi_controller_url | default('') | length == 0
+  tags:
+    - unifi-netbox-drift
+
+- name: Assert all required tokens are present for unifi-netbox-drift
+  ansible.builtin.assert:
+    that:
+      - vault_netbox_api_token | default('') | length > 0
+      - vault_unifi_api_key | default('') | length > 0
+      - unifi_controller_url | default('') | length > 0
+    fail_msg: >
+      One or more required tokens are empty. Ensure Vault paths are populated:
+        vault kv get secret/netbox   (key: admin_api_token)
+        vault kv get secret/unifi    (keys: api_key, controller_url)
+      Refusing to render /etc/sentinel/unifi-netbox-drift.env with empty values.
+  tags:
+    - unifi-netbox-drift
+
+- name: Create UniFi-NetBox drift log directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+  loop:
+    - /var/log/sentinel/unifi-netbox-drift
+    - /var/log/sentinel
+  tags:
+    - unifi-netbox-drift
+
+- name: Deploy UniFi-NetBox drift detector script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/unifi-netbox-drift.py"
+    dest: /usr/local/bin/unifi-netbox-drift.py
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - unifi-netbox-drift
+
+- name: Deploy UniFi-NetBox drift environment file
+  ansible.builtin.template:
+    src: unifi-netbox-drift.env.j2
+    dest: /etc/sentinel/unifi-netbox-drift.env
+    owner: ubuntu
+    group: ubuntu
+    mode: "0600"
+  tags:
+    - unifi-netbox-drift
+
+- name: Deploy UniFi-NetBox drift systemd service
+  ansible.builtin.template:
+    src: unifi-netbox-drift.service.j2
+    dest: /etc/systemd/system/unifi-netbox-drift.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - unifi-netbox-drift
+
+- name: Deploy UniFi-NetBox drift systemd timer
+  ansible.builtin.template:
+    src: unifi-netbox-drift.timer.j2
+    dest: /etc/systemd/system/unifi-netbox-drift.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart unifi-netbox-drift-timer
+  tags:
+    - unifi-netbox-drift
+
+- name: Enable and start UniFi-NetBox drift timer
+  ansible.builtin.systemd:
+    name: unifi-netbox-drift.timer
+    state: "{{ 'started' if unifi_netbox_drift_enabled else 'stopped' }}"
+    enabled: "{{ unifi_netbox_drift_enabled }}"
+    daemon_reload: true
+  tags:
+    - unifi-netbox-drift

@@ -1,0 +1,79 @@
+---
+# etc_hosts.yml — OPS-774: Pangolin-bypass /etc/hosts pins for runner LXCs
+# OPS-582 / OPS-773 / OPS-774
+#
+# Manages /etc/hosts inside each pve4 runner LXC to override PowerDNS wildcard resolution.
+# Without these pins, *.208.haist.farm → Pangolin VIP (192.168.12.168) via PowerDNS.
+#
+# Pin 1: forgejo.208.haist.farm → 192.168.12.70 (Forgejo server internal IP)
+#   Pangolin long-poll path severs runner task-poll → RESULT_CANCELLED wedge.
+#   Direct HTTP :3000 to Forgejo bypasses Pangolin.
+#
+# Pin 2: harbor.208.haist.farm → 192.168.12.168 (Pangolin — correct for Harbor HTTPS)
+#   Harbor is served behind Pangolin with TLS; the .168 VIP is correct for Harbor.
+#   This pin is defensive: ensures the correct route survives if dnsmasq config changes.
+#
+# Managed via: forgejo_runner_etc_hosts_pins in defaults/main.yml
+# Pattern: pct exec <vmid> -- commands (PVE host is the Ansible target)
+
+# ── Remove stale / incorrect Pangolin-routed forgejo entries ──────────────────
+# Removes any legacy entry that erroneously pointed forgejo to the Pangolin VIP.
+# (OPS-765 cd4f45b/0ab9f13 added 192.168.12.168 forgejo entries — reverted by OPS-777.)
+
+- name: Remove stale Pangolin-routed forgejo /etc/hosts entries in runner LXCs (OPS-774)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} --
+      sed -i '/^192\.168\.12\.168.*forgejo\.208\.haist\.farm/d' /etc/hosts
+  register: remove_stale_forgejo
+  changed_when: false
+  failed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - etc-hosts
+
+# ── Ensure correct host pins are present ─────────────────────────────────────
+# Each pin is idempotent: check if already present, add if missing.
+# Uses pct exec → grep + tee pattern (no sed -i on LXC from PVE host without a file).
+
+- name: Ensure Pangolin-bypass /etc/hosts pins in runner LXCs (OPS-774)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item[0].vmid }} --
+      bash -c "grep -qF '{{ item[1].ip }} {{ item[1].host }}' /etc/hosts ||
+      echo '{{ item[1].ip }} {{ item[1].host }}  # {{ item[1].comment }}' >> /etc/hosts"
+  register: ensure_host_pins
+  changed_when: ensure_host_pins.rc == 0
+  loop: "{{ forgejo_runner_pool_instances | product(forgejo_runner_etc_hosts_pins) | list }}"
+  loop_control:
+    label: "{{ item[0].name }} (VMID {{ item[0].vmid }}) → {{ item[1].host }}"
+  tags:
+    - forgejo-runner-pool
+    - etc-hosts
+
+# ── Verify (idempotency check) ────────────────────────────────────────────────
+
+- name: Verify Pangolin-bypass pins are present in runner LXC /etc/hosts (OPS-774)
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- grep haist /etc/hosts"
+  register: verify_hosts
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - etc-hosts
+
+- name: Show /etc/hosts haist entries in runner LXCs (OPS-774)
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} /etc/hosts haist entries:\n{{ item.stdout }}"
+  loop: "{{ verify_hosts.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - etc-hosts

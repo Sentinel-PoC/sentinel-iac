@@ -1,0 +1,9 @@
+[Unit]
+Description=Run drift auto-remediation daily at 08:30 UTC
+
+[Timer]
+OnCalendar=*-*-* 08:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

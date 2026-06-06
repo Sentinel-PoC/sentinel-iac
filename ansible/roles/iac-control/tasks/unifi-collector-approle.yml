@@ -1,0 +1,284 @@
+---
+# iac-control role — unifi-collector Vault AppRole provisioning (OPS-169)
+#
+# Replaces the static 32-day periodic Vault token with an AppRole credential
+# pair (role_id + secret_id).  A vault-agent sidecar service authenticates
+# with those credentials and writes a short-lived, auto-renewed service token
+# to /run/sentinel-unifi/.vault-token.  unifi-collector.service reads VAULT_TOKEN
+# from that path at each invocation — no operator renewal required.
+#
+# AppRole role:   sentinel-unifi-collector
+# Policy:         sentinel-unifi-collector
+# Credentials KV: secret/sentinel-unifi/approle-credentials
+#
+# Security model (mirrors OPS-352 SPIRE AppRole pattern):
+#   - role_id is semi-public (a name-like identifier)
+#   - secret_id is the credential (stored in Vault KV, written to disk mode 0640)
+#   - secret_id has no TTL expiry — rotate by deleting the KV path and re-running
+#     --tags unifi-approle, which generates a fresh secret_id
+#   - No long-lived Vault token ever written to disk
+#
+# Pre-requisite: AppRole auth method must be enabled (it is — confirmed).
+# All Vault API calls delegate to localhost (the controller running ansible-playbook).
+#
+# USAGE:
+#   ansible-playbook ansible/playbooks/iac-control.yml --tags unifi-approle
+#
+# IDEMPOTENCY: each step checks current state. Safe to re-run.
+#
+# To rotate secret_id:
+#   1. vault kv delete secret/sentinel-unifi/approle-credentials
+#   2. Re-run with --tags unifi-approle to generate and store a fresh secret_id.
+
+# ── Shared facts ──────────────────────────────────────────────────────────────
+
+- name: UNIFI-APPROLE | Read Vault token from controller environment
+  ansible.builtin.set_fact:
+    _vault_root_token: "{{ lookup('env', 'VAULT_TOKEN') | default(lookup('file', '~/.vault-token') | trim, true) }}"
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [unifi-approle, unifi]
+
+- name: UNIFI-APPROLE | Set Vault API base URL
+  ansible.builtin.set_fact:
+    _vault_api: "https://vault.208.haist.farm/v1"
+  delegate_to: localhost
+  run_once: true
+  tags: [unifi-approle, unifi]
+
+# ── Step 1 — Update sentinel-unifi-collector policy (add token self-management) ──
+# vault-agent needs auth/token/renew-self and auth/token/lookup-self to renew
+# the service token it obtains via AppRole login.
+
+- name: UNIFI-APPROLE | Update sentinel-unifi-collector policy (add token renewal paths)
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/policies/acl/sentinel-unifi-collector"
+    method: PUT
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      policy: |
+        # sentinel-unifi-collector — read UniFi API key + token self-management
+        # Updated: OPS-169 2026-05-22 (added token renewal paths for vault-agent)
+        # Originally created OPS-167 2026-04-28
+
+        # Read the UniFi API key
+        path "secret/data/unifi" {
+          capabilities = ["read"]
+        }
+
+        # vault-agent token self-renewal (prevents re-auth churn on each 24h cycle)
+        path "auth/token/renew-self" {
+          capabilities = ["update"]
+        }
+
+        # vault-agent token self-lookup (health check)
+        path "auth/token/lookup-self" {
+          capabilities = ["read"]
+        }
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [unifi-approle, unifi]
+
+# ── Step 2 — Create/update AppRole role ───────────────────────────────────────
+
+- name: UNIFI-APPROLE | Create AppRole role sentinel-unifi-collector
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/auth/approle/role/sentinel-unifi-collector"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      token_policies:
+        - "sentinel-unifi-collector"
+      token_type: "service"
+      token_ttl: "24h"
+      token_max_ttl: "87600h"
+      # secret_id: no TTL expiry; unlimited uses; rotatable by operator
+      secret_id_ttl: "0"
+      secret_id_num_uses: 0
+      bind_secret_id: true
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [unifi-approle, unifi]
+
+# ── Step 3 — Read role_id ────────────────────────────────────────────────────
+
+- name: UNIFI-APPROLE | Read AppRole role_id for sentinel-unifi-collector
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/auth/approle/role/sentinel-unifi-collector/role-id"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: 200
+  register: _unifi_approle_role_id
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [unifi-approle, unifi]
+
+# ── Step 4 — Check if credentials already stored ─────────────────────────────
+
+- name: UNIFI-APPROLE | Check if AppRole credentials already stored in Vault KV
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/secret/data/sentinel-unifi/approle-credentials"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: [200, 404]
+  register: _unifi_approle_creds_check
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  failed_when: false
+  tags: [unifi-approle, unifi]
+
+# ── Step 5 — Generate secret_id if not stored ────────────────────────────────
+
+- name: UNIFI-APPROLE | Generate AppRole secret_id for sentinel-unifi-collector
+  # Only runs when credentials are not already stored in Vault KV.
+  # To rotate: delete secret/sentinel-unifi/approle-credentials and re-run.
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/auth/approle/role/sentinel-unifi-collector/secret-id"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      metadata: '{"managed_by": "ansible-ops-169", "purpose": "unifi-collector vault-agent AppRole auth"}'
+    validate_certs: true
+    status_code: 200
+  register: _unifi_approle_secret_id
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: _unifi_approle_creds_check.status == 404
+  tags: [unifi-approle, unifi]
+
+# ── Step 6 — Store credentials in Vault KV ───────────────────────────────────
+
+- name: UNIFI-APPROLE | Store AppRole credentials at secret/sentinel-unifi/approle-credentials
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/secret/data/sentinel-unifi/approle-credentials"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      data:
+        role_id: "{{ _unifi_approle_role_id.json.data.role_id }}"
+        secret_id: "{{ _unifi_approle_secret_id.json.data.secret_id }}"
+        secret_id_accessor: "{{ _unifi_approle_secret_id.json.data.secret_id_accessor }}"
+        role_name: "sentinel-unifi-collector"
+        created_by: "ansible-ops-169"
+    validate_certs: true
+    status_code: 200
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: _unifi_approle_secret_id is not skipped and _unifi_approle_secret_id.json is defined
+  tags: [unifi-approle, unifi]
+
+# ── Step 7 — Fetch credentials for template rendering ────────────────────────
+
+- name: UNIFI-APPROLE | Fetch AppRole credentials from Vault KV for template rendering
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/secret/data/sentinel-unifi/approle-credentials"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: _unifi_approle_creds_fetched
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [unifi-approle, unifi]
+
+- name: UNIFI-APPROLE | Set AppRole credential facts for template rendering
+  ansible.builtin.set_fact:
+    vault_unifi_approle_role_id: "{{ _unifi_approle_creds_fetched.json.data.data.role_id }}"
+    vault_unifi_approle_secret_id: "{{ _unifi_approle_creds_fetched.json.data.data.secret_id }}"
+  no_log: true
+  tags: [unifi-approle, unifi]
+
+# ── Step 8 — Deploy vault-agent config and credentials on host ────────────────
+
+- name: UNIFI-APPROLE | Create vault-agent config directory
+  ansible.builtin.file:
+    path: "{{ vault_agent_unifi_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [unifi-approle, unifi]
+
+- name: UNIFI-APPROLE | Deploy vault-agent HCL configuration
+  ansible.builtin.template:
+    src: vault-agent-unifi-collector.hcl.j2
+    dest: "{{ vault_agent_unifi_config_file }}"
+    owner: root
+    group: ubuntu
+    mode: "0640"
+  notify: Restart vault-agent-unifi-collector
+  tags: [unifi-approle, unifi]
+
+- name: UNIFI-APPROLE | Deploy AppRole role-id file
+  ansible.builtin.copy:
+    content: "{{ vault_unifi_approle_role_id }}"
+    dest: /etc/sentinel-unifi/role-id
+    owner: root
+    group: ubuntu
+    mode: "0640"
+  no_log: true
+  notify: Restart vault-agent-unifi-collector
+  tags: [unifi-approle, unifi]
+
+- name: UNIFI-APPROLE | Deploy AppRole secret-id file
+  ansible.builtin.copy:
+    content: "{{ vault_unifi_approle_secret_id }}"
+    dest: /etc/sentinel-unifi/secret-id
+    owner: root
+    group: ubuntu
+    mode: "0640"
+  no_log: true
+  notify: Restart vault-agent-unifi-collector
+  tags: [unifi-approle, unifi]
+
+# ── Step 9 — Deploy and start vault-agent systemd service ────────────────────
+
+- name: UNIFI-APPROLE | Deploy vault-agent-unifi-collector systemd service
+  ansible.builtin.template:
+    src: vault-agent-unifi-collector.service.j2
+    dest: /etc/systemd/system/vault-agent-unifi-collector.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart vault-agent-unifi-collector
+  tags: [unifi-approle, unifi]
+
+- name: UNIFI-APPROLE | Enable and start vault-agent-unifi-collector
+  ansible.builtin.systemd:
+    name: vault-agent-unifi-collector.service
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags: [unifi-approle, unifi]

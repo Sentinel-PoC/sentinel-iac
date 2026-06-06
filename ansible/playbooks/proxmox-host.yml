@@ -1,0 +1,57 @@
+---
+# Proxmox bare metal host hardening playbook
+# SEC-2: nftables firewall + common hardening
+#
+# SAFETY: serial=1 ensures one node at a time.
+# If firewall deployment fails on one node, the others remain untouched.
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-host.yml
+#
+# Dry run:
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-host.yml --check --diff
+
+- name: Harden Proxmox bare metal hosts
+  hosts: proxmox
+  become: true
+  serial: 1
+  gather_facts: true
+
+  pre_tasks:
+    - name: Verify we are on a Proxmox host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+        fail_msg: "This playbook is for Proxmox (Debian-based) hosts only"
+      tags:
+        - always
+
+    - name: Display target host info
+      ansible.builtin.debug:
+        msg: "Configuring {{ inventory_hostname }} ({{ ansible_host }})"
+      tags:
+        - always
+
+  roles:
+    - role: proxmox-host
+      tags:
+        - proxmox
+        - firewall
+        - nftables
+
+    # OPS-593: minimal JIT SSH CA trust role — deploys trusted-ca.pem +
+    # TrustedUserCAKeys directive. Tag-gated: --tags jit-ssh-trust runs
+    # ONLY this role's tasks. DO NOT auto-apply post-merge; operator runs
+    # live apply after Judge approval per feedback_iac_vs_live_drift_check.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+
+    # OPS-657: OIDC realm codification — ensures PVE OIDC auth realms match IaC.
+    # Tag-gated: --tags oidc-realms to isolate from firewall/sysctl apply.
+    # Pre-requisite: VAULT_ADDR and VAULT_TOKEN set on control node.
+    # WARNING: Do NOT run without operator authorization — realm changes affect
+    # all PVE logins. Verify on a single node first (--limit <hostname>).
+    - role: proxmox-oidc-realms
+      tags:
+        - oidc-realms

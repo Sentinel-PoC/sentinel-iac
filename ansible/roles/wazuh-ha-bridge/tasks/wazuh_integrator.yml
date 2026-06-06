@@ -1,0 +1,85 @@
+---
+# wazuh_integrator.yml — deploy custom MQTT integration script on Wazuh manager
+#
+# Upstream: https://documentation.wazuh.com/current/user-manual/manager/integration-with-external-apis.html
+# Custom integration name must begin with "custom-" and the script is placed at
+# /var/ossec/integrations/custom-<name>. The integratord daemon calls:
+#   custom-ha-mqtt <alert_file_path> <api_key> <hook_url>
+# We use hook_url to pass the MQTT broker address (no api_key needed).
+#
+# IMPORTANT: The <integration> stanza is now managed via the ossec-server.conf.j2
+# template in the wazuh-server role (OPS-612). Set wazuh_ha_mqtt_integration_enabled: true
+# in group_vars/host_vars to activate it. The blockinfile approach has been removed.
+
+# ── Phase 1: Fetch MQTT credentials from Vault ────────────────────────────────
+
+- name: Fetch wazuh-publisher MQTT credentials from Vault
+  ansible.builtin.command:
+    cmd: "vault kv get -format=json {{ wazuh_mqtt_vault_path }}"
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: wazuh_mqtt_vault_raw
+  changed_when: false
+  no_log: true
+  tags: [wazuh-ha-bridge, wazuh, vault]
+
+- name: Parse wazuh-publisher MQTT credentials
+  ansible.builtin.set_fact:
+    wazuh_mqtt_creds: "{{ (wazuh_mqtt_vault_raw.stdout | from_json).data.data }}"
+  no_log: true
+  tags: [wazuh-ha-bridge, wazuh, vault]
+
+# ── Phase 2: Deploy integration credentials config ────────────────────────────
+
+- name: Deploy MQTT credentials config for integration script
+  ansible.builtin.template:
+    src: ha-mqtt.conf.j2
+    dest: "{{ wazuh_etc_dir }}/ha-mqtt.conf"
+    owner: root
+    group: wazuh
+    mode: "0640"
+  no_log: true
+  tags: [wazuh-ha-bridge, wazuh, config]
+
+# ── Phase 3: Deploy custom integration Python script ─────────────────────────
+# Ref: custom integration script location and calling convention per
+# https://documentation.wazuh.com/current/user-manual/manager/integration-with-external-apis.html
+
+- name: Install paho-mqtt Python library for integration script
+  ansible.builtin.pip:
+    name: paho-mqtt
+    state: present
+    executable: pip3
+  tags: [wazuh-ha-bridge, wazuh, pip]
+
+- name: Deploy custom-ha-mqtt integration script
+  ansible.builtin.template:
+    src: custom-ha-mqtt.py.j2
+    dest: "{{ wazuh_integrations_dir }}/custom-ha-mqtt"
+    owner: root
+    group: wazuh
+    mode: "0750"
+  tags: [wazuh-ha-bridge, wazuh, script]
+
+# ── Phase 4: (OPS-612) Integration stanza moved to ossec-server.conf.j2 ──────
+# The <integration> stanza is now rendered by the wazuh-server role's J2 template.
+# Enable it by setting wazuh_ha_mqtt_integration_enabled: true in group_vars/host_vars.
+# The blockinfile task has been removed to prevent duplication and re-render loss.
+
+# ── Phase 5: Verify integration script is executable ─────────────────────────
+
+- name: Verify integration script exists and is executable
+  ansible.builtin.stat:
+    path: "{{ wazuh_integrations_dir }}/custom-ha-mqtt"
+  register: integration_script_stat
+  tags: [wazuh-ha-bridge, wazuh, verify]
+
+- name: Assert integration script is present and executable
+  ansible.builtin.assert:
+    that:
+      - integration_script_stat.stat.exists
+      - integration_script_stat.stat.executable
+    fail_msg: "custom-ha-mqtt script not found or not executable at {{ wazuh_integrations_dir }}/custom-ha-mqtt"
+  tags: [wazuh-ha-bridge, wazuh, verify]

@@ -1,0 +1,51 @@
+---
+# main.yml — jellyfin-lxc role entry point (OPS-1030)
+#
+# Manages Jellyfin network configuration on LXC 100 (192.168.12.61).
+# Runs DIRECTLY against the LXC via SSH (ansible_user=root).
+# Jellyfin is LAN-only per operator decision 2026-05-28 (OPS-1032 cancelled).
+#
+# Key idempotency guarantee:
+#   PublishedServerUriBySubnet defaults to [] — re-applying this role
+#   will NEVER reintroduce the stale Pangolin VIP entries removed by OPS-1030.
+#
+# Tags:
+#   jellyfin-network   — network.xml template deploy only
+#   jellyfin-lxc       — all tasks
+
+# ── 1. Deploy network.xml from template ────────────────────────────────────────
+
+- name: Deploy jellyfin network.xml (OPS-1030 — remove stale Pangolin URI)
+  ansible.builtin.template:
+    src: network.xml.j2
+    dest: "{{ jellyfin_network_xml_path }}"
+    owner: jellyfin
+    group: jellyfin
+    mode: "0600"
+  notify: Restart jellyfin
+  tags: [jellyfin-lxc, jellyfin-network]
+
+# ── 2. Ensure jellyfin service is running and enabled ─────────────────────────
+
+- name: Ensure jellyfin service is enabled and running
+  ansible.builtin.systemd:
+    name: jellyfin
+    enabled: true
+    state: started
+  tags: [jellyfin-lxc]
+
+# ── 3. Verify Jellyfin HTTP endpoint responds ─────────────────────────────────
+# Non-fatal probe — service may take a few seconds to finish startup.
+
+- name: Wait for Jellyfin HTTP endpoint to respond
+  ansible.builtin.uri:
+    url: "http://{{ ansible_host }}:{{ jellyfin_internal_http_port }}/"
+    method: GET
+    follow_redirects: safe
+    status_code: [200, 302]
+    timeout: 30
+  register: _jellyfin_probe
+  retries: 6
+  delay: 5
+  until: _jellyfin_probe.status in [200, 302]
+  tags: [jellyfin-lxc, jellyfin-network]

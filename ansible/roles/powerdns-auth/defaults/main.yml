@@ -1,0 +1,80 @@
+---
+# OPS-670: powerdns-auth defaults
+#
+# Variables prefixed pdns_auth_* are sentinel-iac-specific.
+# Variables WITHOUT that prefix are passed directly to PowerDNS.pdns (Galaxy).
+# Read this file top-to-bottom — configuration intent is explicit here.
+
+# ---------------------------------------------------------------------------
+# Mode: primary (ns1) or secondary (ns2)
+# ---------------------------------------------------------------------------
+# "primary"   — this host is the MASTER; NOTIFY secondary on zone changes
+# "secondary" — this host is a SLAVE; receives AXFR from primary
+pdns_auth_ns_mode: "primary"
+
+# IP of the peer nameserver.
+# primary: sets also-notify and allow-axfr-ips for this peer
+# secondary: sets the primary's IP for AXFR
+# Override in host_vars for each host.
+pdns_auth_peer_ns_ip: ""
+
+# ---------------------------------------------------------------------------
+# Network binding — auth lives on loopback ONLY
+# Recursor owns port 53 on the LXC's main interface.
+# ---------------------------------------------------------------------------
+pdns_auth_listen_address: "127.0.0.1"
+pdns_auth_listen_port: 5300
+
+# ---------------------------------------------------------------------------
+# LMDB backend
+# ---------------------------------------------------------------------------
+pdns_auth_lmdb_path: "/var/lib/powerdns/pdns.lmdb"
+
+# ---------------------------------------------------------------------------
+# API (read/write, bound to loopback — never exposed externally)
+# ---------------------------------------------------------------------------
+# API key is fetched from Vault at runtime.
+# pdns_auth_api_key is set via Vault lookup in tasks/main.yml.
+# Override pdns_auth_api_key directly to bypass Vault (testing only).
+pdns_auth_api_key_vault_path: "secret/infrastructure/powerdns-api-key"
+pdns_auth_api_key: ""
+pdns_auth_webserver_port: 8081
+
+# ---------------------------------------------------------------------------
+# TSIG (for AXFR authentication between primary and secondary)
+# ---------------------------------------------------------------------------
+# Key name used in PowerDNS zone metadata.
+# Actual key material is provisioned in Phase 4/6 via pdnsutil.
+# Set pdns_auth_tsig_key_name: "" to skip TSIG setup tasks.
+pdns_auth_tsig_key_name: "haist-axfr"
+# Vault path where the TSIG key (base64-encoded HMAC-MD5 or HMAC-SHA256) lives.
+# Key is created in Phase 4/6; path parameterized here for Phase 2+ reference.
+pdns_auth_tsig_key_vault_path: "secret/infrastructure/powerdns-tsig-key"
+
+# ---------------------------------------------------------------------------
+# Zone configuration
+# ---------------------------------------------------------------------------
+# Default SOA contact email (@ replaced by . per DNS convention)
+pdns_auth_default_soa_mail: "hostmaster.haist.farm"
+
+# CIDR allowed to pull AXFR. Should be narrow to just the secondary NS IP.
+# Only relevant on primary. Set to peer IP /32 in production.
+pdns_auth_allow_axfr_from: "{{ pdns_auth_peer_ns_ip + '/32' if pdns_auth_peer_ns_ip else '127.0.0.1/32' }}"
+
+# NOTIFY target for secondary. Typically peer_ns_ip.
+# Only used on primary; empty disables also-notify.
+# Port on which the peer auth server listens (used in also-notify and secondary zone config)
+# Defaults to pdns_auth_listen_port (5300) — override if peer uses a different port.
+pdns_auth_peer_auth_port: "{{ pdns_auth_listen_port }}"
+
+# NOTIFY target: peer IP + auth port (not port 53 which is the recursor).
+# pdns supports IP:port notation in also-notify.
+pdns_auth_also_notify: "{{ pdns_auth_peer_ns_ip + ':' + (pdns_auth_peer_auth_port | string) if pdns_auth_peer_ns_ip else '' }}"
+
+# ---------------------------------------------------------------------------
+# Galaxy role pass-through
+# ---------------------------------------------------------------------------
+# Set to a repo dict to install from PowerDNS official repo instead of Ubuntu.
+# Example for 4.9.x: see PowerDNS.pdns defaults for format.
+# Phase 1 default: Ubuntu OS package (4.8.x on Ubuntu 24.04)
+pdns_auth_install_repo: ""

@@ -1,0 +1,8 @@
+---
+# handlers/main.yml — frigate-lxc role
+
+- name: Restart Frigate container
+  ansible.builtin.command:
+    cmd: "pct exec {{ frigate_lxc_id }} -- bash -c 'cd {{ frigate_compose_dir }} && docker compose up -d --force-recreate'"
+  changed_when: true
+  listen: "restart frigate"

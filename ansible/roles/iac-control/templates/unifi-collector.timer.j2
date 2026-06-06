@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Run UniFi collector every 5 minutes
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,220 @@
+# IaC drift-detection rules manifest — OPS-193
+#
+# Each rule names: id, system, severity, source (where to fetch live state),
+# and a declarative `expect` block describing the live-state subset that must
+# match. The check engine in check.py walks the live JSON, applies the
+# `expect` predicates, and emits PASS/WARN/CRIT.
+#
+# When IaC changes that affect a checked surface, this file MUST be updated
+# in the same PR. The drift-check itself is then an explicit second source of
+# truth — meta-drift between this file and IaC is also catchable (a future
+# rule can compare against the rendered Ansible template).
+#
+# Severity convention:
+#   crit — functional regression or security-posture loss (blocks Ansible re-run safety)
+#   warn — observable divergence with no immediate impact (audit-trail gap)
+#   info — informational baseline (logged but never alerts)
+#
+# Auth sources are pulled from Vault paths. The check script reads
+# VAULT_TOKEN from /etc/iac-drift/vault-token (mode 0400 root:root) on
+# iac-control deploy, or from the env when run ad-hoc from workstation.
+
+version: 1
+
+vault:
+  addr: https://vault.208.haist.farm
+  paths:
+    plane: secret/plane/api-key
+    wazuh_api: secret/wazuh/api
+    wazuh_indexer: secret/wazuh/indexer
+
+rules:
+  # =========================================================================
+  # WAZUH
+  # =========================================================================
+  - id: wazuh-vuln-detection-enabled
+    system: wazuh
+    severity: crit
+    description: Vulnerability detection module must be enabled and indexed
+    rationale: SEC-32 — silent disable would mean zero CVE detection
+    source:
+      kind: wazuh-api
+      path: /manager/configuration?section=vulnerability-detection
+      jq: '.data.affected_items[0]."vulnerability-detection"'
+    expect:
+      subset:
+        enabled: "yes"
+        index-status: "yes"
+
+  - id: wazuh-ar-whitelist-management-cidr
+    system: wazuh
+    severity: crit
+    description: Management VLAN CIDR must remain in AR allow-list (workstation lockout protection)
+    rationale: SEC-45 — narrowing this CIDR to individual IPs locks out operator and PVE break-glass
+    source:
+      kind: wazuh-api
+      path: /manager/configuration?section=global
+      jq: '.data.affected_items[0].global.white_list'
+    expect:
+      contains: "192.168.12.0/24"
+
+  - id: wazuh-ar-whitelist-okd-pod-cidr
+    system: wazuh
+    severity: crit
+    description: OKD pod-network CIDR must remain in AR allow-list
+    rationale: SEC-45 — internal pod-to-pod traffic must not trip AR firewall-drop
+    source:
+      kind: wazuh-api
+      path: /manager/configuration?section=global
+      jq: '.data.affected_items[0].global.white_list'
+    expect:
+      contains: "10.0.0.0/24"
+
+  - id: wazuh-ar-trigger-count
+    system: wazuh
+    severity: warn
+    description: Active-response trigger count should match IaC baseline (5 triggers)
+    rationale: SEC-29 — IaC was missing rule 87202 firewall-drop and broadened SSH coverage
+    source:
+      kind: wazuh-api
+      path: /manager/configuration?section=active-response
+      jq: '.data.affected_items[0]."active-response" | length'
+    expect:
+      equals: 5
+
+  - id: wazuh-ar-trigger-rule-87202
+    system: wazuh
+    severity: warn
+    description: Rule 87202 (web brute-force) firewall-drop trigger must be present
+    rationale: SEC-29 — was missing from IaC entirely, would silently regress on Ansible re-run
+    source:
+      kind: wazuh-api
+      path: /manager/configuration?section=active-response
+      jq: '[.data.affected_items[0]."active-response"[] | select(.rules_id == "87202")] | length'
+    expect:
+      equals: 1
+
+  - id: wazuh-ar-trigger-ssh-broadened-rules
+    system: wazuh
+    severity: warn
+    description: SSH brute-force trigger must cover rules 5763, 5712, 5720 (not just 5763)
+    rationale: SEC-29 — narrower IaC would lose 5712/5720 coverage on Ansible re-run
+    source:
+      kind: wazuh-api
+      path: /manager/configuration?section=active-response
+      jq: '[.data.affected_items[0]."active-response"[] | select(.rules_id == "5763,5712,5720")] | length'
+    expect:
+      equals: 1
+
+  # =========================================================================
+  # VAULT
+  # =========================================================================
+  - id: vault-claude-automation-policy-paths
+    system: vault
+    severity: warn
+    description: claude-automation policy must contain expected paths and no others
+    rationale: SEC-30 — silent fix-then-revert pattern; this rule pins the agreed minimum scope
+    source:
+      kind: vault-policy
+      name: claude-automation
+    expect:
+      paths_contain:
+        - "secret/data/*"
+        - "secret/metadata/*"
+        - "ssh/sign/*"
+        - "ssh/roles/*"
+
+  - id: vault-eso-read-secrets-policy-paths
+    system: vault
+    severity: warn
+    description: eso-read-secrets policy must allow read on secret KV
+    rationale: External Secrets Operator pulls every app credential through this policy. Silent narrowing breaks all ESO-backed apps (Langfuse, Plane, etc.)
+    source:
+      kind: vault-policy
+      name: eso-read-secrets
+    expect:
+      paths_contain:
+        - "secret/data/*"
+        - "secret/metadata/*"
+
+  - id: vault-etcd-backup-encrypt-policy-paths
+    system: vault
+    severity: warn
+    description: etcd-backup-encrypt policy must allow update on transit/encrypt/etcd-backup
+    rationale: OPS-183 etcd backup CronJob depends on this. Silent narrowing means backups stop encrypting — recoverability gap.
+    source:
+      kind: vault-policy
+      name: etcd-backup-encrypt
+    expect:
+      paths_contain:
+        - "transit/encrypt/etcd-backup"
+        - "transit/keys/etcd-backup"
+
+  - id: vault-etcd-backup-decrypt-policy-paths
+    system: vault
+    severity: warn
+    description: etcd-backup-decrypt policy must allow update on transit/decrypt/etcd-backup
+    rationale: OPS-185 backup verification round-trips through this. Silent narrowing means the verify CronJob can't decrypt and falsely WARNs.
+    source:
+      kind: vault-policy
+      name: etcd-backup-decrypt
+    expect:
+      paths_contain:
+        - "transit/decrypt/etcd-backup"
+        - "transit/keys/etcd-backup"
+
+  - id: vault-prometheus-policy-paths
+    system: vault
+    severity: warn
+    description: prometheus policy must allow read on sys/metrics
+    rationale: Prometheus scrapes Vault telemetry through this token. Silent narrowing means Vault metrics dashboard goes blank — observability regression.
+    source:
+      kind: vault-policy
+      name: prometheus
+    expect:
+      paths_contain:
+        - "sys/metrics"
+
+  - id: wazuh-agent-count
+    system: wazuh
+    severity: warn
+    description: Wazuh agent inventory must match the platform-state baseline (8 agents)
+    rationale: Drift here means a host was enrolled or disappeared without the inventory tracking. Update this rule's expected count when an authorized agent change ships.
+    source:
+      kind: wazuh-api
+      path: /agents/summary/status
+      jq: '.data.connection.total'
+    expect:
+      equals: 8
+
+  - id: wazuh-manager-version
+    system: wazuh
+    severity: warn
+    description: Wazuh manager version must remain on the v4.14.x line
+    rationale: >-
+      Silent major-minor upgrade (4.15+) could change rule semantics, decoder behavior,
+      or AR contracts. Patch-level (.x) drift is tolerated; major-minor change requires
+      operator review + this rule's expected substring update.
+    source:
+      kind: wazuh-api
+      path: /manager/info
+      jq: '.data.affected_items[0].version'
+    expect:
+      contains: "v4.14"
+
+  # =========================================================================
+  # FORGEJO
+  # =========================================================================
+  - id: forgejo-require-signin-view
+    system: forgejo
+    severity: crit
+    description: Forgejo must reject unauthenticated /api/v1/version
+    rationale: SEC-28 — version disclosure + user enum if REQUIRE_SIGNIN_VIEW disables
+    source:
+      kind: http
+      url: http://192.168.12.70:3000/api/v1/version
+      method: GET
+    expect:
+      json_field_contains:
+        path: ".message"
+        value: "Only signed in user"

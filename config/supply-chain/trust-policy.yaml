@@ -1,0 +1,673 @@
+upstream_keys:
+  falcosidekick:
+    source: docker.io/falcosecurity/falcosidekick
+    harbor_target: sentinel/falcosidekick
+    method: cosign-keyless
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
+    certificate_identity_regexp: ^https://github\.com/falcosecurity/falcosidekick/\.github/workflows/release\.yml@refs/tags/.*
+    notes: 'falcosecurity/falcosidekick signs release tags via GitHub Actions Sigstore
+      keyless (release.yml workflow). Subject pattern matches refs/tags/* pushed by
+      the falcosecurity/falcosidekick repo. Discovery context: SEC-87 supply-chain
+      design 2026-05-30; SEC-99 residual image triage.
+
+      '
+    last_verified: '2026-05-30'
+    verified_by: worker SEC-99 triage
+  synapse:
+    source: docker.io/matrixdotorg/synapse
+    harbor_target: sentinel/synapse
+    method: cosign-keyless
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
+    certificate_identity_regexp: https://github\.com/element-hq/synapse/.+
+    # yamllint disable-line rule:line-length
+    notes: 'element-hq/synapse GitHub Actions workflow docker.yml signs at every tag push via Sigstore keyless. Verified live on 2026-04-19 with cosign v2.4.3. Digest sha256:89b1f98ae38 confirmed signed as of v1.139.2.
+
+      '
+    last_verified: '2026-04-19'
+    verified_by: worker SEC-64 live check
+  element-web:
+    source: docker.io/vectorim/element-web
+    harbor_target: sentinel/element-web
+    method: cosign-keyless
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
+    certificate_identity_regexp: https://github\.com/element-hq/element-web/.+
+    # yamllint disable-line rule:line-length
+    notes: 'element-hq/element-web GitHub Actions workflow docker.yaml signs at every tag push via Sigstore keyless. Verified live on 2026-04-19 with cosign v2.4.3. Digest sha256:f6b3ce26c42 confirmed signed as of v1.12.11.
+
+      '
+    last_verified: '2026-04-19'
+    verified_by: worker SEC-64 live check
+  falco:
+    source: docker.io/falcosecurity/falco
+    harbor_target: sentinel/falco
+    method: cosign-keyless
+    certificate_oidc_issuer: https://token.actions.githubusercontent.com
+    certificate_identity_regexp: https://github\.com/falcosecurity/falco/.github/workflows/reusable_publish_docker\.yaml@refs/tags/.+
+    notes: 'falcosecurity/falco signs every release tag via GitHub Actions Sigstore
+      keyless. Verified live on 2026-04-24 on iac-control with cosign verify (tlog
+      required; --insecure-ignore-tlog returns expired-cert error which is expected
+      for older tags). Subject at 0.43.1: https://github.com/falcosecurity/falco/.github/workflows/reusable_publish_docker.yaml@refs/tags/0.43.1;
+      Issuer: https://token.actions.githubusercontent.com. Discovery context: OPS-139
+      audit (SEC-39).
+
+      '
+    last_verified: '2026-04-24'
+    verified_by: worker SEC-39 live check on iac-control
+exceptions:
+  postgres:
+    source: docker.io/library/postgres
+    harbor_target: sentinel/postgres
+    # yamllint disable-line rule:line-length
+    rationale: 'Docker Official Library does not publish Cosign/Sigstore signatures as of 2026-04. Build pipeline is audited by Docker, Inc. and published from github.com/docker-library/postgres. cosign tree returns no supply chain artifacts.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :16 (not :latest)
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  keycloak:
+    source: quay.io/keycloak/keycloak
+    harbor_target: sentinel/keycloak
+    # yamllint disable-line rule:line-length
+    rationale: 'Red Hat/Keycloak uses Red Hat''s container signing infrastructure (RPM GPG) rather than Sigstore/Cosign for quay.io images as of 2026-04. Static key verification may be possible via Red Hat''s published keys but requires additional tooling evaluation. cosign tree returns no supply chain artifacts.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :26.6.2 (bumped from :26.0 by OPS-865 2026-06-01; fixes session-fixation ATO, CVE-2026-33870 req-smuggling, HTTP/2 DoS, stored XSS; cosign verify exit 0 sha256:40007b80367d48a3268ae4c9b5ec9c9aa530bc801e9f6ae27f2b6727dec7bf94)
+    - 'Action: digest-pin; keycloak is auth infrastructure'
+    reviewed_by: worker-ops865 2026-06-01 session (keycloak bump to 26.6.2)
+    review_date: '2026-06-01'
+    next_review_date: '2026-09-01'
+  homepage:
+    source: ghcr.io/gethomepage/homepage
+    harbor_target: sentinel/homepage
+    # yamllint disable-line rule:line-length
+    rationale: "gethomepage community project does not publish Cosign signatures as of 2026-04. cosign tree returns no supply chain artifacts. Image uses :latest tag \u2014 digest pinning is a required follow-up action.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Action: pin to specific version tag'
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  busybox:
+    source: docker.io/library/busybox
+    harbor_target: sentinel/busybox
+    # yamllint disable-line rule:line-length
+    rationale: 'Docker Official Library does not publish Cosign/Sigstore signatures as of 2026-04. BusyBox is used only as a homepage init container (minimal attack surface). Same exception class as postgres (Docker Official Library).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :1.37.0
+    - 'Minimal attack surface: init container, terminates on completion'
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  hello-openshift:
+    source: docker.io/openshift/hello-openshift
+    harbor_target: sentinel/hello-openshift
+    # yamllint disable-line rule:line-length
+    rationale: "Legacy Red Hat OpenShift demo image on Docker Hub. Unmaintained upstream; no Cosign signatures. Low criticality \u2014 used for admission/demo testing only. Action item: evaluate whether this image is still required; retire if unused.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Low risk: no sensitive data access, demo app only'
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  newt:
+    source: docker.io/fosrl/newt
+    harbor_target: sentinel/newt
+    # yamllint disable-line rule:line-length
+    rationale: 'fosrl/newt (Pangolin tunnel client) does not publish Cosign signatures as of 2026-04. Community project at github.com/fosrl/newt. Pinned to :1.10.2. Action item: open upstream issue requesting Cosign signing.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :1.12.5 (bumped from 1.10.2 by OPS-489 2026-05-28; fixes CVE-2026-31789)
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  jellyfin:
+    source: docker.io/jellyfin/jellyfin
+    harbor_target: sentinel/jellyfin
+    # yamllint disable-line rule:line-length
+    rationale: 'Jellyfin project does not publish Cosign signatures as of 2026-04. Uses :latest tag. Jellyfin publishes SHA digests in release notes for manual digest verification. Action item: pin to specific version tag.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Action: pin to specific version tag (e.g., :10.10.x)'
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  all-in-one:
+    source: docker.io/jaegertracing/all-in-one
+    harbor_target: sentinel/jaeger-all-in-one
+    # yamllint disable-line rule:line-length
+    rationale: 'CNCF Jaeger project does not publish Cosign signatures to Docker Hub as of 2026-04. CNCF is rolling out signing across graduated projects but Jaeger has not yet adopted it. Pinned to :1.76.0.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :1.76.0 (bumped from :1.62.0 by OPS-1041 Phase 1 2026-05-28; closes ~5 Critical CVEs)
+    - 'Source: public CNCF graduated project at github.com/jaegertracing/jaeger'
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  grafana:
+    source: docker.io/grafana/grafana
+    harbor_target: sentinel/grafana
+    # yamllint disable-line rule:line-length
+    rationale: "Grafana Labs images on Docker Hub do not carry Cosign OCI artifacts as of 2026-04 (cosign tree returns no supply chain artifacts for grafana/grafana on docker.io). Note: ghcr.io/grafana/grafana may have different signing status \u2014 evaluate as alternative source in next quarterly review.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :12.4.3-security-02 (bumped from 12.4.3 by OPS-1044 2026-05-28; fixes grpc/stdlib/OpenSSL CVEs)
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  k8s-sidecar:
+    source: quay.io/kiwigrid/k8s-sidecar
+    harbor_target: sentinel/k8s-sidecar
+    rationale: 'kiwigrid/k8s-sidecar (Grafana Helm chart dependency) does not publish Cosign signatures as of 2026-04. Pinned to :2.7.3 (bumped from deployed :2.6.0 / stale manifest :1.28.0 by OPS-1043 2026-05-28; fixes CVE-2026-31789 OpenSSL via Python 3.15 beta base).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :2.7.3 (bumped from :1.28.0 by OPS-1043 2026-05-28)
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  netbox:
+    source: ghcr.io/netbox-community/netbox
+    harbor_target: sentinel/netbox
+    rationale: 'netbox-community does not publish Cosign signatures for Docker images as of 2026-04. Bumped to :v4.6.1 (OPS-865, CVE-2026-29514 ExportTemplate RCE; no patched 4.5.x; 4.6 line is fix). Action item: open upstream issue requesting Cosign signing.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v4.6.1
+    reviewed_by: operator (Jim) 2026-04-19 session authorization; re-reviewed OPS-865 2026-06-01
+    review_date: '2026-06-01'
+    next_review_date: '2026-09-01'
+  valkey:
+    source: docker.io/bitnami/valkey
+    harbor_target: sentinel/valkey
+    # yamllint disable-line rule:line-length
+    rationale: "Bitnami/valkey has Cosign signature OCI artifacts (.sig, .att tags present) but verification fails with keyless method \u2014 Bitnami uses a static private key, not Sigstore keyless. The exact key URL could not be confirmed from public documentation during the 2026-04-19 assessment. This is a PARTIAL exception: signatures exist, verification method is pending confirmation. SR-11 mitigation applies. HIGHEST PRIORITY among exceptions \u2014 follow-up required to identify Bitnami key URL.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - "Action: URGENT \u2014 identify Bitnami cosign static key URL and enable verification"
+    - 'Action: digest-pin (using :latest is a risk for Valkey/NetBox Redis path)'
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  ntfy:
+    source: docker.io/binwiederhier/ntfy
+    harbor_target: sentinel/ntfy
+    rationale: 'binwiederhier/ntfy community project does not publish Cosign signatures as of 2026-04. Pinned to :v2.18.0. Action item: open upstream issue requesting Cosign signing.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v2.23.0 (bumped from v2.18.0 by OPS-489 2026-05-28; fixes CVE-2026-31789)
+    reviewed_by: operator (Jim) 2026-04-19 session authorization
+    review_date: '2026-04-19'
+    next_review_date: '2026-07-19'
+  rabbitmq:
+    source: docker.io/library/rabbitmq
+    harbor_target: sentinel/rabbitmq
+    # yamllint disable-line rule:line-length
+    rationale: "Docker Official Library rabbitmq does not publish Cosign/Sigstore signatures as of 2026-05. cosign tree returns no supply chain artifacts for docker.io/library/rabbitmq. Same exception class as postgres/busybox (Docker Official Library). Platform re-sign required via mirror-upstream-image.sh after each mirror to satisfy Kyverno verify-image-signatures (Enforce). Discovery context: OPS-1038 (5 Critical CVEs in Alpine 3.20 base; bump 3.13.6 \u2192 3.13.7-management-alpine). Mirror performed 2026-05-30 from docker.io/library/rabbitmq:3.13.7-management-alpine; cosign verify exit 0 confirmed.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned to :3.13.7-management-alpine (bumped from 3.13.6 by OPS-1038; closes 5 Critical CVEs: CVE-2026-31789 OpenSSL x2, CVE-2024-45491/45492 expat, CVE-2025-6965 sqlite)
+    - 'Platform re-sign required: mirror-upstream-image.sh with UPSTREAM_SIG_VERIFY_ENABLED=false (Docker Official Library)'
+    - 'Source: Docker Official Library at github.com/docker-library/rabbitmq; audited by Docker Inc.'
+    reviewed_by: worker-ops1038 2026-05-30 session; updated from stale bitnami ref
+    review_date: '2026-05-30'
+    next_review_date: '2026-08-30'
+  kiali:
+    source: quay.io/kiali/kiali
+    harbor_target: sentinel/kiali
+    rationale: 'CNCF Kiali project does not publish Cosign/Sigstore signatures as of
+      2026-05. cosign tree returns no supply chain artifacts for quay.io/kiali/kiali:v2.26.1.
+      Kiali is a graduated CNCF project (github.com/kiali/kiali). Helm-managed install
+      outside ArgoCD due to OKD ClusterRole constraints. OPS-1045: bumped from v2.25.0
+      to v2.26.1 (go1.25.9 + grpc v1.79.3; fixes CVE-2026-33186 grpc authz bypass
+      and CVE-2025-68121 stdlib crypto/tls). Verified via binary strings: go1.25.9
+      + grpc@v1.79.3 embedded. Helm chart kiali-server 2.26.0 (latest available;
+      v2.26.1 chart does not exist upstream). Action item: open upstream issue
+      requesting Cosign signing.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v2.26.1 (OPS-1045; fixes CVE-2026-33186 grpc + CVE-2025-68121 go stdlib)
+    - 'Platform re-sign performed 2026-05-31: cosign verify --insecure-ignore-tlog exit 0'
+    - 'Harbor digest: sha256:5df5c007a0c17a33d4498e5a3f3284bdf2457374ff2def6c1b5e9f3570474e8e'
+    - 'Source: public CNCF graduated project at github.com/kiali/kiali'
+    reviewed_by: worker-ops1045 2026-05-31 session
+    review_date: '2026-05-31'
+    next_review_date: '2026-08-31'
+  plane-backend:
+    source: docker.io/makeplane/plane-backend
+    harbor_target: sentinel/plane-backend
+    rationale: 'makeplane/plane is a community project that does not publish Cosign
+      signatures upstream as of 2026-04. cosign verify against docker.io/makeplane/plane-backend:v0.24.0
+      returns "no signatures found"; cosign tree returns no supply chain artifacts.
+      Live deploy was blocked by verify-image-signatures Kyverno policy on 2026-04-26
+      (OPS-137); resolved by signing v0.24.0 in Harbor with our cosign key. Future
+      mirrors must go through mirror-upstream-image.sh so the re-sign step is consistent.
+      OPS-1017: bumped pin from :v0.24.0 to :v1.3.1 (released 2026-05-14); addresses
+      CVE-2026-31789 (OpenSSL), CVE-2024-56171 (libxml2), CVE-2025-6965 (sqlite).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v1.3.1
+    - 'Source: public community project at github.com/makeplane/plane'
+    reviewed_by: operator (Claude Opus 4.7) 2026-04-26 session under OPS-137
+    review_date: '2026-05-27'
+    next_review_date: '2026-08-27'
+  plane-frontend:
+    source: docker.io/makeplane/plane-frontend
+    harbor_target: sentinel/plane-frontend
+    rationale: 'Same as plane-backend exception: makeplane community project does
+      not publish Cosign signatures upstream. v0.24.0 mirrored without re-sign causing
+      verify-image-signatures admission denials on 2026-04-26; resolved by signing
+      in Harbor (OPS-137). OPS-1017: bumped pin from :v0.24.0 to :v1.3.1 (2026-05-27);
+      addresses CVE-2026-31789 (OpenSSL alpine).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v1.3.1
+    - 'Source: public community project at github.com/makeplane/plane'
+    reviewed_by: operator (Claude Opus 4.7) 2026-04-26 session under OPS-137
+    review_date: '2026-05-27'
+    next_review_date: '2026-08-27'
+  plane-admin:
+    source: docker.io/makeplane/plane-admin
+    harbor_target: sentinel/plane-admin
+    rationale: 'Same as plane-backend exception: makeplane community project does
+      not publish Cosign signatures upstream. Resolved under OPS-137 on 2026-04-26.
+      OPS-1017: bumped pin from :v0.24.0 to :v1.3.1 (2026-05-27); addresses
+      CVE-2026-31789 (OpenSSL alpine).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v1.3.1
+    - 'Source: public community project at github.com/makeplane/plane'
+    reviewed_by: operator (Claude Opus 4.7) 2026-04-26 session under OPS-137
+    review_date: '2026-05-27'
+    next_review_date: '2026-08-27'
+  plane-space:
+    source: docker.io/makeplane/plane-space
+    harbor_target: sentinel/plane-space
+    rationale: 'Same as plane-backend exception: makeplane community project does
+      not publish Cosign signatures upstream. Resolved under OPS-137 on 2026-04-26.
+      OPS-1017: bumped pin from :v0.24.0 to :v1.3.1 (2026-05-27); addresses
+      CVE-2026-31789 (OpenSSL alpine).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v1.3.1
+    - 'Source: public community project at github.com/makeplane/plane'
+    reviewed_by: operator (Claude Opus 4.7) 2026-04-26 session under OPS-137
+    review_date: '2026-05-27'
+    next_review_date: '2026-08-27'
+  plane-live:
+    source: docker.io/makeplane/plane-live
+    harbor_target: sentinel/plane-live
+    rationale: 'Same exception class as other plane-* images: makeplane community
+      project does not publish Cosign signatures upstream. plane-live is the real-time
+      WebSocket collaboration server. Previously not in trust-policy.yaml because the
+      deployed image was a custom build (plane-live-custom via SEC-59 axios workaround).
+      With v1.3.1, upstream ships axios 1.15.0 natively (explicitly noted in SEC-59
+      values.yaml comment "Revert: when upstream ships v1.3.1+ with axios>=1.15.0").
+      OPS-1017: adds this entry at :v1.3.1. Post-mirror re-sign required via
+      sign-harbor-image.yml (Kyverno enforce).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v1.3.1
+    - 'Source: public community project at github.com/makeplane/plane'
+    reviewed_by: worker-ops1017 2026-05-27 session under OPS-1017
+    review_date: '2026-05-27'
+    next_review_date: '2026-08-27'
+  langfuse:
+    source: ghcr.io/langfuse/langfuse
+    harbor_target: sentinel/langfuse
+    rationale: 'langfuse/langfuse community observability project does not publish
+      Cosign signatures as of 2026-04. cosign verify against ghcr.io/langfuse/langfuse:3.169.0
+      returns "no signatures found". Discovery context: OPS-139 audit; currently deployed
+      in langfuse namespace (tag 3.169.0 is unsigned per audit; 3.162.0 was re-signed
+      by our pipeline). SEC-38 covers signing the current deployed tag. Action item:
+      open upstream issue requesting Cosign signing.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Source: public community project at github.com/langfuse/langfuse'
+    - 'Action: SEC-38 to sign currently-deployed 3.169.0; ensure future mirrors go
+      through re-sign pipeline'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  langfuse-worker:
+    source: ghcr.io/langfuse/langfuse-worker
+    harbor_target: sentinel/langfuse-worker
+    rationale: 'Same exception class as langfuse: langfuse-worker is the background
+      job processor component of the langfuse project and is published from the same
+      GitHub repository. cosign verify against ghcr.io/langfuse/langfuse-worker:3.169.0
+      returns "no signatures found". Discovery context: OPS-139 audit.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Source: public community project at github.com/langfuse/langfuse (monorepo)'
+    - 'Action: SEC-38 to sign currently-deployed 3.169.0; ensure future mirrors go
+      through re-sign pipeline'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  clickhouse-server:
+    source: docker.io/clickhouse/clickhouse-server
+    harbor_target: sentinel/clickhouse-server
+    rationale: 'ClickHouse Inc. does not publish Cosign/Sigstore signatures for docker.io/clickhouse/clickhouse-server
+      as of 2026-04. cosign verify against :25.8-alpine and :25.2 both return "no
+      signatures found". Used by langfuse as its OLAP backend (deployed as initContainer
+      and main container in langfuse namespace). Discovery context: OPS-139 audit.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Pinned tags: 25.8-alpine (main), 25.2 (initContainer)'
+    - 'Source: public project at github.com/ClickHouse/ClickHouse; enterprise-backed'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  mas:
+    source: ghcr.io/element-hq/matrix-authentication-service
+    harbor_target: sentinel/mas
+    rationale: 'element-hq/matrix-authentication-service (MAS) does not publish Cosign
+      signatures as of 2026-04. cosign verify against ghcr.io/element-hq/matrix-authentication-service:latest
+      returns "no signatures found". Note: v0.12.0 tag is not present on ghcr.io
+      (manifest unknown); images appear to be published without version tags or under
+      a different tag scheme. Discovery context: OPS-139 audit; deployed in matrix
+      namespace as v0.12.0.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v0.12.0 in Harbor
+    - 'Source: public project at github.com/element-hq/matrix-authentication-service;
+      element-hq org (same as synapse/element-web)'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  minio:
+    source: docker.io/minio/minio
+    harbor_target: sentinel/minio
+    rationale: 'MinIO does not publish Cosign/Sigstore signatures for docker.io/minio/minio
+      as of 2026-04. cosign verify against :latest returns "no signatures found";
+      cosign tree confirms no supply chain artifacts. Note: tag 2024.12.18 is no
+      longer available on upstream Docker Hub (manifest unknown) — only :latest was
+      checkable. Used by langfuse (OLAP storage) and plane (object storage). Discovery
+      context: OPS-139 audit.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Pinned tags: 2024.12.18 (langfuse), :latest (plane)'
+    - 'Action: pin :latest to a specific tag at next quarterly review'
+    - 'Source: public project at github.com/minio/minio; enterprise-backed'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  reloader:
+    source: ghcr.io/stakater/reloader
+    harbor_target: sentinel/reloader
+    rationale: 'stakater/reloader (Kubernetes ConfigMap/Secret reloader) does not
+      publish Cosign signatures as of 2026-04. cosign verify against ghcr.io/stakater/reloader:v1.3.0
+      returns "no signatures found"; cosign tree confirms no supply chain artifacts.
+      Discovery context: OPS-139 audit; deployed in reloader namespace.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v1.3.0
+    - 'Source: public project at github.com/stakater/reloader; CNCF sandbox candidate'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  backstage:
+    source: internal-ci
+    harbor_target: sentinel/backstage
+    rationale: 'Internal CI build — backstage is our HAIST developer portal, built
+      from our own Forgejo CI pipeline and pushed directly to harbor.208.haist.farm/sentinel/backstage.
+      There is no upstream image to verify; the image is produced by our own build
+      process. Deployed currently as tag a02f3a5 (short commit SHA). Discovery context:
+      OPS-139 audit. Signed with our cosign key at build time by CI pipeline.
+
+      '
+    compensating_controls:
+    - 'Internal build: source is in our own Forgejo repository'
+    - 'CI pipeline signs with our cosign key at push time'
+    - 'SEC-61: Trivy scan in CI pipeline'
+    - 'Image tag is short commit SHA (content-addressed by convention)'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  haists-website:
+    source: internal-ci
+    harbor_target: sentinel/haists-website
+    rationale: 'Internal CI build — haists-website is the HAIST IT Consulting public
+      website, built from our own Forgejo CI pipeline and pushed to harbor.208.haist.farm/sentinel/haists-website.
+      There is no upstream image to verify; the image is produced by our own build
+      process. Deployed as tag b6e9e31 (production) and dev-d2fbb74 (dev branch).
+      Discovery context: OPS-139 audit. Signed with our cosign key at build time
+      by CI pipeline.
+
+      '
+    compensating_controls:
+    - 'Internal build: source is in our own Forgejo repository'
+    - 'CI pipeline signs with our cosign key at push time'
+    - 'SEC-61: Trivy scan in CI pipeline'
+    - 'Image tag is short commit SHA (content-addressed by convention)'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  overwatch-console:
+    source: internal-ci
+    harbor_target: sentinel/overwatch-console
+    rationale: 'Internal CI build — overwatch-console is the platform operations
+      dashboard for Project Sentinel, built from our own Forgejo CI pipeline and
+      pushed to harbor.208.haist.farm/sentinel/overwatch-console. There is no upstream
+      image to verify. Deployed as tag 5d6aa0e (short commit SHA). Discovery context:
+      OPS-139 audit. Signed with our cosign key at build time by CI pipeline.
+
+      '
+    compensating_controls:
+    - 'Internal build: source is in our own Forgejo repository'
+    - 'CI pipeline signs with our cosign key at push time'
+    - 'SEC-61: Trivy scan in CI pipeline'
+    - 'Image tag is short commit SHA (content-addressed by convention)'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  sentinel-ops:
+    source: internal-ci
+    harbor_target: sentinel/sentinel-ops
+    rationale: 'Internal CI build — sentinel-ops is the platform health monitoring
+      and operations agent image for Project Sentinel, built from our own Forgejo
+      CI pipeline and pushed to harbor.208.haist.farm/sentinel/sentinel-ops. There
+      is no upstream image to verify. Deployed as tag v1 in sentinel-ops and health-monitoring
+      namespaces. Discovery context: OPS-139 audit. Signed with our cosign key at
+      build time by CI pipeline.
+
+      '
+    compensating_controls:
+    - 'Internal build: source is in our own Forgejo repository'
+    - 'CI pipeline signs with our cosign key at push time'
+    - 'SEC-61: Trivy scan in CI pipeline'
+    - 'Image tag v1 is semver; action item: move to content-addressed tags (commit
+      SHAs) in future builds'
+    reviewed_by: worker SEC-39 2026-04-24 session
+    review_date: '2026-04-24'
+    next_review_date: '2026-07-24'
+  defectdojo-django:
+    source: docker.io/defectdojo/defectdojo-django
+    harbor_target: sentinel/defectdojo-django
+    rationale: 'DefectDojo project does not publish Cosign/Sigstore signatures for
+      docker.io/defectdojo/defectdojo-django as of 2026-05. cosign tree returns no
+      supply chain artifacts. DefectDojo is github.com/DefectDojo/django-DefectDojo
+      (Apache-2.0). Image requires platform re-sign via sign-harbor-image.yml workflow
+      after each mirror to satisfy Kyverno verify-image-signatures (Enforce). Discovery
+      context: OPS-1016 (42 Critical CVE findings in 2.55.4; bump to 2.58.4).
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Pinned tag :2.58.4 (OPS-1016 CVE remediation)'
+    - 'Platform re-sign required: sign-harbor-image.yml workflow after each mirror'
+    - 'Source: public project github.com/DefectDojo/django-DefectDojo; Apache-2.0'
+    reviewed_by: worker OPS-1016 2026-05-28 session
+    review_date: '2026-05-28'
+    next_review_date: '2026-08-28'
+  defectdojo-nginx:
+    source: docker.io/defectdojo/defectdojo-nginx
+    harbor_target: sentinel/defectdojo-nginx
+    rationale: 'Same exception class as defectdojo-django: DefectDojo project does
+      not publish Cosign/Sigstore signatures for docker.io/defectdojo/defectdojo-nginx
+      as of 2026-05. cosign tree returns no supply chain artifacts. Nginx sidecar
+      image for DefectDojo; same repository (github.com/DefectDojo/django-DefectDojo).
+      Platform re-sign required via sign-harbor-image.yml. Discovery context: OPS-1016.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Pinned tag :2.58.4 (OPS-1016 CVE remediation)'
+    - 'Platform re-sign required: sign-harbor-image.yml workflow after each mirror'
+    - 'Source: public project github.com/DefectDojo/django-DefectDojo; Apache-2.0'
+    reviewed_by: worker OPS-1016 2026-05-28 session
+    review_date: '2026-05-28'
+    next_review_date: '2026-08-28'
+  alloy:
+    source: docker.io/grafana/alloy
+    harbor_target: sentinel/alloy
+    # yamllint disable-line rule:line-length
+    rationale: 'Grafana Alloy (formerly Grafana Agent) does not publish Cosign/Sigstore
+      signatures for docker.io/grafana/alloy as of 2026-05. cosign tree returns no
+      supply chain artifacts. Same exception class as grafana/grafana on docker.io.
+      Alloy is the OpenTelemetry collector component for the platform observability
+      stack. Discovery context: SEC-87 supply-chain design 2026-05-30; SEC-99 residual
+      image triage.
+
+      '
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Source: public CNCF project at github.com/grafana/alloy; Grafana Labs-backed'
+    - 'Platform re-sign required: sign-harbor-image.yml workflow after each mirror'
+    reviewed_by: worker SEC-99 2026-05-30 session
+    review_date: '2026-05-30'
+    next_review_date: '2026-08-30'
+  victoria-logs:
+    source: docker.io/victoriametrics/victoria-logs
+    harbor_target: sentinel/victoria-logs
+    # yamllint disable-line rule:line-length
+    rationale: "VictoriaMetrics does not publish Cosign/Sigstore signatures for\
+      \ docker.io/victoriametrics/victoria-logs as of 2026-05. cosign tree returns\
+      \ no supply chain artifacts. NOTE: tag v1.22.1-victorialogs is confirmed gone\
+      \ from docker.io (manifest unknown as of 2026-05-30) — tag selection is\
+      \ delegated to OPS-1073 which owns the deployed-version bump. This entry is\
+      \ repo-level only; do NOT hard-bind a dead tag here. Discovery context: SEC-87\
+      \ supply-chain design 2026-05-30; SEC-99 residual image triage.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Source: public project at github.com/VictoriaMetrics/VictoriaMetrics; enterprise-backed'
+    - 'Platform re-sign required: sign-harbor-image.yml workflow after each mirror'
+    - 'Action: OPS-1073 owns tag-version selection for victoria-logs deploy'
+    reviewed_by: worker SEC-99 2026-05-30 session
+    review_date: '2026-05-30'
+    next_review_date: '2026-08-30'
+  postgres-ecr:
+    source: public.ecr.aws/docker/library/postgres
+    harbor_target: sentinel/postgres-ecr
+    # yamllint disable-line rule:line-length
+    rationale: "public.ecr.aws/docker/library/postgres is Amazon ECR's mirror of\
+      \ Docker Official Library postgres. Docker Official Library does not publish\
+      \ Cosign/Sigstore signatures (same rationale as the existing postgres exception\
+      \ for docker.io/library/postgres). The ECR variant is used as an alternative\
+      \ pull source when docker.io rate limits apply or when ECR proximity is preferred.\
+      \ cosign tree returns no supply chain artifacts on public.ecr.aws. Discovery\
+      \ context: SEC-87 supply-chain design 2026-05-30; SEC-99 residual image triage.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Same upstream content as docker.io/library/postgres (Docker Official Library mirror)'
+    - 'Pinned tag selection delegated to deploying issue (same as postgres exception)'
+    - 'Platform re-sign required: sign-harbor-image.yml workflow after each mirror'
+    reviewed_by: worker SEC-99 2026-05-30 session
+    review_date: '2026-05-30'
+    next_review_date: '2026-08-30'
+  tempo:
+    source: docker.io/grafana/tempo
+    harbor_target: sentinel/tempo
+    # yamllint disable-line rule:line-length
+    rationale: "Grafana Tempo does not publish Cosign/Sigstore signatures for\
+      \ docker.io/grafana/tempo as of 2026-05. cosign tree returns no supply chain\
+      \ artifacts. Same exception class as grafana/grafana and grafana/alloy on docker.io\
+      \ (Grafana Labs images on Docker Hub do not carry Cosign OCI artifacts). Tempo\
+      \ is the distributed tracing backend for the platform observability stack. OPS-1106:\
+      \ image was crane-mirrored at 2.7.2 without signing (SEC-87 violation); this entry\
+      \ enables mirror-upstream-image.sh to re-sign with the platform cosign key going\
+      \ forward. Platform re-sign of existing 2.7.2 tag performed 2026-05-31 via\
+      \ mirror-upstream-image.sh (cosign verify --insecure-ignore-tlog exit 0 confirmed).\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - 'Pinned tag :2.7.2 (OPS-1106)'
+    - 'Platform re-sign required: mirror-upstream-image.sh after each mirror'
+    - 'Source: public CNCF project at github.com/grafana/tempo; Grafana Labs-backed'
+    reviewed_by: worker-ops1106 2026-05-31 session
+    review_date: '2026-05-31'
+    next_review_date: '2026-08-31'
+  scanopy-server:
+    source: ghcr.io/scanopy/scanopy/server
+    harbor_target: sentinel/scanopy-server
+    # yamllint disable-line rule:line-length
+    rationale: "scanopy is an AGPL-3.0 open-source network topology mapper (github.com/scanopy/scanopy).\
+      \ cosign tree returns no supply chain artifacts for ghcr.io/scanopy/scanopy/server:v0.16.2\
+      \ — the project does not publish upstream Cosign/Sigstore signatures as of 2026-06.\
+      \ Platform re-sign required via mirror-upstream-image.sh (Kyverno verify-image-signatures\
+      \ Audit). Discovery context: OPS-1122 scanopy bring-up 2026-06-01.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v0.16.2 (digest-pinned after mirror)
+    - 'Source: public AGPL-3.0 project at github.com/scanopy/scanopy'
+    - 'Platform re-sign required: mirror-upstream-image.sh with UPSTREAM_SIG_VERIFY_ENABLED=false'
+    reviewed_by: worker-ops1122 2026-06-01 session
+    review_date: '2026-06-01'
+    next_review_date: '2026-09-01'
+  scanopy-daemon:
+    source: ghcr.io/scanopy/scanopy/daemon
+    harbor_target: sentinel/scanopy-daemon
+    # yamllint disable-line rule:line-length
+    rationale: "scanopy-daemon is the network scanning component of the scanopy project\
+      \ (AGPL-3.0, github.com/scanopy/scanopy). Same upstream signing status as scanopy-server:\
+      \ no Cosign/Sigstore artifacts as of 2026-06. Daemon requires hostNetwork+privileged\
+      \ for ARP/LLDP/ICMP scanning. Platform re-sign required. Discovery context: OPS-1122\
+      \ 2026-06-01.\n"
+    compensating_controls:
+    - 'SEC-61: OSV-Scanner + Trivy at mirror time'
+    - Pinned tag :v0.16.2 (digest-pinned after mirror)
+    - 'Source: public AGPL-3.0 project at github.com/scanopy/scanopy'
+    - 'Platform re-sign required: mirror-upstream-image.sh with UPSTREAM_SIG_VERIFY_ENABLED=false'
+    reviewed_by: worker-ops1122 2026-06-01 session
+    review_date: '2026-06-01'
+    next_review_date: '2026-09-01'

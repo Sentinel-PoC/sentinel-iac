@@ -1,0 +1,271 @@
+---
+# proxmox-oidc-realms: Ensure PVE OIDC authentication realms are present + configured
+# OPS-657: IaC codification of live OIDC realm config (added in OPS-634)
+#
+# Design:
+#   - Vault fetch runs on Ansible control node (delegate_to: localhost)
+#   - pveum commands run on PVE host (become: true, via SSH)
+#   - Idempotent: realm list checked before add/modify
+#   - Secrets always no_log: true
+#
+# APPLY NOTE: This role is CODIFICATION only. Operator must run explicitly:
+#   ansible-playbook -i inventory/hosts.yml playbooks/proxmox-host.yml \
+#     --tags oidc-realms [--limit pve-node]
+#
+# Pre-requisite: VAULT_ADDR and VAULT_TOKEN env vars on control node.
+
+# ===========================================================================
+# SECTION 1: Authentik OIDC realm (working — codified from OPS-634)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1a. Fetch authentik OIDC client credentials from Vault
+#     Runs on Ansible control node; secrets stored in facts (no_log: true)
+# ---------------------------------------------------------------------------
+- name: "Fetch OIDC client credentials from Vault (authentik)"
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ lookup('env', 'VAULT_ADDR') | default('https://192.168.12.206:8200') }}"
+    auth_method: token
+    token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    path: "{{ pve_oidc_authentik_vault_path }}"
+    validate_certs: false
+  delegate_to: localhost
+  register: _vault_pve_oidc_authentik
+  no_log: true
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-authentik
+
+# ---------------------------------------------------------------------------
+# 1b. Get current PVE realm list (for idempotency check)
+# ---------------------------------------------------------------------------
+- name: "Get current PVE realm list (idempotency check)"
+  ansible.builtin.command:
+    cmd: pveum realm list --output-format json
+  register: _pve_realm_list
+  changed_when: false
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-authentik
+
+- name: "Parse existing PVE realm names into fact"
+  ansible.builtin.set_fact:
+    _pve_existing_realm_names: >-
+      {{ (_pve_realm_list.stdout | from_json) | map(attribute='realm') | list }}
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-authentik
+
+# ---------------------------------------------------------------------------
+# 1c. Add authentik realm (only if absent)
+# ---------------------------------------------------------------------------
+- name: "Add authentik OIDC realm to PVE (if absent)"
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - realm
+      - add
+      - "{{ pve_oidc_authentik_realm_name }}"
+      - --type
+      - openid
+      - --issuer-url
+      - "{{ pve_oidc_authentik_issuer_url }}"
+      - --client-id
+      - "{{ _vault_pve_oidc_authentik.secret.client_id }}"
+      - --client-key
+      - "{{ _vault_pve_oidc_authentik.secret.client_secret }}"
+      - --username-claim
+      - "{{ pve_oidc_authentik_username_claim }}"
+      - --autocreate
+      - "{{ 1 if pve_oidc_authentik_autocreate else 0 }}"
+      - --default
+      - "{{ 1 if pve_oidc_authentik_default else 0 }}"
+      - --comment
+      - "{{ pve_oidc_authentik_comment }}"
+  when: pve_oidc_authentik_realm_name not in _pve_existing_realm_names
+  changed_when: true
+  no_log: true
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-authentik
+
+# ---------------------------------------------------------------------------
+# 1d. Modify authentik realm (only if present — ensure config is current)
+#     Note: pveum realm modify always writes; there is no dry-run/diff.
+#     This task will report changed=true on every run when the realm exists.
+#     Acceptable trade-off: ensures config drift is corrected on each apply.
+# ---------------------------------------------------------------------------
+- name: "Modify authentik OIDC realm to ensure config is current (if present)"
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - realm
+      - modify
+      - "{{ pve_oidc_authentik_realm_name }}"
+      - --issuer-url
+      - "{{ pve_oidc_authentik_issuer_url }}"
+      - --client-id
+      - "{{ _vault_pve_oidc_authentik.secret.client_id }}"
+      - --client-key
+      - "{{ _vault_pve_oidc_authentik.secret.client_secret }}"
+      - --username-claim
+      - "{{ pve_oidc_authentik_username_claim }}"
+      - --autocreate
+      - "{{ 1 if pve_oidc_authentik_autocreate else 0 }}"
+      - --comment
+      - "{{ pve_oidc_authentik_comment }}"
+  when: pve_oidc_authentik_realm_name in _pve_existing_realm_names
+  changed_when: true
+  no_log: true
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-authentik
+
+# ---------------------------------------------------------------------------
+# 1e. Verify realm is listed after add/modify
+# ---------------------------------------------------------------------------
+- name: "Verify authentik realm is present in PVE after add/modify"
+  ansible.builtin.command:
+    cmd: pveum realm list --output-format json
+  register: _pve_realm_list_verify
+  changed_when: false
+  failed_when: >-
+    (_pve_realm_list_verify.stdout | from_json)
+    | map(attribute='realm') | list
+    | select('equalto', pve_oidc_authentik_realm_name) | list
+    | length == 0
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-authentik
+    - verify
+
+# ===========================================================================
+# SECTION 2: Legacy auth.haist.farm realm (BROKEN — disabled by default)
+#
+# This realm used the old Keycloak instance (auth.haist.farm) which has been
+# decommissioned. The realm is codified here for completeness.
+#
+# Enable with: pve_oidc_legacy_realm_enabled: true
+# Apply tag:   --tags oidc-realms,oidc-legacy
+#
+# WARNING: Applying this realm will NOT restore Keycloak login — the upstream
+# Keycloak instance is gone. This task exists solely to:
+#   a) Document the realm config in IaC
+#   b) Allow an operator to (re-)create the realm if Keycloak is restored
+#   c) Provide a reference for cleanup (pveum realm delete auth.haist.farm)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 2a. Fetch legacy realm credentials from Vault (may not exist — ignore_errors)
+# ---------------------------------------------------------------------------
+- name: "Try to fetch legacy Keycloak OIDC credentials from Vault (may not exist)"
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ lookup('env', 'VAULT_ADDR') | default('https://192.168.12.206:8200') }}"
+    auth_method: token
+    token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    path: "{{ pve_oidc_legacy_vault_path }}"
+    validate_certs: false
+  delegate_to: localhost
+  register: _vault_pve_oidc_legacy
+  ignore_errors: true
+  no_log: true
+  when: pve_oidc_legacy_realm_enabled | bool
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-legacy
+
+# ---------------------------------------------------------------------------
+# 2b. Warn if legacy Vault path is missing
+# ---------------------------------------------------------------------------
+- name: "Warn operator if legacy Vault credentials not found"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: Vault path '{{ pve_oidc_legacy_vault_path }}' not found or inaccessible.
+      Legacy auth.haist.farm realm tasks will be skipped.
+      To codify the legacy realm, provision credentials at that Vault path
+      or set pve_oidc_legacy_realm_enabled: false to suppress this warning.
+  when:
+    - pve_oidc_legacy_realm_enabled | bool
+    - _vault_pve_oidc_legacy is defined
+    - _vault_pve_oidc_legacy.failed | default(false)
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-legacy
+
+# ---------------------------------------------------------------------------
+# 2c. Add legacy realm (if enabled + Vault creds available + realm absent)
+# ---------------------------------------------------------------------------
+- name: "Add legacy auth.haist.farm OIDC realm to PVE (if enabled and absent)"
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - realm
+      - add
+      - "{{ pve_oidc_legacy_realm_name }}"
+      - --type
+      - openid
+      - --issuer-url
+      - "{{ pve_oidc_legacy_issuer_url }}"
+      - --client-id
+      - "{{ _vault_pve_oidc_legacy.secret.client_id }}"
+      - --client-key
+      - "{{ _vault_pve_oidc_legacy.secret.client_secret }}"
+      - --username-claim
+      - "{{ pve_oidc_legacy_username_claim }}"
+      - --autocreate
+      - "0"
+      - --default
+      - "0"
+      - --comment
+      - "{{ pve_oidc_legacy_comment }}"
+  when:
+    - pve_oidc_legacy_realm_enabled | bool
+    - _vault_pve_oidc_legacy is defined
+    - not (_vault_pve_oidc_legacy.failed | default(true))
+    - pve_oidc_legacy_realm_name not in _pve_existing_realm_names
+  changed_when: true
+  no_log: true
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-legacy
+
+# ---------------------------------------------------------------------------
+# 2d. Modify legacy realm (if enabled + Vault creds available + realm present)
+# ---------------------------------------------------------------------------
+- name: "Modify legacy auth.haist.farm OIDC realm to ensure config current (if enabled and present)"
+  ansible.builtin.command:
+    argv:
+      - pveum
+      - realm
+      - modify
+      - "{{ pve_oidc_legacy_realm_name }}"
+      - --issuer-url
+      - "{{ pve_oidc_legacy_issuer_url }}"
+      - --client-id
+      - "{{ _vault_pve_oidc_legacy.secret.client_id }}"
+      - --client-key
+      - "{{ _vault_pve_oidc_legacy.secret.client_secret }}"
+      - --username-claim
+      - "{{ pve_oidc_legacy_username_claim }}"
+      - --comment
+      - "{{ pve_oidc_legacy_comment }}"
+  when:
+    - pve_oidc_legacy_realm_enabled | bool
+    - _vault_pve_oidc_legacy is defined
+    - not (_vault_pve_oidc_legacy.failed | default(true))
+    - pve_oidc_legacy_realm_name in _pve_existing_realm_names
+  changed_when: true
+  no_log: true
+  tags:
+    - proxmox
+    - oidc-realms
+    - oidc-legacy

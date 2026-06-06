@@ -1,0 +1,17 @@
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: compliance-pipeline
+  description: NIST 800-53 automated compliance checking and evidence pipeline
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - compliance
+    - nist
+    - automation
+spec:
+  type: service
+  lifecycle: production
+  owner: platform-team
+  system: sentinel-platform

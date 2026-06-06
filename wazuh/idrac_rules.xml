@@ -1,0 +1,88 @@
+<!--
+  iDRAC Hardware Monitoring Wazuh Rules
+  Rule IDs: 100600-100610
+  Source: /var/log/sentinel/idrac/health.json
+  Decoder: json
+  Level 10+ triggers Discord alerts via existing integration
+  NIST Controls: SI-4 (System Monitoring), PE-14 (Environmental Controls)
+-->
+<group name="idrac,">
+
+  <rule id="100600" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_CHECK_COMPLETE</field>
+    <description>iDRAC health check completed</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100601" level="5">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_HEALTH_WARNING</field>
+    <description>iDRAC node health WARNING: $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100602" level="7">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_HEALTH_CRITICAL</field>
+    <description>iDRAC node health CRITICAL: $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100603" level="8">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_NODE_UNREACHABLE</field>
+    <description>Proxmox node unreachable via API: $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100604" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_AUTO_RECOVERY</field>
+    <description>Automatic iDRAC power cycle triggered for $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100605" level="8">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_PSU_DEGRADED|IDRAC_PSU_FAILURE</field>
+    <description>PSU failure or redundancy lost on $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100606" level="9">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_TEMP_CRITICAL</field>
+    <description>Temperature CRITICAL on $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100607" level="7">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_TEMP_WARNING</field>
+    <description>Temperature warning on $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100608" level="5">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_NODE_RECOVERED</field>
+    <description>Node $(node) recovered after power cycle</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100609" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_UNREACHABLE</field>
+    <description>iDRAC management interface unreachable: $(node)</description>
+    <group>idrac,</group>
+  </rule>
+
+  <rule id="100610" level="6">
+    <decoded_as>json</decoded_as>
+    <field name="event">IDRAC_POWER_CYCLE_SENT</field>
+    <description>Power cycle command sent to $(node) via iDRAC</description>
+    <group>idrac,</group>
+  </rule>
+
+</group>

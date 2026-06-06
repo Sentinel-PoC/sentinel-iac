@@ -1,0 +1,203 @@
+{
+  "_metadata": {
+    "snapshot_time": "2026-05-12T22:19:44Z",
+    "controller_version": "10.3.58",
+    "controller_host": "192.168.12.1",
+    "site_id": "88f7af54-98f8-306a-a1c7-c9349722b1f6",
+    "site_name": "Default",
+    "exported_by": "worker-gprime-w1",
+    "plane_issue": "OPS-567"
+  },
+  "networks": [
+    {
+      "management": "GATEWAY",
+      "id": "f77d5231-a63c-4747-a2be-091854ca72d1",
+      "name": "Default",
+      "enabled": true,
+      "vlanId": 1,
+      "metadata": {
+        "origin": "SYSTEM_DEFINED",
+        "configurable": true
+      },
+      "zoneId": "60b4f516-4678-4184-9afd-8dadc9930932",
+      "default": true
+    },
+    {
+      "management": "GATEWAY",
+      "id": "f266032a-127b-476d-b14b-2221eb2d3f04",
+      "name": "Personal",
+      "enabled": true,
+      "vlanId": 50,
+      "metadata": {
+        "origin": "USER_DEFINED"
+      },
+      "zoneId": "915175bc-d6f2-4d16-aab6-2245594a74c5",
+      "default": false,
+      "ipv4Configuration": {
+        "autoScaleEnabled": false,
+        "hostIpAddress": "192.168.50.1",
+        "prefixLength": 24,
+        "dhcpConfiguration": {
+          "mode": "SERVER",
+          "ipAddressRange": {
+            "start": "192.168.50.100",
+            "stop": "192.168.50.254"
+          },
+          "dnsServerIpAddressesOverride": [
+            "192.168.50.1",
+            "1.1.1.1"
+          ],
+          "leaseTimeSeconds": 86400,
+          "domainName": "",
+          "pingConflictDetectionEnabled": true
+        }
+      }
+    },
+    {
+      "management": "GATEWAY",
+      "id": "36f698cf-d833-4230-b5a5-9fc46e3ec45c",
+      "name": "IoT",
+      "enabled": true,
+      "vlanId": 100,
+      "metadata": {
+        "origin": "USER_DEFINED"
+      },
+      "zoneId": "bbd2e65c-894b-40d9-989c-adb2d2f4e210",
+      "default": false
+    },
+    {
+      "management": "GATEWAY",
+      "id": "afdc2c34-1802-4abb-88d4-39aa7bed3b60",
+      "name": "Guest",
+      "enabled": true,
+      "vlanId": 200,
+      "metadata": {
+        "origin": "USER_DEFINED"
+      },
+      "zoneId": "31f6f7d9-aa04-43d1-8e42-34b7546dac3f",
+      "default": false
+    },
+    {
+      "management": "GATEWAY",
+      "id": "2b1e6ac0-e79a-4fc6-ba17-d867e0f116b9",
+      "name": "NIDS-Mirror",
+      "enabled": true,
+      "vlanId": 99,
+      "metadata": {
+        "origin": "USER_DEFINED"
+      },
+      "zoneId": "2442d3c0-0e3e-4568-ad3c-4c70b31a6b20",
+      "default": false,
+      "internetAccessEnabled": false,
+      "isolationEnabled": false,
+      "mdnsForwardingEnabled": false,
+      "ipv4Configuration": {
+        "autoScaleEnabled": false,
+        "hostIpAddress": "192.168.99.1",
+        "prefixLength": 24,
+        "dhcpConfiguration": {
+          "mode": "SERVER",
+          "ipAddressRange": {
+            "start": "192.168.99.100",
+            "stop": "192.168.99.200"
+          },
+          "dnsServerIpAddressesOverride": [
+            "192.168.99.1",
+            "1.1.1.1"
+          ],
+          "leaseTimeSeconds": 86400,
+          "domainName": "",
+          "pingConflictDetectionEnabled": true
+        }
+      }
+    }
+  ],
+  "devices": [
+    {
+      "id": "dac1e771-5f09-3456-ad22-e6b0498c8797",
+      "name": "USW Pro 48 PoE",
+      "model": "USW Pro 48 PoE",
+      "macAddress": "18:e8:29:5d:8a:83",
+      "ipAddress": "192.168.12.22",
+      "state": "ONLINE"
+    },
+    {
+      "id": "d4547378-cd1f-32e4-b6ce-2e0ec330e8bd",
+      "name": "USW-24-G2",
+      "model": "USW-24-G2",
+      "macAddress": "e4:38:83:82:74:6f",
+      "ipAddress": "192.168.12.40",
+      "state": "ONLINE"
+    },
+    {
+      "id": "cbafb15a-ff71-30c2-9125-37df639e102e",
+      "name": "AC Pro",
+      "model": "AC Pro",
+      "macAddress": "74:83:c2:96:d8:ae",
+      "ipAddress": "192.168.12.146",
+      "state": "ONLINE"
+    },
+    {
+      "id": "24fac075-202f-3fac-8009-2f2ebc8f6607",
+      "name": "208-Ck2-001",
+      "model": "UCG Fiber",
+      "macAddress": "1c:0b:8b:18:14:b0",
+      "ipAddress": "195.252.204.51",
+      "state": "ONLINE"
+    }
+  ],
+  "port_mirror_config": {
+    "device": "USW Pro 48 PoE",
+    "device_mac": "18:e8:29:5d:8a:83",
+    "device_ip": "192.168.12.22",
+    "mirror_destination_port": {
+      "port_idx": 48,
+      "name": "NIDS-Capture",
+      "setting_preference": "manual",
+      "op_mode": "mirror",
+      "mirror_port_idx": 49,
+      "port_security_enabled": false,
+      "poe_mode": "off",
+      "forward": "customize",
+      "isolation": false,
+      "stp_port_mode": false,
+      "stormctrl_ucast_enabled": false,
+      "stormctrl_bcast_enabled": false,
+      "stormctrl_mcast_enabled": false,
+      "port_keepalive_enabled": false,
+      "egress_rate_limit_kbps_enabled": false,
+      "stormctrl_ucast_rate": 100,
+      "stormctrl_bcast_rate": 100,
+      "stormctrl_mcast_rate": 100,
+      "native_networkconf_id": "",
+      "voice_networkconf_id": "",
+      "tagged_vlan_mgmt": "auto",
+      "port_security_mac_address": [],
+      "autoneg": true,
+      "lldpmed_enabled": true
+    },
+    "mirror_source_port": {
+      "port_idx": 49,
+      "name": "R720xd - DAC",
+      "setting_preference": "manual",
+      "op_mode": "switch",
+      "port_security_enabled": false,
+      "forward": "all",
+      "egress_rate_limit_kbps_enabled": false,
+      "stormctrl_mcast_enabled": false,
+      "stormctrl_ucast_enabled": false,
+      "isolation": false,
+      "tagged_vlan_mgmt": "auto",
+      "stormctrl_bcast_enabled": false,
+      "voice_networkconf_id": "",
+      "stp_port_mode": true,
+      "port_keepalive_enabled": true,
+      "full_duplex": false,
+      "native_networkconf_id": "6743935803b9543f7e31e025",
+      "port_security_mac_address": [],
+      "autoneg": true,
+      "lldpmed_enabled": true
+    },
+    "description": "Port 48 (NIDS-Capture) mirrors all frames from Port 49 (R720xd - DAC, 10G SFP+ uplink to UCG-Fiber). Captures all WAN-bound and LAN-routed traffic transiting the gateway. Read-only copy — no production traffic impact."
+  }
+}

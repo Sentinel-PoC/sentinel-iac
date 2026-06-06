@@ -1,0 +1,84 @@
+---
+# vault-jwt-agents tasks — RETIRED (OPS-1163 step 2)
+#
+# The Keycloak sentinel realm (auth.208.haist.farm/realms/sentinel) is
+# decommissioned. The Vault auth/jwt/ mount it backed is dead. This role
+# has been converted to a RETIRE task set that idempotently disables the
+# dead auth/jwt/ mount and its 4 agent roles, leaving nothing behind.
+#
+# SAFE TO RE-RUN: all tasks gate on existence checks.
+# DO NOT restore: agents now authenticate via jwt-authentik/ (Authentik) or
+#                 jwt-spire/ (SPIRE). See vault-jwt-authentik and vault-jwt-spire
+#                 roles. Agent policy HCL files (files/policies/) are RETAINED
+#                 because they are shared by jwt-authentik and jwt-spire roles.
+#
+# NOTE: community.hashi_vault.vault_delete does NOT exist in the collection
+# (v7.1.0 provides vault_read/vault_write/vault_list/vault_kv2_delete only).
+# Vault DELETE operations use ansible.builtin.uri, mirroring the pattern used
+# by roles/vault-server/tasks/spire-pki.yml and other roles in this repo.
+#
+# Tracking: OPS-1163 (retire), originally OPS-345 Phase 3
+
+# ─── Pre-flight ──────────────────────────────────────────────────────────────
+
+- name: Pre-flight | assert vault_token is provided
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<token>
+  no_log: false
+  tags: [vault-jwt, validation]
+
+# ─── Task 1/3 — Read current auth method list ────────────────────────────────
+# Determine whether the dead auth/jwt/ (Keycloak) mount still exists.
+# If it doesn't exist, all subsequent retire tasks are no-ops.
+
+- name: "Task 1/3 | Read sys/auth — detect existing mounts"
+  community.hashi_vault.vault_read:
+    path: "sys/auth"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: vault_auth_list
+  tags: [vault-jwt, retire]
+
+# ─── Task 2/3 — Delete JWT roles (gated) ─────────────────────────────────────
+# Remove auth/jwt/role/sentinel-{role} entries if the jwt/ mount still exists.
+# Uses DELETE to Vault API — community.hashi_vault has no vault_delete module.
+# status_code [204, 404]: 204 = deleted, 404 = already absent (idempotent).
+
+- name: "Task 2/3 | Delete JWT role sentinel-{{ role_item }} (Keycloak — retire)"
+  ansible.builtin.uri:
+    url: "{{ vault_addr }}/v1/auth/{{ vault_jwt_mount_path }}/role/sentinel-{{ role_item }}"
+    method: DELETE
+    headers:
+      X-Vault-Token: "{{ vault_token }}"
+    validate_certs: true
+    status_code: [204, 404]
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  when: "(vault_jwt_mount_path + '/') in vault_auth_list.data"
+  tags: [vault-jwt, retire]
+
+# ─── Task 3/3 — Disable JWT auth mount (gated) ───────────────────────────────
+# Disable auth/jwt/ (Keycloak sentinel realm) if it is still present.
+# Equivalent to: vault auth disable jwt/
+# Vault API: DELETE /v1/sys/auth/<mount-path> disables the auth method.
+# status_code [204, 404]: 204 = disabled, 404 = already absent (idempotent).
+#
+# NOTE: Do NOT disable jwt-spire/ or jwt-authentik/ — those are live agent paths.
+# This task targets ONLY the path identified by vault_jwt_mount_path (default: jwt/).
+
+- name: "Task 3/3 | Disable dead Keycloak JWT auth mount auth/{{ vault_jwt_mount_path }}/"
+  ansible.builtin.uri:
+    url: "{{ vault_addr }}/v1/sys/auth/{{ vault_jwt_mount_path }}"
+    method: DELETE
+    headers:
+      X-Vault-Token: "{{ vault_token }}"
+    validate_certs: true
+    status_code: [204, 404]
+  when: "(vault_jwt_mount_path + '/') in vault_auth_list.data"
+  tags: [vault-jwt, retire]

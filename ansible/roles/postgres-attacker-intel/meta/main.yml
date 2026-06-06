@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: postgres_attacker_intel
+  author: sentinel-agent
+  description: >
+    Deploys PostgreSQL 16 + pgvector extension as a Docker container for the
+    Attacker Intelligence DB (Plan G', OPS-566). Includes schema migration,
+    RBAC setup, and scheduled S3 backup.
+  license: Apache-2.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - "24.04"
+  galaxy_tags:
+    - database
+
+dependencies: []

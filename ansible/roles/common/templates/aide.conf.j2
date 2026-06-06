@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# AIDE configuration for Project Sentinel
+
+database_in=file:/var/lib/aide/aide.db
+database_out=file:/var/lib/aide/aide.db.new
+database_new=file:/var/lib/aide/aide.db.new
+
+# Standard rule sets
+NORMAL = p+i+n+u+g+s+b+m+c+sha256
+DIR = p+i+n+u+g
+
+# Monitored paths
+# OPS-514: boot-watch path parametrized via aide_boot_path (defaults to /boot
+# for x86 hosts; Pi-class hosts override to /boot/firmware in host_vars).
+/etc NORMAL
+/usr/bin NORMAL
+/usr/sbin NORMAL
+{{ aide_boot_path }} NORMAL
+/lib/systemd NORMAL
+
+# Exclusions
+!/etc/mtab
+!/etc/adjtime
+!/etc/resolv.conf
+!/var/log
+!/var/spool
+!/tmp
+!/run

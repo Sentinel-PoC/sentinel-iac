@@ -1,0 +1,5 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# Health check for keepalived - verify HAProxy is responding
+curl -sf -o /dev/null -m 2 http://127.0.0.1:9000/
+exit $?

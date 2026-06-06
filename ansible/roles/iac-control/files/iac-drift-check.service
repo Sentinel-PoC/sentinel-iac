@@ -1,0 +1,14 @@
+[Unit]
+Description=IaC drift detection — diff live config vs Ansible/IaC source-of-truth (OPS-193)
+# Runs FROM iac-control. Reads scripts/iac-drift/rules.yaml (deployed alongside),
+# queries each system's live API via Vault-stored creds, emits one JSON line per
+# rule to stdout/journald + /var/log/iac-drift-check.json.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/iac-drift-check.py --rules /usr/local/share/iac-drift/rules.yaml
+Environment=VAULT_ADDR=https://vault.208.haist.farm
+EnvironmentFile=/etc/iac-drift/env
+User=root
+# OK / WARN / CRIT exit codes are intentional severity signals — not failures.
+SuccessExitStatus=0 1 2

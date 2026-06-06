@@ -1,0 +1,36 @@
+# {{ ansible_managed }}
+# [OPS-940] vault-agent sidecar service for minio AppRole boot auth.
+#
+# vault-agent authenticates to Vault using AppRole credentials and renders
+# /run/minio-secrets (tmpfs) from secret/minio/admin before minio.service starts.
+# After reboot, this service runs automatically, repopulates /run/minio-secrets,
+# and minio.service starts successfully without operator intervention.
+#
+# The /run/minio-secrets path lives on tmpfs — it does NOT survive reboots.
+# This service recreates it at every boot, closing the SEC-81 reboot gap.
+
+[Unit]
+Description=Vault Agent - minio AppRole boot auth (OPS-940)
+Documentation=https://developer.hashicorp.com/vault/docs/agent
+After=network-online.target
+Wants=network-online.target
+# Start before minio so /run/minio-secrets is populated when minio reads it
+Before=minio.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Ensure the destination path parent exists (it's /run, always there — but be explicit)
+ExecStartPre=/bin/mkdir -p /run
+ExecStart=/usr/bin/vault agent -config={{ vault_agent_minio_config_file }}
+Restart=on-failure
+RestartSec=5s
+# Give vault-agent time to auth + render template before minio's ExecStartPre check
+TimeoutStartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vault-agent-minio
+
+[Install]
+WantedBy=multi-user.target minio.service

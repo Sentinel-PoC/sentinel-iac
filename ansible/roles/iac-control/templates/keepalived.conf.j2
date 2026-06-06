@@ -1,0 +1,38 @@
+! {{ ansible_managed }}
+! Keepalived configuration for OKD HA failover
+! NIST CP-7: Alternate Processing Site
+
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user root
+    enable_script_security
+}
+
+vrrp_script chk_haproxy {
+    script "/usr/local/bin/check_haproxy.sh"
+    interval 2
+    weight -20
+    fall 3
+    rise 2
+}
+
+vrrp_instance OKD_VIP {
+    state {{ keepalived_state }}
+    interface {{ keepalived_interface }}
+    virtual_router_id {{ keepalived_virtual_router_id }}
+    priority {{ keepalived_priority }}
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ keepalived_vrrp_password }}
+    }
+
+    virtual_ipaddress {
+        {{ keepalived_vip }}
+    }
+
+    track_script {
+        chk_haproxy
+    }
+}

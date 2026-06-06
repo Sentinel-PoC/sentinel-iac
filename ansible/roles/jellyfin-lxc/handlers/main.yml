@@ -1,0 +1,8 @@
+---
+# handlers/main.yml — jellyfin-lxc role (OPS-1030)
+
+- name: Restart jellyfin
+  ansible.builtin.systemd:
+    name: jellyfin
+    state: restarted
+    daemon_reload: false

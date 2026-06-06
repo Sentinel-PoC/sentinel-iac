@@ -1,0 +1,64 @@
+---
+# OPS-366: NetBox SoT migration — physical hosts added to dynamic inventory
+# This file is the authoritative inventory source for the platform.
+# Two query paths:
+#   1. virtual_machines: true — VMs managed by Proxmox Cluster (existing)
+#   2. devices: true — Physical/bare-metal hosts registered in NetBox DCIM
+#
+# Migration status: VMs are fully NetBox-driven. Physical hosts require
+# NetBox Device records before hosts.ini can be retired as fallback.
+# See: ansible/inventory/hosts.ini for the list of hosts pending DCIM registration.
+plugin: netbox.netbox.nb_inventory
+api_endpoint: https://netbox.208.haist.farm
+token: "{{ lookup('env', 'NETBOX_API_TOKEN') }}"
+validate_certs: true
+
+# OPS-366: devices: true enables querying NetBox DCIM Device records
+# (physical hosts, bare-metal nodes). Was false; physical hosts were
+# inventory-only via hosts.ini.
+virtual_machines: true
+devices: true
+config_context: true
+flatten_custom_fields: false
+
+virtual_machine_query_filters:
+  - has_primary_ip: true
+  - cluster: "Proxmox Cluster"
+
+# OPS-366: Filter devices to only those with a primary IP assigned
+# (prevents half-configured stubs from appearing in inventory).
+device_query_filters:
+  - has_primary_ip: true
+
+compose:
+  # primary_ip4 is available for both VMs and Devices in NetBox
+  ansible_host: primary_ip4.address | ansible.utils.ipaddr('address')
+  ansible_user: custom_fields.ansible_user if custom_fields.ansible_user else 'ubuntu'
+  ansible_ssh_private_key_file: custom_fields.ansible_ssh_key if custom_fields.ansible_ssh_key else '~/.ssh/id_sentinel'
+  ansible_become: true
+  firewall_enabled: custom_fields.firewall_enabled if custom_fields.firewall_enabled is not none else true
+  sshd_permit_root_login: custom_fields.sshd_permit_root_login if custom_fields.sshd_permit_root_login else 'no'
+  sshd_allow_groups: custom_fields.sshd_allow_groups if custom_fields.sshd_allow_groups else 'sudo'
+  auditd_enabled: custom_fields.auditd_enabled if custom_fields.auditd_enabled is not none else true
+  firewall_allowed_ports: config_context.firewall_allowed_ports | default([22])
+
+keyed_groups:
+  # VMs: grouped by custom_fields.ansible_group (existing)
+  - key: custom_fields.ansible_group
+    separator: ""
+    prefix: ""
+    default_value: "ungrouped_netbox"
+  - key: role.slug
+    prefix: "role"
+    separator: "_"
+  # OPS-366: Devices: grouped by device_role slug for physical host grouping
+  # (site and device_type provide fallback grouping for bare-metal)
+  - key: device_role.slug
+    prefix: "device_role"
+    separator: "_"
+
+groups:
+  managed_vms: custom_fields.ansible_group is defined and custom_fields.ansible_group != ''
+  # OPS-366: physical_devices group captures all Device records from NetBox DCIM
+  # (Proxmox nodes, bare-metal infra). Populated once devices are registered.
+  physical_devices: "'Device' in object_type"

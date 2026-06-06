@@ -1,0 +1,9 @@
+[Unit]
+Description=qBittorrent TCP proxy to seedbox VM
+After=network.target
+[Service]
+ExecStart=/usr/bin/socat TCP-LISTEN:18080,fork,reuseaddr TCP:192.168.12.69:8080
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

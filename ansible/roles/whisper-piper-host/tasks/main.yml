@@ -1,0 +1,50 @@
+---
+# tasks/main.yml — whisper-piper-host role (OPS-586 Section B)
+#
+# Deploys Wyoming Whisper + Piper voice services inside the ai-tier1 GPU LXC
+# (VMID {{ whisper_piper_lxc_id }}, 192.168.12.80) on pve4-alienware.
+#
+# All pct exec commands run on the PVE host targeting VMID 200 (ai-tier1).
+# Pattern mirrors pve4-nvidia-gpu/tasks/main.yml (OPS-564).
+#
+# Execution order:
+#   1. docker_install.yml    — Docker CE inside ai-tier1 LXC (not pre-installed)
+#   2. nvidia_docker_setup.yml — nvidia-container-toolkit + configure Docker daemon
+#   3. wyoming_deploy.yml    — Docker Compose: whisper + piper
+#   4. verify.yml            — Port reachability + container health
+
+- name: Bail out if whisper_piper_enabled is false
+  ansible.builtin.meta: end_play
+  when: not (whisper_piper_enabled | bool)
+
+# ── Phase 1: Docker CE ────────────────────────────────────────────────────────
+- name: Install Docker CE inside ai-tier1 LXC
+  ansible.builtin.import_tasks: docker_install.yml
+  tags:
+    - whisper-piper
+    - docker
+    - install
+
+# ── Phase 2: NVIDIA container runtime ────────────────────────────────────────
+- name: Configure NVIDIA runtime for Docker inside ai-tier1 LXC
+  ansible.builtin.import_tasks: nvidia_docker_setup.yml
+  tags:
+    - whisper-piper
+    - nvidia
+    - docker
+
+# ── Phase 3: Wyoming deployment ───────────────────────────────────────────────
+- name: Deploy Wyoming Whisper + Piper via Docker Compose
+  ansible.builtin.import_tasks: wyoming_deploy.yml
+  tags:
+    - whisper-piper
+    - wyoming
+    - deploy
+
+# ── Phase 4: Verification ─────────────────────────────────────────────────────
+- name: Verify Wyoming services are running
+  ansible.builtin.import_tasks: verify.yml
+  tags:
+    - whisper-piper
+    - verify
+    - acceptance

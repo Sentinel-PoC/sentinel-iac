@@ -1,0 +1,9 @@
+---
+- name: Deploy CrowdSec security engine
+  hosts: crowdsec
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: crowdsec
+      tags: [crowdsec]

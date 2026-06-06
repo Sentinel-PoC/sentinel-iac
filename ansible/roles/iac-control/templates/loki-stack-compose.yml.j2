@@ -1,0 +1,33 @@
+services:
+  loki:
+    image: grafana/loki:{{ loki_version }}
+    container_name: loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - {{ loki_stack_dir }}/loki/loki-config.yml:/etc/loki/loki-config.yml
+      - loki-data:/loki
+    command: -config.file=/etc/loki/loki-config.yml
+    restart: unless-stopped
+    networks:
+      - logging
+
+  promtail:
+    image: grafana/promtail:{{ promtail_version }}
+    container_name: promtail
+    volumes:
+      - {{ loki_stack_dir }}/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml
+      - /var/log:/var/log:ro
+    command: -config.file=/etc/promtail/promtail-config.yml
+    restart: unless-stopped
+    depends_on:
+      - loki
+    networks:
+      - logging
+
+volumes:
+  loki-data:
+
+networks:
+  logging:
+    driver: bridge

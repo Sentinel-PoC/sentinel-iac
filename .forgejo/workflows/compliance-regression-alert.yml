@@ -1,0 +1,120 @@
+---
+# OPS-318: Compliance-check FAIL delta auto-creates Plane issue
+#
+# Context: nist-compliance-check.timer runs daily at 06:00 UTC and writes
+# /var/log/sentinel/nist-compliance-YYYY-MM-DD.json on iac-control.
+# This workflow runs at 06:30 UTC (30 min after the check) to diff today's
+# report against yesterday's. For each PASS->FAIL flip it opens a COMP issue;
+# for each FAIL->PASS flip it posts a comment on the existing open issue.
+# Dedup: one open COMP issue per control-id at a time.
+#
+# Runner: iac — iac-control at 192.168.12.210 (has direct access to
+# /var/log/sentinel/). No SSH hop needed.
+#
+# Non-blocking (continue-on-error: true): regression-alert failure must not
+# break the sweep pipeline. Errors are visible in workflow logs.
+#
+# NIST controls: CA-7 (Continuous Monitoring), AU-6 (Audit Response).
+name: compliance-regression-alert
+
+on:
+  schedule:
+    - cron: "30 6 * * *"  # OPS-318: daily 06:30 UTC (30 min after compliance check)
+  workflow_dispatch:  # break-glass + manual test
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false  # scheduled alerts must not cancel each other
+
+jobs:
+  compliance-regression-alert:
+    runs-on: iac
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diff today vs yesterday compliance reports
+        id: diff_reports
+        run: |
+          set -euo pipefail
+          DATE_TODAY=$(date +%Y-%m-%d)
+          DATE_YESTERDAY=$(date -d 'yesterday' +%Y-%m-%d)
+          REPORT_TODAY="/var/log/sentinel/nist-compliance-${DATE_TODAY}.json"
+          REPORT_YESTERDAY="/var/log/sentinel/nist-compliance-${DATE_YESTERDAY}.json"
+
+          echo "date_today=${DATE_TODAY}" >> "$GITHUB_OUTPUT"
+          echo "date_yesterday=${DATE_YESTERDAY}" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f "$REPORT_TODAY" ]; then
+            echo "::warning::Today's compliance report not found at ${REPORT_TODAY} — check ran?"
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+            echo "regression_count=0" >> "$GITHUB_OUTPUT"
+            echo "recovery_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ ! -f "$REPORT_YESTERDAY" ]; then
+            echo "::notice::Yesterday's compliance report not found — first run or gap; skipping diff"
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+            echo "regression_count=0" >> "$GITHUB_OUTPUT"
+            echo "recovery_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          jq empty "$REPORT_TODAY"  || { echo "::error::Today report is not valid JSON"; exit 1; }
+          jq empty "$REPORT_YESTERDAY" || { echo "::error::Yesterday report is not valid JSON"; exit 1; }
+
+          python3 scripts/compliance-diff.py "$REPORT_TODAY" "$REPORT_YESTERDAY" compliance-diff.json
+
+          REG_COUNT=$(python3 -c "import json; d=json.load(open('compliance-diff.json')); print(len(d['regressions']))")
+          REC_COUNT=$(python3 -c "import json; d=json.load(open('compliance-diff.json')); print(len(d['recoveries']))")
+
+          echo "regression_count=${REG_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "recovery_count=${REC_COUNT}" >> "$GITHUB_OUTPUT"
+
+          if [ "$REG_COUNT" -gt 0 ] || [ "$REC_COUNT" -gt 0 ]; then
+            echo "has_diff=true" >> "$GITHUB_OUTPUT"
+            echo "Regressions: ${REG_COUNT}, Recoveries: ${REC_COUNT}"
+          else
+            echo "has_diff=false" >> "$GITHUB_OUTPUT"
+            echo "No control-status changes detected"
+          fi
+
+      - uses: actions/upload-artifact@v3
+        if: always() && hashFiles('compliance-diff.json') != ''
+        with:
+          name: compliance-diff-${{ github.run_id }}
+          path: compliance-diff.json
+          retention-days: 30
+
+      - name: Create Plane COMP issues for regressions
+        if: steps.diff_reports.outputs.has_diff == 'true' && steps.diff_reports.outputs.regression_count != '0'
+        env:
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+          DATE_TODAY: ${{ steps.diff_reports.outputs.date_today }}
+          DATE_YESTERDAY: ${{ steps.diff_reports.outputs.date_yesterday }}
+          RUN_URL: https://forgejo.208.haist.farm/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +e
+          python3 scripts/compliance-regression-plane.py \
+            --diff compliance-diff.json \
+            --mode regressions \
+            --date-today "$DATE_TODAY" \
+            --date-yesterday "$DATE_YESTERDAY" \
+            --run-url "$RUN_URL"
+
+      - name: Comment on existing COMP issues for recoveries
+        if: steps.diff_reports.outputs.has_diff == 'true' && steps.diff_reports.outputs.recovery_count != '0'
+        env:
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+          DATE_TODAY: ${{ steps.diff_reports.outputs.date_today }}
+          DATE_YESTERDAY: ${{ steps.diff_reports.outputs.date_yesterday }}
+          RUN_URL: https://forgejo.208.haist.farm/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +e
+          python3 scripts/compliance-regression-plane.py \
+            --diff compliance-diff.json \
+            --mode recoveries \
+            --date-today "$DATE_TODAY" \
+            --date-yesterday "$DATE_YESTERDAY" \
+            --run-url "$RUN_URL"

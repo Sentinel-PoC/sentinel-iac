@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: vault-approle-agent-bootstrap
+  author: sentinel-worker
+  description: >-
+    Creates per-role Vault bootstrap policies and AppRoles for the Overwatch
+    agent session bootstrap flow. Phase A+B of OPS-464 (SEC-49 follow-on).
+  min_ansible_version: "2.12"
+
+dependencies: []

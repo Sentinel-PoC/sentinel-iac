@@ -1,0 +1,173 @@
+---
+
+- name: Validate required secrets are provided
+  ansible.builtin.assert:
+    that:
+      - minio_access_key | default('') | length > 0
+      - minio_secret_key | default('') | length > 0
+    fail_msg: "Required secrets (minio_access_key, minio_secret_key) must be provided via extra-vars or vault lookup"
+  tags: [vault, validation]
+
+- name: Create Vault directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ vault_data_dir }}"
+    - "{{ vault_config_dir }}"
+    - "{{ vault_log_dir }}"
+    - "{{ vault_compose_dir }}"
+  tags: [vault]
+
+- name: Deploy Vault docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ vault_compose_dir }}/docker-compose.yml"
+    mode: "0644"
+  notify: Restart vault
+  tags: [vault, ops541]
+
+# OPS-541: Remove host /etc/hosts band-aid entries that were added as
+# diagnostic leftovers during the SPIRE OIDC mount bring-up in session-019.
+# Both names are now durably resolved by the Vault container via the
+# extra_hosts list in docker-compose.yml.j2; the host-level entries are
+# not on the Vault auth path (Vault resolves these names inside the
+# container's netns) and serve no functional purpose.
+#
+# `lineinfile state=absent` with a literal `line:` removes only an exact
+# whitespace-match. If the entries reappear from manual edits, this task
+# idempotently re-removes them on each run.
+- name: Remove diagnostic /etc/hosts band-aid entries (OPS-541)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    state: absent
+    line: "{{ item }}"
+  loop:
+    - "192.168.12.210 spire-oidc.208.haist.farm"
+    - "192.168.12.210 api.overwatch.haist.farm"
+  tags: [vault, ops541]
+
+- name: Deploy Vault config.hcl
+  ansible.builtin.template:
+    src: config.hcl.j2
+    dest: "{{ vault_config_dir }}/config.hcl"
+    mode: "0644"
+  notify: Restart vault
+  tags: [vault]
+
+- name: Deploy Vault audit logrotate
+  ansible.builtin.template:
+    src: vault-logrotate.j2
+    dest: /etc/logrotate.d/vault
+    mode: "0644"
+  tags: [vault]
+
+- name: Deploy vault-backup.sh
+  ansible.builtin.template:
+    src: vault-backup.sh.j2
+    dest: /usr/local/bin/vault-backup.sh
+    mode: "0755"
+  tags: [vault]
+
+- name: Deploy vault-backup.env
+  ansible.builtin.template:
+    src: vault-backup.env.j2
+    dest: /etc/vault-backup.env
+    mode: "0600"
+  tags: [vault]
+
+- name: Deploy vault-backup systemd service
+  ansible.builtin.template:
+    src: vault-backup.service.j2
+    dest: /etc/systemd/system/vault-backup.service
+    mode: "0644"
+  notify: Daemon reload
+  tags: [vault]
+
+- name: Deploy vault-backup systemd timer
+  ansible.builtin.template:
+    src: vault-backup.timer.j2
+    dest: /etc/systemd/system/vault-backup.timer
+    mode: "0644"
+  notify: Daemon reload
+  tags: [vault]
+
+- name: Start Vault via docker compose
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ vault_compose_dir }}"
+  register: vault_compose_result
+  changed_when: "'Started' in vault_compose_result.stderr or 'Creating' in vault_compose_result.stderr"
+  tags: [vault, ops541]
+
+- name: Enable vault-backup timer
+  ansible.builtin.systemd:
+    name: vault-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [vault]
+
+- name: Reminder - Vault unseal required
+  ansible.builtin.debug:
+    msg: >
+      IMPORTANT: Vault is running but SEALED. You must unseal manually
+      using Shamir keys from Proton Pass. Run: vault operator unseal
+  tags: [vault]
+
+# OPS-352: SPIRE PKI bootstrap (opt-in, not run by default)
+# Run with: --tags spire-pki
+# PRE-REQUISITE: Vault must be unsealed and the controller must have a valid
+# ~/.vault-token with sufficient privileges (pki, auth/token, sys/policies).
+- name: Include SPIRE PKI provisioning tasks (OPS-352)
+  ansible.builtin.include_tasks: spire-pki.yml
+  when: "'spire-pki' in ansible_run_tags"
+  tags:
+    - spire-pki
+
+# SEC-78: Vault SSH role enforcement (opt-in, not run by default)
+# Enforces allow_empty_principals=false and key_type=ca on both SSH roles.
+# Run with: --tags ssh-roles
+# PRE-REQUISITE: Vault must be unsealed and ~/.vault-token must have
+# ssh/roles/* write + read permissions.
+- name: Include Vault SSH role enforcement tasks (SEC-78)
+  ansible.builtin.include_tasks: ssh-roles.yml
+  when: "'ssh-roles' in ansible_run_tags"
+  tags:
+    - ssh-roles
+    - sec78
+
+# OPS-142: auto-unseal token TTL watchdog (SEC-44 follow-up)
+- name: Deploy vault-token-watchdog.sh
+  ansible.builtin.copy:
+    src: vault-token-watchdog.sh
+    dest: /usr/local/bin/vault-token-watchdog.sh
+    mode: "0755"
+    owner: root
+    group: root
+  tags: [vault, watchdog]
+
+- name: Deploy vault-token-watchdog systemd service
+  ansible.builtin.copy:
+    src: vault-token-watchdog.service
+    dest: /etc/systemd/system/vault-token-watchdog.service
+    mode: "0644"
+  notify: Daemon reload
+  tags: [vault, watchdog]
+
+- name: Deploy vault-token-watchdog systemd timer
+  ansible.builtin.copy:
+    src: vault-token-watchdog.timer
+    dest: /etc/systemd/system/vault-token-watchdog.timer
+    mode: "0644"
+  notify: Daemon reload
+  tags: [vault, watchdog]
+
+- name: Enable vault-token-watchdog timer
+  ansible.builtin.systemd:
+    name: vault-token-watchdog.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [vault, watchdog]

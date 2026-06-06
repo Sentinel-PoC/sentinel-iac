@@ -1,0 +1,73 @@
+---
+# zeek-nids/tasks/install.yml — package install + repo setup
+# OPS-568 — idempotent: stat-guarded or uses package state=present
+
+- name: Install prerequisite packages
+  ansible.builtin.apt:
+    name:
+      - gnupg
+      - apt-transport-https
+      - curl
+      - logrotate
+    state: present
+    update_cache: true
+
+- name: Ensure APT keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Check if Zeek GPG keyring exists
+  ansible.builtin.stat:
+    path: /etc/apt/keyrings/zeek.gpg
+  register: zeek_keyring_stat
+
+- name: Download and dearmor Zeek GPG key
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      curl -fsSL "https://download.opensuse.org/repositories/security:/zeek/xUbuntu_$(lsb_release -rs)/Release.key" |
+        gpg --dearmor -o /etc/apt/keyrings/zeek.gpg
+    executable: /bin/bash
+  args:
+    creates: /etc/apt/keyrings/zeek.gpg
+  when: not zeek_keyring_stat.stat.exists
+  changed_when: true
+
+- name: Set Zeek keyring permissions
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/zeek.gpg
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Get Ubuntu release codename
+  ansible.builtin.command: lsb_release -rs
+  register: ubuntu_release
+  changed_when: false
+
+- name: Add Zeek APT repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/zeek.gpg]
+      https://download.opensuse.org/repositories/security:/zeek/xUbuntu_{{ ubuntu_release.stdout }}/
+      /
+    filename: zeek
+    state: present
+
+- name: Install Zeek
+  ansible.builtin.apt:
+    name: "{{ zeek_package_name }}"
+    state: present
+    update_cache: true
+
+- name: Ensure Zeek bin is in system PATH via profile.d
+  ansible.builtin.copy:
+    dest: /etc/profile.d/zeek.sh
+    content: |
+      # Zeek PATH — deployed by ansible/roles/zeek-nids (OPS-568)
+      export PATH="{{ zeek_install_prefix }}/bin:$PATH"
+    mode: "0644"
+    owner: root
+    group: root

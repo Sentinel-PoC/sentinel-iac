@@ -1,0 +1,19 @@
+[Unit]
+Description=Warm NVIDIA driver to materialize /dev/nvidia* before LXC autostart
+# OPS-564 / pve4-nvidia-boot-race-fix: without this unit, /dev/nvidia* nodes do
+# not exist on the PVE host until the first in-guest nvidia-smi call, which races
+# against LXC autostart. Jellyfin caches "no GPU" and falls back to software
+# transcoding for the entire session. This unit forces node materialisation BEFORE
+# pve-guests.service starts containers.
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=pve-guests.service
+RequiresMountsFor=/dev
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-modprobe -c 0 -m
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

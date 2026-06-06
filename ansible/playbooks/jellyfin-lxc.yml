@@ -1,0 +1,29 @@
+---
+# jellyfin-lxc.yml — Configure Jellyfin media server (OPS-1030)
+#
+# Target: LXC 100 on pve4-alienware — Jellyfin at 192.168.12.61
+# Jellyfin is LAN-only per operator decision 2026-05-28 (OPS-1032 cancelled).
+#
+# This playbook runs DIRECTLY against the Jellyfin LXC via SSH (root).
+# It does NOT use pct push from the Proxmox host.
+#
+# What it does:
+#   - Deploys /etc/jellyfin/network.xml from template with empty
+#     PublishedServerUriBySubnet (removes stale Pangolin VIP reference)
+#   - Restarts jellyfin if network.xml changed
+#   - Verifies HTTP endpoint responds (302 redirect to login)
+#
+# Prerequisites:
+#   - JIT SSH cert valid: vault write ssh/sign/admin principal=root ...
+#   - Jellyfin LXC 100 (192.168.12.61) reachable from iac-control
+#
+# Run:
+#   ansible-playbook ansible/playbooks/jellyfin-lxc.yml
+#   ansible-playbook ansible/playbooks/jellyfin-lxc.yml --tags jellyfin-network
+#   ansible-playbook ansible/playbooks/jellyfin-lxc.yml --check
+
+- name: Configure Jellyfin LXC 100 — OPS-1030
+  hosts: jellyfin-lxc
+  gather_facts: false
+  roles:
+    - role: jellyfin-lxc

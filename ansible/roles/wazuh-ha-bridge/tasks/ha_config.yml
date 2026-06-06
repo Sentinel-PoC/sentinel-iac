@@ -1,0 +1,128 @@
+---
+# ha_config.yml — deploy Wazuh HA config fragments into HA LXC
+#
+# Runs on: pve4-alienware (PVE host) — pushes files into LXC 201
+# Uses pct push (same pattern as ha-lxc role tasks).
+#
+# Files deployed:
+#   /config/packages/wazuh.yaml     — MQTT sensors, counters, Telegram automation
+#   /config/www/wazuh-security-card.yaml — Lovelace card YAML (operator imports)
+#
+# Ref: HA packages feature:
+#   https://www.home-assistant.io/docs/configuration/packages/
+#   "homeassistant: packages: !include_dir_named packages" in configuration.yaml
+#
+# DEPENDENCY: configuration.yaml must have 'homeassistant: packages:' stanza.
+# Section C adds this stanza to configuration.yaml.j2. If Section E merges first,
+# the stanza will already exist and both sections' packages will be loaded.
+
+# ── Phase 1: Ensure packages directory exists in LXC ─────────────────────────
+
+- name: Create packages directory in HA LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/packages"
+  changed_when: true
+  tags: [wazuh-ha-bridge, ha, packages]
+
+- name: Ensure www directory exists in HA LXC (for Lovelace card file)
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/www"
+  changed_when: true
+  tags: [wazuh-ha-bridge, ha, www]
+
+# ── Phase 2: Render and push wazuh package YAML ──────────────────────────────
+
+- name: Render wazuh HA package YAML to PVE host temp path
+  ansible.builtin.template:
+    src: ha-wazuh-package.yaml.j2
+    dest: /tmp/ha-wazuh-package.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [wazuh-ha-bridge, ha, packages]
+
+- name: Push wazuh package YAML into HA LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-wazuh-package.yaml {{ ha_config_dir }}/packages/wazuh.yaml"
+  changed_when: true
+  notify: restart home-assistant container
+  tags: [wazuh-ha-bridge, ha, packages]
+
+- name: Remove wazuh package temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-wazuh-package.yaml
+    state: absent
+  tags: [wazuh-ha-bridge, ha, cleanup]
+
+# ── Phase 3: Render and push Lovelace security card ──────────────────────────
+
+- name: Render Wazuh Lovelace security card YAML to PVE host temp path
+  ansible.builtin.template:
+    src: ha-wazuh-lovelace-card.yaml.j2
+    dest: /tmp/ha-wazuh-lovelace-card.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [wazuh-ha-bridge, ha, lovelace]
+
+- name: Push Lovelace security card YAML into HA LXC (www/ — accessible via /local/)
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-wazuh-lovelace-card.yaml {{ ha_config_dir }}/www/wazuh-security-card.yaml"
+  changed_when: true
+  tags: [wazuh-ha-bridge, ha, lovelace]
+
+- name: Remove lovelace card temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-wazuh-lovelace-card.yaml
+    state: absent
+  tags: [wazuh-ha-bridge, ha, cleanup]
+
+# ── Phase 4: Re-render configuration.yaml with packages support ──────────────
+# Push updated configuration.yaml (with homeassistant: packages: stanza).
+# If Section E has already added this stanza, the ha-lxc role's ha_config.yml
+# will deploy the correct combined template. This task is a belt-and-suspenders
+# push of just the config (not triggering full LXC rebuild).
+
+- name: Render configuration.yaml to PVE host temp path
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../roles/ha-lxc/templates/configuration.yaml.j2"
+    dest: /tmp/ha-configuration-wazuh.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  register: ha_config_render
+  # noqa ignore-errors — template source (ha-lxc role path) may not exist when
+  # ha-lxc role is deployed separately. Tolerable failure: ha-lxc role owns
+  # configuration.yaml; this task is belt-and-suspenders only.
+  # failed_when alternative rejected: when failed_when suppresses the failure,
+  # result.failed is set False, which would allow the push task to run against
+  # a file that was never rendered. ansible_failed_task gate on the push task
+  # requires ignore_errors semantics here.
+  failed_when: >
+    ha_config_render.failed and
+    'Could not find or access' not in (ha_config_render.msg | default('')) and
+    'No such file or directory' not in (ha_config_render.msg | default(''))
+  ignore_errors: true  # noqa ignore-errors — see comment above
+  tags: [wazuh-ha-bridge, ha, config]
+
+- name: Push configuration.yaml into HA LXC (if rendered successfully)
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-configuration-wazuh.yaml {{ ha_config_dir }}/configuration.yaml"
+  changed_when: true
+  when: not (ansible_failed_task is defined and ansible_failed_task.name is defined)
+  notify: restart home-assistant container
+  register: ha_push_result
+  # Tolerable failure: LXC not running during this play (HA may be under maintenance).
+  # Intolerable: unexpected pct errors.
+  failed_when: >
+    ha_push_result.rc is defined and ha_push_result.rc != 0 and
+    'is not running' not in (ha_push_result.stderr | default('')) and
+    'does not exist' not in (ha_push_result.stderr | default(''))
+  ignore_errors: true  # noqa ignore-errors — belt-and-suspenders push; LXC may be stopped
+  tags: [wazuh-ha-bridge, ha, config]
+
+- name: Remove configuration temp file
+  ansible.builtin.file:
+    path: /tmp/ha-configuration-wazuh.yaml
+    state: absent
+  tags: [wazuh-ha-bridge, ha, cleanup]

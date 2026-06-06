@@ -1,0 +1,11 @@
+[Unit]
+Description=Ansible GitOps Drift Detection
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/ansible-drift-check.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600

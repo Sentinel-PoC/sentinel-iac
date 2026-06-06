@@ -1,0 +1,861 @@
+---
+# SEC-49/SEC-62: WireGuard config MUST be sourced from Vault.
+# Do NOT pass wireguard_private_key or wireguard_public_key as extra-vars, in inventory, or inline.
+# Vault path: secret/seedbox/wireguard
+# Full rotation procedure is documented in templates/gluetun-wg.env.j2 header.
+
+# SEC-62: Fetch full WireGuard config from Vault in one lookup.
+# Vault path: secret/seedbox/wireguard
+# Required keys: private_key, public_key
+# Optional keys (fall back to Ansible defaults if absent): addresses, endpoint_ip,
+#   endpoint_port, keepalive_interval, dns_address
+# Rotation procedure: see templates/gluetun-wg.env.j2 header comment.
+- name: Fetch WireGuard config from Vault
+  ansible.builtin.set_fact:
+    _wg_vault: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'seedbox/wireguard',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret }}
+  no_log: true
+  # Skip Vault lookup if private key already provided (e.g. for --check runs, CI, or manual override).
+  # In normal operator-run playbooks the variable is empty here and the lookup fires.
+  when: wireguard_private_key | default('') | length == 0
+  tags: [seedbox]
+
+- name: Apply WireGuard config from Vault (with defaults fallback for non-secret fields)
+  ansible.builtin.set_fact:
+    wireguard_private_key: "{{ _wg_vault.private_key }}"
+    wireguard_public_key: "{{ _wg_vault.public_key | default('') }}"
+    wireguard_addresses: "{{ _wg_vault.addresses | default(wireguard_addresses) }}"
+    wireguard_endpoint_ip: "{{ _wg_vault.endpoint_ip | default(wireguard_endpoint_ip) }}"
+    wireguard_endpoint_port: "{{ _wg_vault.endpoint_port | default(wireguard_endpoint_port) }}"
+    wireguard_keepalive_interval: "{{ _wg_vault.keepalive_interval | default(wireguard_keepalive_interval) }}"
+    wireguard_dns_address: "{{ _wg_vault.dns_address | default(wireguard_dns_address) }}"
+  no_log: true
+  when: _wg_vault is defined
+  tags: [seedbox]
+
+- name: Assert WireGuard private key is present
+  ansible.builtin.assert:
+    that:
+      - wireguard_private_key | default('') | length > 0
+    fail_msg: >
+      wireguard_private_key is empty. The WireGuard private key must be stored in
+      Vault at secret/seedbox/wireguard (key: private_key) before running this role.
+      After rotating in the ProtonVPN dashboard, run:
+        vault kv put secret/seedbox/wireguard \
+          private_key="<PrivateKey from new ProtonVPN conf>" \
+          public_key="<PublicKey from new ProtonVPN conf>" \
+          addresses="<Address from new conf>" \
+          endpoint_ip="<Endpoint IP>" \
+          endpoint_port="<Endpoint Port>" \
+          keepalive_interval="25s" \
+          dns_address="<DNS from new conf>"
+      See templates/gluetun-wg.env.j2 header for full rotation procedure.
+  tags: [seedbox]
+
+# OPS-321: autobrr session secret — fetch from Vault at secret/seedbox/autobrr.
+# DO NOT pass autobrr_session_secret as an extra-var, in inventory, or inline.
+# Pre-deployment: vault kv put secret/seedbox/autobrr session_secret="$(openssl rand -hex 32)"
+- name: Fetch autobrr session secret from Vault
+  ansible.builtin.set_fact:
+    autobrr_session_secret: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'seedbox/autobrr',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.session_secret }}
+  no_log: true
+  # Skip Vault lookup if secret already provided (e.g. for --check runs or CI).
+  # OPS-469: skip entirely when autobrr is disabled
+  when: (autobrr_enabled | default(false)) and autobrr_session_secret | default('') | length == 0
+  tags: [seedbox]
+
+- name: Assert autobrr session secret is present
+  ansible.builtin.assert:
+    that:
+      - autobrr_session_secret | default('') | length > 0
+    fail_msg: >
+      autobrr_session_secret is empty. Store the session secret in Vault at
+      secret/seedbox/autobrr (key: session_secret) before running this role.
+      Generate with: openssl rand -hex 32
+      Then: vault kv put secret/seedbox/autobrr session_secret="<value>"
+  when: autobrr_enabled | default(false)
+  tags: [seedbox]
+
+# OPS-321 Phase 2: cross-seed Prowlarr API key — fetch from Vault at secret/seedbox/prowlarr.
+# DO NOT pass cross_seed_prowlarr_api_key as an extra-var, in inventory, or inline.
+# Pre-deployment: vault kv put secret/seedbox/prowlarr api_key="<value from prowlarr config.xml>"
+# Source: /opt/seedbox_configs/prowlarr/config.xml <ApiKey> element on seedbox VM.
+- name: Fetch Prowlarr API key from Vault (for cross-seed config)
+  ansible.builtin.set_fact:
+    cross_seed_prowlarr_api_key: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'seedbox/prowlarr',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.api_key }}
+  no_log: true
+  # Skip Vault lookup if key already provided (e.g. for --check runs or CI).
+  when: cross_seed_prowlarr_api_key | default('') | length == 0
+  tags: [seedbox]
+
+- name: Assert Prowlarr API key is present
+  ansible.builtin.assert:
+    that:
+      - cross_seed_prowlarr_api_key | default('') | length > 0
+    fail_msg: >
+      cross_seed_prowlarr_api_key is empty. Store the Prowlarr API key in Vault at
+      secret/seedbox/prowlarr (key: api_key) before running this role.
+      Source: /opt/seedbox_configs/prowlarr/config.xml <ApiKey> element on seedbox VM.
+      Then: vault kv put secret/seedbox/prowlarr api_key="<value>"
+  tags: [seedbox]
+
+# OPS-321 Phase 1.5: autobrr API key — fetch from Vault at secret/seedbox/autobrr (key: api_key).
+# Created by Phase 1.5 config session and stored alongside session_secret.
+# Used for idempotent autobrr API configuration tasks below.
+- name: Fetch autobrr API key from Vault
+  ansible.builtin.set_fact:
+    autobrr_api_key: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'seedbox/autobrr',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.api_key }}
+  no_log: true
+  # OPS-469: skip entirely when autobrr is disabled
+  when: (autobrr_enabled | default(false)) and autobrr_api_key | default('') | length == 0
+  tags: [seedbox]
+
+# OPS-323: Sonarr API key — fetch from Vault at secret/seedbox/sonarr (key: api_key).
+# On first install (Vault path absent), the key is read from the container's config.xml
+# and written to Vault by the tasks below.
+# DO NOT set sonarr_api_key inline or as extra-var.
+- name: Fetch Sonarr API key from Vault
+  ansible.builtin.set_fact:
+    sonarr_api_key: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'seedbox/sonarr',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.api_key }}
+  no_log: true
+  when: sonarr_api_key | default('') | length == 0
+  ignore_errors: true
+  register: sonarr_vault_fetch
+  tags: [seedbox]
+
+# OPS-323: Radarr API key — same pattern as Sonarr above.
+- name: Fetch Radarr API key from Vault
+  ansible.builtin.set_fact:
+    radarr_api_key: >-
+      {{ lookup(
+        'community.hashi_vault.vault_kv2_get',
+        'seedbox/radarr',
+        url=vault_addr | default(lookup('env', 'VAULT_ADDR')),
+        token=vault_token | default(lookup('env', 'VAULT_TOKEN'))
+      ).secret.api_key }}
+  no_log: true
+  when: radarr_api_key | default('') | length == 0
+  ignore_errors: true
+  register: radarr_vault_fetch
+  tags: [seedbox]
+
+# OPS-323: If Sonarr API key is not in Vault yet (first install), read it from
+# the container's config.xml and persist it to Vault.
+# This handles bootstrap: containers generate their key on first start, we capture it.
+- name: Read Sonarr API key from container config.xml (first install bootstrap)
+  ansible.builtin.command:
+    cmd: >
+      docker exec sonarr bash -c
+      "sed -n 's/.*<ApiKey>\\([^<]*\\)<\\/ApiKey>.*/\\1/p' /config/config.xml"
+  register: sonarr_key_from_container
+  changed_when: false
+  when: sonarr_api_key | default('') | length == 0
+  no_log: true
+  tags: [seedbox]
+
+- name: Persist Sonarr API key to Vault (first install)
+  ansible.builtin.uri:
+    url: "{{ vault_addr | default(lookup('env', 'VAULT_ADDR')) }}/v1/secret/data/seedbox/sonarr"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ vault_token | default(lookup('env', 'VAULT_TOKEN')) }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      data:
+        api_key: "{{ sonarr_key_from_container.stdout | trim }}"
+    status_code: [200]
+  no_log: true
+  when:
+    - sonarr_api_key | default('') | length == 0
+    - sonarr_key_from_container is defined
+    - sonarr_key_from_container.stdout | default('') | length > 0
+  tags: [seedbox]
+
+- name: Set sonarr_api_key from container read (first install)
+  ansible.builtin.set_fact:
+    sonarr_api_key: "{{ sonarr_key_from_container.stdout | trim }}"
+  no_log: true
+  when:
+    - sonarr_api_key | default('') | length == 0
+    - sonarr_key_from_container is defined
+    - sonarr_key_from_container.stdout | default('') | length > 0
+  tags: [seedbox]
+
+- name: Read Radarr API key from container config.xml (first install bootstrap)
+  ansible.builtin.command:
+    cmd: >
+      docker exec radarr bash -c
+      "sed -n 's/.*<ApiKey>\\([^<]*\\)<\\/ApiKey>.*/\\1/p' /config/config.xml"
+  register: radarr_key_from_container
+  changed_when: false
+  when: radarr_api_key | default('') | length == 0
+  no_log: true
+  tags: [seedbox]
+
+- name: Persist Radarr API key to Vault (first install)
+  ansible.builtin.uri:
+    url: "{{ vault_addr | default(lookup('env', 'VAULT_ADDR')) }}/v1/secret/data/seedbox/radarr"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ vault_token | default(lookup('env', 'VAULT_TOKEN')) }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      data:
+        api_key: "{{ radarr_key_from_container.stdout | trim }}"
+    status_code: [200]
+  no_log: true
+  when:
+    - radarr_api_key | default('') | length == 0
+    - radarr_key_from_container is defined
+    - radarr_key_from_container.stdout | default('') | length > 0
+  tags: [seedbox]
+
+- name: Set radarr_api_key from container read (first install)
+  ansible.builtin.set_fact:
+    radarr_api_key: "{{ radarr_key_from_container.stdout | trim }}"
+  no_log: true
+  when:
+    - radarr_api_key | default('') | length == 0
+    - radarr_key_from_container is defined
+    - radarr_key_from_container.stdout | default('') | length > 0
+  tags: [seedbox]
+
+# OPS-928: Ensure the rootfs LV uses all available VG free space.
+# Root cause: cloud-init runs growpart on /dev/sda3 when Terraform clones from the
+# Packer template (disk_size=20G) at the deployed size (disk_size=32). cloud-init
+# grows sda3 from 20G → 30G PV but does NOT run lvresize — the LV remains at the
+# Ubuntu installer-provisioned size (~15G, 50% of the final PV). This was confirmed
+# on VM 109 in OPS-928 (2026-05-25): LV was 15G, VFree was 15G, rootfs at 88%.
+# These tasks are idempotent: if VFree < 0.5G (post-expansion), lvresize is skipped.
+- name: Check VG free space (OPS-928 — LV expansion idempotency check)
+  ansible.builtin.shell: >
+    vgs ubuntu-vg --noheadings --nosuffix --units g -o vg_free | tr -d ' '
+  register: _vg_free_gb
+  changed_when: false
+  tags: [seedbox]
+
+- name: Expand rootfs LV to fill VG free space (OPS-928 — cloud-init does not resize LV)
+  ansible.builtin.command:
+    cmd: lvresize -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+  when: (_vg_free_gb.stdout | float) > 0.5
+  register: _lv_resize
+  tags: [seedbox]
+
+- name: Online-resize ext4 filesystem after LV expansion (OPS-928)
+  ansible.builtin.command:
+    cmd: resize2fs /dev/mapper/ubuntu--vg-ubuntu--lv
+  when: _lv_resize is changed
+  tags: [seedbox]
+
+# SEC-62: Deploy gluetun WireGuard env file from Vault-sourced template.
+# File is mode 0600 root:root — contains WireGuard private key.
+# Rendered before docker-compose so gluetun can find the env_file at startup.
+# Template: templates/gluetun-wg.env.j2  Destination: /etc/seedbox/gluetun-wg.env
+# To rotate: update Vault at secret/seedbox/wireguard with new ProtonVPN config,
+# then re-run this role — Ansible will update the file and restart gluetun.
+- name: Ensure /etc/seedbox directory exists
+  ansible.builtin.file:
+    path: /etc/seedbox
+    state: directory
+    mode: "0700"
+    owner: root
+    group: root
+  tags: [seedbox]
+
+- name: Deploy gluetun WireGuard env file (SEC-62 — Vault-backed IaC)
+  ansible.builtin.template:
+    src: gluetun-wg.env.j2
+    dest: /etc/seedbox/gluetun-wg.env
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+  notify: Restart seedbox
+  tags: [seedbox]
+
+- name: Create seedbox directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ seedbox_dir }}"
+    - "{{ seedbox_config_dir }}"
+    - "{{ seedbox_downloads_dir }}"
+    - "{{ autobrr_config_dir }}"
+    - "{{ cross_seed_config_dir }}"
+    - "{{ tqm_config_dir }}"
+    # SEC-73: arr stack dirs brought into IaC from OPS-180 override
+    - "{{ prowlarr_config_dir }}"
+    - "{{ sonarr_config_dir }}"
+    - "{{ radarr_config_dir }}"
+  tags: [seedbox]
+
+# OPS-321 Phase 1.5: Ensure freeleech download path exists on the host.
+# qBittorrent maps /data to /mnt/data; the freeleech save_path must exist.
+- name: Create freeleech download directory
+  ansible.builtin.file:
+    path: "{{ autobrr_freeleech_save_path }}"
+    state: directory
+    mode: "0755"
+    owner: koiakoia
+    group: koiakoia
+  when: autobrr_enabled | default(false)
+  tags: [seedbox]
+
+# OPS-356: TQM (qbit_manage) config — no secrets; mode 0644 is fine.
+# Config specifies qBit host as http://gluetun:{{ qbittorrent_port }} (Docker DNS).
+# See templates/tqm-config.yml.j2 for full rule documentation.
+- name: Deploy TQM (qbit_manage) config
+  ansible.builtin.template:
+    src: tqm-config.yml.j2
+    dest: "{{ tqm_config_file }}"
+    mode: "0644"
+  notify: Restart seedbox
+  tags: [seedbox]
+
+- name: Deploy seedbox docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ seedbox_dir }}/docker-compose.yml"
+    mode: "0644"
+  # no_log removed: template no longer renders WIREGUARD_PRIVATE_KEY inline
+  # (key now lives in env_file /etc/seedbox/gluetun-wg.env per SEC-49)
+  notify: Restart seedbox
+  tags: [seedbox]
+
+# SEC-73: Deploy docker-compose.override.yml from IaC template.
+# This replaces the hand-created OPS-180 override (sonarr+radarr+prowlarr on bridge).
+# Post-SEC-73: prowlarr is in the main compose (gluetun namespace); override has sonarr+radarr only.
+# IMPORTANT: After first run, operator must update Prowlarr URL in sonarr/radarr settings:
+#   Settings → Indexers → Prowlarr → URL: http://prowlarr:9696 → http://gluetun:{{ prowlarr_port }}
+- name: Deploy seedbox docker-compose.override.yml
+  ansible.builtin.template:
+    src: docker-compose.override.yml.j2
+    dest: "{{ seedbox_dir }}/docker-compose.override.yml"
+    mode: "0644"
+  notify: Restart seedbox
+  tags: [seedbox]
+
+- name: Deploy autobrr env file (session secret — not rendered in compose)
+  ansible.builtin.template:
+    src: autobrr.env.j2
+    dest: "{{ autobrr_env_file }}"
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+  notify: Restart seedbox
+  when: autobrr_enabled | default(false)
+  tags: [seedbox]
+
+- name: Deploy cross-seed config (Prowlarr API key rendered — restrict permissions)
+  ansible.builtin.template:
+    src: cross-seed.config.js.j2
+    dest: "{{ cross_seed_config_file }}"
+    mode: "0600"
+    owner: root
+    group: root
+  no_log: true
+  notify: Restart seedbox
+  tags: [seedbox]
+
+- name: Start seedbox services
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ seedbox_dir }}"
+  register: seedbox_compose_result
+  changed_when: "'Started' in seedbox_compose_result.stderr or 'Creating' in seedbox_compose_result.stderr"
+  tags: [seedbox]
+
+# OPS-711: Deploy gluetun-watcher — cascade restart bound containers on gluetun restart.
+# When gluetun restarts, bound containers (qbittorrent, prowlarr, cross-seed) lose their
+# shared network namespace. docker restart is NOT sufficient; docker compose up -d
+# --force-recreate is required. This systemd service watches docker events and triggers
+# force-recreate when gluetun starts. Also performs startup recovery: if gluetun is healthy
+# but bound containers are unhealthy at watcher startup, force-recreate them.
+- name: Deploy gluetun-watcher script (OPS-711)
+  ansible.builtin.template:
+    src: gluetun-watcher.sh.j2
+    dest: /usr/local/bin/gluetun-watcher.sh
+    mode: "0755"
+    owner: root
+    group: root
+  notify: Reload systemd and restart gluetun-watcher
+  tags: [seedbox]
+
+- name: Deploy gluetun-watcher systemd unit (OPS-711)
+  ansible.builtin.template:
+    src: gluetun-watcher.service.j2
+    dest: /etc/systemd/system/gluetun-watcher.service
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Reload systemd and restart gluetun-watcher
+  tags: [seedbox]
+
+- name: Enable and start gluetun-watcher service (OPS-711)
+  ansible.builtin.systemd:
+    name: gluetun-watcher
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [seedbox]
+
+# OPS-323: Render Sonarr API key into config.xml for rebuild-safety.
+# On subsequent runs (key in Vault), ensures config.xml reflects the persisted key.
+# This guards against container re-initialisation generating a new random key.
+# config.xml is owned by PUID=1000 (koiakoia) inside the container.
+# Idempotent: reads current key from config.xml first; only writes if it differs.
+- name: Read current Sonarr API key from config.xml
+  ansible.builtin.command:
+    cmd: >
+      docker exec sonarr bash -c
+      "sed -n 's/.*<ApiKey>\\([^<]*\\)<\\/ApiKey>.*/\\1/p' /config/config.xml"
+  register: sonarr_current_key
+  changed_when: false
+  when: sonarr_api_key | default('') | length > 0
+  no_log: true
+  tags: [seedbox]
+
+- name: Render Sonarr API key into config.xml (rebuild-safety)
+  ansible.builtin.command:
+    cmd: >
+      docker exec sonarr bash -c
+      "sed -i 's|<ApiKey>[^<]*</ApiKey>|<ApiKey>{{ sonarr_api_key }}</ApiKey>|' /config/config.xml"
+  when:
+    - sonarr_api_key | default('') | length > 0
+    - sonarr_current_key.stdout | default('') | trim != sonarr_api_key
+  changed_when: true
+  no_log: true
+  tags: [seedbox]
+
+- name: Read current Radarr API key from config.xml
+  ansible.builtin.command:
+    cmd: >
+      docker exec radarr bash -c
+      "sed -n 's/.*<ApiKey>\\([^<]*\\)<\\/ApiKey>.*/\\1/p' /config/config.xml"
+  register: radarr_current_key
+  changed_when: false
+  when: radarr_api_key | default('') | length > 0
+  no_log: true
+  tags: [seedbox]
+
+- name: Render Radarr API key into config.xml (rebuild-safety)
+  ansible.builtin.command:
+    cmd: >
+      docker exec radarr bash -c
+      "sed -i 's|<ApiKey>[^<]*</ApiKey>|<ApiKey>{{ radarr_api_key }}</ApiKey>|' /config/config.xml"
+  when:
+    - radarr_api_key | default('') | length > 0
+    - radarr_current_key.stdout | default('') | trim != radarr_api_key
+  changed_when: true
+  no_log: true
+  tags: [seedbox]
+
+# OPS-321 Phase 1.5 — Fix 1: Ensure autobrr indexers use Docker DNS (prowlarr:9696).
+# The live hot-fix already patched the running DB. This task makes the role idempotent:
+# it checks the live indexer URLs and updates any that still reference the host IP.
+# Approach: GET /api/indexers, check each indexer's settings.url, PATCH if needed.
+#
+# Note: autobrr uses /api/indexers (not /api/filters) for feed/indexer management.
+# The Prowlarr indexer IDs used by autobrr feeds are stored in the autobrr DB;
+# the correct IDs are known from the Phase 1.5 API session (IPTorrents=7, HD-Space=5
+# in Prowlarr; mapped to autobrr indexer IDs 1 and 2 respectively).
+- name: Get current autobrr indexers
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/indexer"
+    method: GET
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+    return_content: true
+    status_code: [200]
+  register: autobrr_indexers_raw
+  when: autobrr_api_key | default('') | length > 0
+  tags: [seedbox]
+
+- name: Fix autobrr indexer URLs to use Docker DNS (prowlarr:9696)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/indexer/{{ item.id }}"
+    method: PUT
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body: >-
+      {{ item | combine({
+        'settings': item.settings | combine({
+          'url': item.settings.url | regex_replace(
+            'http://192\\.168\\.12\\.69:9696',
+            'http://prowlarr:9696'
+          )
+        })
+      }) }}
+    status_code: [200]
+  loop: "{{ autobrr_indexers_raw.json | default([]) }}"
+  when:
+    - autobrr_api_key | default('') | length > 0
+    - autobrr_indexers_raw is defined
+    - "'192.168.12.69:9696' in (item.settings.url | default(''))"
+  loop_control:
+    label: "{{ item.name | default(item.id) }}"
+  tags: [seedbox]
+
+# OPS-321 Phase 1.5 — Fix 2: Freeleech filter for private trackers.
+# Creates "Freeleech - Private Trackers" filter targeting IPTorrents and HD-Space.
+# Idempotent: checks if filter with that name already exists before creating.
+# Filter spec:
+#   - freeleech = true
+#   - resolutions = [2160p, 1080p] (matching existing quality filters)
+#   - categories = combined movies (2000-series) + TV (5000-series)
+#   - except_releases = same exclusions as existing filters (NUKED, CAM, TS)
+#   - action: push to qBittorrent (client_id=1), category=freeleech,
+#     save_path={{ qbit_freeleech_save_path }} (container-internal path: /data/torrents/freeleech)
+#     NOTE: autobrr_freeleech_save_path (/mnt/data/...) is the HOST path and is used only
+#     for the host-side mkdir task above. The qBit container mounts NFS at /data, not /mnt/data.
+#     Passing the host path to qBit causes "Permission denied" because /mnt inside the
+#     container is root-owned and the qBit process (UID 1000) cannot write there.
+#     Root cause of OPS-355 torrents stuck at 0%: old filter actions used host path. (OPS-356 fix)
+#   - indexers: IPTorrents (autobrr indexer 1) + HD-Space (autobrr indexer 2)
+- name: Get current autobrr filters (freeleech idempotency check)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/filters"
+    method: GET
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+    return_content: true
+    status_code: [200]
+  register: autobrr_filters_raw
+  when: autobrr_api_key | default('') | length > 0
+  tags: [seedbox]
+
+- name: Set freeleech_filter_exists fact
+  ansible.builtin.set_fact:
+    freeleech_filter_exists: >-
+      {{
+        autobrr_filters_raw.json
+        | default([])
+        | selectattr('name', 'equalto', autobrr_freeleech_filter_name)
+        | list
+        | length > 0
+      }}
+  when: autobrr_api_key | default('') | length > 0
+  tags: [seedbox]
+
+# autobrr filter creation is a two-step process:
+# 1. POST /api/filters — creates the filter base, returns the new filter ID.
+#    Actions and indexers in the POST body are silently ignored by autobrr.
+# 2. PUT /api/filters/{id} — sets actions and indexers; this persists them to DB.
+# This behaviour was confirmed via live API calls 2026-05-03 (OPS-321 triple-fix).
+- name: Create freeleech filter base in autobrr (step 1 of 2)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/filters"
+    method: POST
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ autobrr_freeleech_filter_name }}"
+      enabled: true
+      priority: 40
+      freeleech: true
+      resolutions:
+        - "2160p"
+        - "1080p"
+      match_categories: "{{ autobrr_freeleech_match_categories }}"
+      except_releases: "*NUKED*,*-CAM*,*-TS*,*-WEB-CAM*,*HDTC*"
+      announce_types:
+        - "NEW"
+      # Required empty arrays — autobrr DB has NOT NULL constraints on these columns.
+      # Omitting any of these causes a 500: constraint failed error on POST /api/filters.
+      codecs: []
+      sources: []
+      containers: []
+      match_hdr: []
+      except_hdr: []
+      match_other: []
+      except_other: []
+      formats: []
+      quality: []
+      media: []
+      match_language: []
+      except_language: []
+      origins: []
+      except_origins: []
+      release_types_ignore: []
+    status_code: [200, 201]
+  register: freeleech_filter_create
+  when:
+    - autobrr_api_key | default('') | length > 0
+    - not (freeleech_filter_exists | default(false) | bool)
+  tags: [seedbox]
+
+- name: Configure freeleech filter actions and indexers (step 2 of 2)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/filters/{{ freeleech_filter_create.json.id }}"
+    method: PUT
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      id: "{{ freeleech_filter_create.json.id | int }}"
+      name: "{{ autobrr_freeleech_filter_name }}"
+      enabled: true
+      priority: 40
+      freeleech: true
+      resolutions:
+        - "2160p"
+        - "1080p"
+      match_categories: "{{ autobrr_freeleech_match_categories }}"
+      except_releases: "*NUKED*,*-CAM*,*-TS*,*-WEB-CAM*,*HDTC*"
+      announce_types:
+        - "NEW"
+      codecs: []
+      sources: []
+      containers: []
+      match_hdr: []
+      except_hdr: []
+      match_other: []
+      except_other: []
+      formats: []
+      quality: []
+      media: []
+      match_language: []
+      except_language: []
+      origins: []
+      except_origins: []
+      release_types_ignore: []
+      max_downloads: "{{ autobrr_freeleech_max_downloads | int }}"
+      max_downloads_unit: "{{ autobrr_freeleech_max_downloads_unit }}"
+      indexers:
+        - id: "{{ autobrr_freeleech_iptorrents_indexer_id | int }}"
+        - id: "{{ autobrr_freeleech_hdspace_indexer_id | int }}"
+      actions:
+        - name: "Push to qBittorrent (freeleech)"
+          type: "QBITTORRENT"
+          enabled: true
+          client_id: "{{ autobrr_qbittorrent_client_id | int }}"
+          category: "{{ autobrr_freeleech_category }}"
+          save_path: "{{ qbit_freeleech_save_path }}"
+          paused: false
+    status_code: [200]
+  changed_when: true
+  no_log: true
+  when:
+    - autobrr_api_key | default('') | length > 0
+    - not (freeleech_filter_exists | default(false) | bool)
+    - freeleech_filter_create is not skipped
+    - freeleech_filter_create.json is defined
+    - freeleech_filter_create.json.id is defined
+  tags: [seedbox]
+
+# OPS-356: autobrr per-filter max_downloads cap — rate-limits the freeleech grab firehose.
+# This section handles the case where the filter ALREADY EXISTS (freeleech_filter_exists=true).
+# For new filters, max_downloads is included in the step-2 PUT body above.
+# For existing filters: identify the filter ID, GET full details, PUT with updated cap.
+# Idempotent: only PUTs when current max_downloads differs from target.
+#
+# autobrr filter PUT requires the full body (no PATCH endpoint).
+# Strategy: GET full filter → combine() in new max_downloads fields → PUT back.
+# autobrr ignores read-only metadata fields (created_at, updated_at, actions_count)
+# returned by GET when they are included in PUT — confirmed idiomatic usage.
+
+- name: Identify freeleech filter ID (for max_downloads update on existing filter)
+  ansible.builtin.set_fact:
+    # If the filter was just created above, use the returned ID directly.
+    # If it already existed, look it up from the pre-fetched filters list.
+    autobrr_freeleech_filter_id: >-
+      {%- if not (freeleech_filter_exists | default(false) | bool) and
+              freeleech_filter_create is not skipped and
+              freeleech_filter_create.json is defined -%}
+        {{ freeleech_filter_create.json.id | string }}
+      {%- else -%}
+        {{
+          (autobrr_filters_raw.json | default([])
+          | selectattr('name', 'equalto', autobrr_freeleech_filter_name)
+          | list | first | default({})).id | default('') | string
+        }}
+      {%- endif -%}
+  when: autobrr_api_key | default('') | length > 0
+  tags: [seedbox]
+
+- name: Fetch freeleech filter full details (max_downloads idempotency check)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/filters/{{ autobrr_freeleech_filter_id }}"
+    method: GET
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+    return_content: true
+    status_code: [200, 404]
+  register: autobrr_fl_detail
+  when:
+    - autobrr_api_key | default('') | length > 0
+    - autobrr_freeleech_filter_id | default('') | length > 0
+    # Only needed for existing filters — new filters already have max_downloads set in step 2 above
+    - freeleech_filter_exists | default(false) | bool
+  tags: [seedbox]
+
+- name: Apply max_downloads cap to existing freeleech filter (OPS-356)
+  # Explicit reconstruct: only sends fields we intend to write (consistent with step-2 task above).
+  # Avoids forwarding read-only metadata from the GET response back to PUT, which could trigger
+  # validation failures if autobrr tightens its API (Go DisallowUnknownFields).
+  # Action ID is extracted from the GET response to avoid creating duplicate actions.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ autobrr_port }}/api/filters/{{ autobrr_freeleech_filter_id }}"
+    method: PUT
+    headers:
+      X-API-Token: "{{ autobrr_api_key }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      id: "{{ autobrr_freeleech_filter_id | int }}"
+      name: "{{ autobrr_freeleech_filter_name }}"
+      enabled: true
+      priority: 40
+      freeleech: true
+      resolutions:
+        - "2160p"
+        - "1080p"
+      match_categories: "{{ autobrr_freeleech_match_categories }}"
+      except_releases: "*NUKED*,*-CAM*,*-TS*,*-WEB-CAM*,*HDTC*"
+      announce_types:
+        - "NEW"
+      max_downloads: "{{ autobrr_freeleech_max_downloads | int }}"
+      max_downloads_unit: "{{ autobrr_freeleech_max_downloads_unit }}"
+      codecs: []
+      sources: []
+      containers: []
+      match_hdr: []
+      except_hdr: []
+      match_other: []
+      except_other: []
+      formats: []
+      quality: []
+      media: []
+      match_language: []
+      except_language: []
+      origins: []
+      except_origins: []
+      release_types_ignore: []
+      indexers:
+        - id: "{{ autobrr_freeleech_iptorrents_indexer_id | int }}"
+        - id: "{{ autobrr_freeleech_hdspace_indexer_id | int }}"
+      actions:
+        - id: "{{ (autobrr_fl_detail.json.actions | default([{}]) | first).id | default(0) | int }}"
+          name: "Push to qBittorrent (freeleech)"
+          type: "QBITTORRENT"
+          enabled: true
+          client_id: "{{ autobrr_qbittorrent_client_id | int }}"
+          category: "{{ autobrr_freeleech_category }}"
+          save_path: "{{ qbit_freeleech_save_path }}"
+          paused: false
+    status_code: [200]
+  changed_when: true
+  no_log: true
+  when:
+    - autobrr_api_key | default('') | length > 0
+    - autobrr_freeleech_filter_id | default('') | length > 0
+    - freeleech_filter_exists | default(false) | bool
+    - autobrr_fl_detail is defined
+    - autobrr_fl_detail is not skipped
+    - autobrr_fl_detail.status | default(0) == 200
+    - >-
+      (autobrr_fl_detail.json.max_downloads | default(0) | int) != (autobrr_freeleech_max_downloads | int)
+      or
+      (autobrr_fl_detail.json.actions | default([{}]) | first).save_path | default('') != qbit_freeleech_save_path
+  tags: [seedbox]
+
+# OPS-715: Wait for qBittorrent to be accepting connections before any API calls.
+# Root cause: gluetun must reach healthy state before qBit starts (service_healthy
+# dependency in docker-compose). After compose-up, qBit is not immediately reachable
+# — the API calls at task 661+ fire too early, causing "Connection reset by peer".
+# delay=10: gluetun needs a few seconds to init WireGuard; starting before that just
+# wastes retries. timeout=90: gluetun VPN establishment can take up to ~60s on a slow
+# ProtonVPN exit node; 90s gives headroom without hanging indefinitely.
+- name: Wait for qBittorrent port to be ready before API calls (OPS-715)
+  ansible.builtin.wait_for:
+    host: localhost
+    port: "{{ qbittorrent_port }}"
+    delay: 10
+    timeout: 90
+    state: started
+  tags: [seedbox]
+
+# OPS-356: qBit per-category save-path — isolate freeleech grabs from seeded library.
+# Sets the freeleech category's savePath to {{ qbit_freeleech_save_path }} inside qBit.
+# Container path: /data/torrents/freeleech (maps to /mnt/data/torrents/freeleech on host).
+# This ensures freeleech grabs cannot overwrite Sonarr/Radarr library files which land
+# in /data/torrents/radarr and /data/torrents/tv-sonarr (default category save paths).
+#
+# qBit API: POST /api/v2/torrents/editCategory (form-urlencoded).
+# Idempotent: qBit returns 200 whether it creates or updates the category.
+# Auth: qBit WebUI is accessible from localhost without credentials (no VPN bypass needed
+# since Ansible runs on the host, not inside the Docker bridge).
+- name: Set qBit freeleech category save-path (OPS-356 storage isolation)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ qbittorrent_port }}/api/v2/torrents/editCategory"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      category: "{{ autobrr_freeleech_category }}"
+      savePath: "{{ qbit_freeleech_save_path }}"
+    status_code: [200]
+  tags: [seedbox]
+
+# OPS-723: Configure qBit loopback bypass for cross-seed auth.
+# Root cause: cross-seed runs in the gluetun network namespace and connects to qBit via
+# localhost:8080. qBit defaults bypass_local_auth=False and the bypass_auth_subnet_whitelist
+# does not include 127.0.0.0/8, so all loopback connections require credentials. After
+# enough failed attempts, qBit's in-memory IP ban (web_ui_ban_duration=3600s) triggers on
+# 127.0.0.1, making even correct credentials fail until the ban expires.
+#
+# Two-layer fix:
+#   (1) bypass_local_auth=True   — loopback connections bypass all auth including IP ban
+#   (2) 127.0.0.0/8 in whitelist — belt-and-suspenders; also covers non-localhost loopback
+#
+# qBit API: POST /api/v2/app/setPreferences (form-urlencoded, json= key).
+# Idempotent: qBit merges the provided keys; unmentioned keys are unchanged.
+# Auth: Ansible runs on the host (192.168.12.69) which is in bypass_auth_subnet_whitelist
+# (192.168.12.0/24) so no session cookie is needed.
+- name: Configure qBit loopback bypass (OPS-723 — cross-seed auth fix)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ qbittorrent_port }}/api/v2/app/setPreferences"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      json: '{"bypass_local_auth":true,"bypass_auth_subnet_whitelist":"127.0.0.0/8\n192.168.12.0/24\n10.128.0.0/14\n172.19.0.0/16","bypass_auth_subnet_whitelist_enabled":true}'
+    status_code: [200]
+  tags: [seedbox]

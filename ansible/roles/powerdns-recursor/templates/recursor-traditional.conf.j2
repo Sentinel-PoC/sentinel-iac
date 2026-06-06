@@ -1,0 +1,54 @@
+# Ansible managed — sentinel-iac OPS-670/OPS-673/OPS-676
+# Traditional key=value format for pdns-recursor 4.9.x (Ubuntu 24.04 noble/universe)
+#
+# Galaxy role PowerDNS.pdns_recursor writes YAML format to recursor.yml (directed
+# there by pdns_rec_config_file: recursor.yml in tasks/main.yml). pdns-recursor
+# 4.9.x reads recursor.conf in traditional key=value format only; recursor.yml
+# (YAML tech-preview) was not compiled into 4.9.3-1build3.Ubuntu.
+# This template writes the authoritative traditional-format config.
+#
+# OPS-676 Root Cause #1: dont-query=127.0.0.0/8 (default) blocks forward-zones
+#   queries to 127.0.0.1:{{ pdns_rec_svc_auth_port }} (local auth) -> SERVFAIL.
+#   Fix: set dont-query explicitly, omitting 127.0.0.0/8.
+#
+# OPS-676 Root Cause #2: DNSSEC validation enabled (default) but haist.farm zone
+#   has no RRSIG records. Recursor marks response "Bogus - No RRSIG" -> SERVFAIL.
+#   Fix: dnssec=off — internal/private zone; DNSSEC signing is out of scope.
+#
+# Reference settings for 4.9.x:
+#   local-address     — IP(s) to listen on (port 53 is default)
+#   allow-from        — CIDRs permitted to send queries
+#   dont-query        — Addresses recursor will not query (overrides default)
+#   dnssec            — DNSSEC validation mode: off/process-no-validate/process/validate
+#   forward-zones     — zone=ip:port (authoritative only, no recursion)
+#   forward-zones-recurse — zone=ip1;ip2 (recursive forwarding)
+
+# Listen on the LXC's main interface IP
+local-address={{ pdns_rec_svc_listen_addresses | join(',') }}
+
+# Allow queries from RFC1918 + loopback (LAN-facing resolver)
+allow-from={{ pdns_rec_svc_allow_from | join(',') }}
+
+# Override dont-query to allow forwarding to local auth at 127.0.0.1:{{ pdns_rec_svc_auth_port }}
+# Default dont-query includes 127.0.0.0/8 — this blocks forward-zones to loopback.
+# All other RFC1918/reserved ranges retained. 127.0.0.0/8 intentionally omitted.
+dont-query={{ pdns_rec_svc_dont_query | join(',') }}
+
+# Disable DNSSEC validation — internal zone has no signatures (OPS-676 Root Cause #2)
+# haist.farm is a private/internal zone; DNSSEC validation would cause SERVFAIL
+# for all internal lookups since no RRSIG records are present.
+dnssec=off
+
+# Forward internal zones to local auth server (non-recursive)
+{% set _fw = [] %}
+{% for zone in pdns_rec_svc_internal_zones %}
+{% set _ = _fw.append(zone ~ '=' ~ pdns_rec_svc_auth_address ~ ':' ~ (pdns_rec_svc_auth_port | string)) %}
+{% endfor %}
+forward-zones={{ _fw | join(',') }}
+
+# Forward all other queries recursively to upstream resolvers
+forward-zones-recurse=.={{ pdns_rec_svc_upstream_resolvers | join(';') }}
+
+# Logging
+quiet=yes
+log-common-errors=yes

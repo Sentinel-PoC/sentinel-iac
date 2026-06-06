@@ -1,0 +1,142 @@
+---
+# tasks/main.yml — forgejo-runner-pool (OPS-582)
+#
+# Provision 3 CI runner LXCs on pve4-alienware (192.168.12.60).
+# Pattern mirrors roles/ha-lxc and roles/pve4-nvidia-gpu.
+# All pct commands run directly on the PVE host (ansible target = pve4-alienware root).
+#
+# Upstream references:
+#   Forgejo runner admin guide:   https://forgejo.org/docs/next/admin/actions/
+#   Runner registration:          https://forgejo.org/docs/next/admin/actions/registration/
+#   Binary + README:              https://code.forgejo.org/forgejo/runner
+#
+# Execution order:
+#   1. lxc_provision.yml   — create LXC containers (idempotent)
+#   1.5 etc_hosts.yml      — Pangolin-bypass /etc/hosts pins (OPS-774)
+#   2. docker_install.yml  — install Docker CE inside each LXC
+#   2b. nodejs_install.yml — install Node.js 20 LTS inside each LXC (OPS-763)
+#   3. runner_install.yml  — download + install forgejo-runner binary inside each LXC
+#   4. runner_register.yml — register runner with Forgejo (requires Vault tokens)
+#   5. verify.yml          — acceptance checks
+
+- name: Bail out if forgejo_runner_pool_enabled is false
+  ansible.builtin.meta: end_play
+  when: not (forgejo_runner_pool_enabled | bool)
+  tags: [always]
+
+# ── Phase 1: LXC provisioning ─────────────────────────────────────────────────
+- name: Provision runner LXC containers
+  ansible.builtin.import_tasks: lxc_provision.yml
+  tags:
+    - forgejo-runner-pool
+    - lxc
+    - provision
+
+# ── Phase 1.5: /etc/hosts Pangolin-bypass pins ────────────────────────────────
+# Must run after LXC provisioning (LXC must exist) and before Docker/runner install
+# (runner needs correct DNS routing to register with Forgejo).
+# Managed by: defaults/main.yml → forgejo_runner_etc_hosts_pins
+- name: Apply Pangolin-bypass /etc/hosts pins in runner LXCs
+  ansible.builtin.import_tasks: etc_hosts.yml
+  tags:
+    - forgejo-runner-pool
+    - etc-hosts
+
+# ── Phase 2: Docker CE inside each LXC ────────────────────────────────────────
+- name: Install Docker CE inside runner LXCs
+  ansible.builtin.import_tasks: docker_install.yml
+  tags:
+    - forgejo-runner-pool
+    - docker
+
+# ── Phase 2b: Node.js 20 LTS inside each LXC ─────────────────────────────────
+- name: Install Node.js 20 LTS inside runner LXCs
+  ansible.builtin.import_tasks: nodejs_install.yml
+  tags:
+    - forgejo-runner-pool
+    - nodejs
+
+# ── Phase 3: forgejo-runner binary ────────────────────────────────────────────
+- name: Install forgejo-runner binary inside each LXC
+  ansible.builtin.import_tasks: runner_install.yml
+  tags:
+    - forgejo-runner-pool
+    - runner-install
+
+# ── Phase 3.5: CI tooling parity ─────────────────────────────────────────────
+# Installs semgrep, checkov, bandit, ansible-lint in each LXC to match
+# iac-control's supply-chain tooling (OPS-780). Required by security-scan.yml.
+- name: Install CI security-scan tools in runner LXCs
+  ansible.builtin.import_tasks: ci_tooling.yml
+  tags:
+    - forgejo-runner-pool
+    - ci-tooling
+
+# ── Phase 4: Registration ─────────────────────────────────────────────────────
+- name: Register runners with Forgejo instance
+  ansible.builtin.import_tasks: runner_register.yml
+  tags:
+    - forgejo-runner-pool
+    - runner-register
+
+# ── Phase 4.5: Relabel — remove stale buildah label from .runner files ────────
+# OPS-1026: pve4 LXC runners cannot create UDP sockets (unprivileged LXC), so
+# buildah jobs dispatched to them fail immediately. The buildah label was added
+# out-of-band during OPS-913; IaC defaults do not include it. This task removes
+# the stale label from each runner's .runner file and restarts the service so the
+# Forgejo DB agent_labels column self-corrects on runner reconnect.
+# Run standalone: ansible-playbook ... --tags runner-relabel
+#
+# NOTE OPS-1136: The root cause (AppArmor blocks UDP + subuid UID mapping) is now
+# fixed by Phase 4.6 below. The buildah label has been added BACK to defaults/main.yml.
+# This relabel task is now a no-op (buildah is in the labels, so there is nothing
+# to remove). It is retained for idempotency/audit: running it on an old build
+# that has buildah out-of-band is still safe.
+- name: Remove stale buildah label from pve4 runner .runner files
+  ansible.builtin.import_tasks: runner_relabel.yml
+  tags:
+    - forgejo-runner-pool
+    - runner-relabel
+
+# ── Phase 4.6: buildah AppArmor + storage fix ─────────────────────────────────
+# OPS-1136: Ubuntu 24.04 AppArmor 4.0 enforce-mode profile blocks AF_INET UDP
+# socket creation for the buildah process. Fix: AppArmor local override adds
+# network inet, + containers storage.conf sets ignore_chown_errors.
+# After this phase, pve4 runners can pick up runs-on: buildah jobs.
+- name: Apply buildah AppArmor + storage fixes in runner LXCs
+  ansible.builtin.import_tasks: buildah_fix.yml
+  tags:
+    - forgejo-runner-pool
+    - buildah
+    - buildah-fix
+
+# ── Phase 4.7: syft + cosign binaries ─────────────────────────────────────────
+# OPS-1139: Install syft (v1.21.0) and cosign (v2.4.3) on all 6 buildah-labeled
+# runner LXCs to match iac-control. Without these binaries, every build that
+# lands on a pve4 runner fails at the shared security-scan composite action
+# (syft not found) and produces unsigned images (cosign not found).
+# cosign key material comes via ${{ secrets.COSIGN_KEY }} Forgejo secret at
+# job time — only the binaries are needed on the runner filesystem.
+# Supports SEC-87 (sign-everything supply-chain directive).
+- name: Install syft + cosign binaries in runner LXCs
+  ansible.builtin.import_tasks: syft_cosign_install.yml
+  tags:
+    - forgejo-runner-pool
+    - syft-cosign
+
+# ── Phase 5: Watchdog — RESULT_CANCELLED auto-recovery timer ─────────────────
+# Deploys forgejo-runner-watchdog.sh + systemd timer (every 5 min) inside each LXC.
+# Detects RESULT_CANCELLED/RESULT_UNSPECIFIED desync and auto-restarts runner.
+# Defense-in-depth after OPS-773/774 root-cause fix (Pangolin-bypass).
+- name: Deploy forgejo-runner watchdog timer in LXCs
+  ansible.builtin.import_tasks: watchdog.yml
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+# ── Phase 6: Verification ─────────────────────────────────────────────────────
+- name: Verify runner pool acceptance criteria
+  ansible.builtin.import_tasks: verify.yml
+  tags:
+    - forgejo-runner-pool
+    - verify

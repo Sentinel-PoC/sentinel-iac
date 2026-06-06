@@ -1,0 +1,42 @@
+---
+# zeek-nids/tasks/main.yml — entry point
+# OPS-568: Zeek standalone NIDS + JA3/JA4 + Wazuh forwarder
+# All sub-tasks are idempotent (stat-guarded, creates:, or package state=present).
+
+- name: Install Zeek and prerequisites
+  ansible.builtin.import_tasks: install.yml
+  tags:
+    - zeek
+    - zeek-install
+    - nids
+
+- name: Configure Zeek (node.cfg, zeekctl.cfg, local.zeek, JSON logging)
+  ansible.builtin.import_tasks: configure.yml
+  tags:
+    - zeek
+    - zeek-config
+    - nids
+
+- name: Configure JA3/JA4 TLS intel framework
+  ansible.builtin.import_tasks: intel.yml
+  tags:
+    - zeek
+    - zeek-intel
+    - ja3
+    - ja4
+    - nids
+
+- name: Configure Wazuh agent for Zeek log forwarding
+  ansible.builtin.import_tasks: wazuh.yml
+  tags:
+    - zeek
+    - zeek-wazuh
+    - wazuh
+    - nids
+
+- name: Configure Zeek log rotation
+  ansible.builtin.import_tasks: logrotate.yml
+  tags:
+    - zeek
+    - zeek-logrotate
+    - nids

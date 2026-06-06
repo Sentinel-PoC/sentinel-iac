@@ -1,0 +1,16 @@
+storage "file" {
+  path = "/vault/data"
+}
+
+# SEC-89: TLS enabled — static self-signed cert (no Vault-PKI dependency;
+# this vault unseals prod Vault, so it sits below prod Vault's PKI in the
+# trust chain and cannot use prod-Vault-issued certs).
+# Cert path is relative to /vault/config (the bind-mount of vault_unseal_config_dir).
+listener "tcp" {
+  address       = "0.0.0.0:8200"
+  tls_cert_file = "/vault/config/tls/cert.pem"
+  tls_key_file  = "/vault/config/tls/key.pem"
+}
+
+disable_mlock = true
+ui = false

@@ -1,0 +1,52 @@
+---
+name: Terraform
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/managed/**'
+      - 'infrastructure/modules/**'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform (plan or apply)'
+        required: true
+        default: 'plan'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+  TF_VAR_proxmox_api_token: "${{ secrets.PROXMOX_API_TOKEN }}=${{ secrets.PROXMOX_TOKEN_SECRET }}"
+
+jobs:
+  managed-plan:
+    runs-on: iac
+    steps:
+      - uses: actions/checkout@v4
+      - name: Terraform plan
+        run: |
+          echo "Planning Managed Infrastructure with OpenTofu..."
+          cd infrastructure/managed
+          tofu init
+          tofu validate
+          EXIT_CODE=0
+          tofu plan -detailed-exitcode || EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 1 ]; then echo "Plan failed"; exit 1; fi
+          if [ $EXIT_CODE -eq 2 ]; then echo "Changes detected"; fi
+
+  managed-apply:
+    runs-on: iac
+    needs: managed-plan
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Terraform apply
+        run: |
+          echo "Applying Managed Infrastructure with OpenTofu..."
+          cd infrastructure/managed
+          tofu init
+          tofu apply -auto-approve

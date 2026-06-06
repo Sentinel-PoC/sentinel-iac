@@ -1,0 +1,24 @@
+---
+# handlers/main.yml — forgejo-runner-pool (OPS-582)
+# Handlers fire at end of play if notified during a task loop.
+
+- name: Daemon-reload
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- systemctl daemon-reload"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  changed_when: false
+  listen: daemon-reload
+
+- name: Restart forgejo-runner
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- systemctl restart forgejo-runner"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  changed_when: false
+  listen: restart forgejo-runner
+
+- name: Restart docker
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- systemctl restart docker"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  changed_when: false
+  listen: restart docker

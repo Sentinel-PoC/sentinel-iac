@@ -1,0 +1,336 @@
+---
+# OPS-232: Backstage catalog validation composite action
+# L1 pre-merge soft gate — schema-lint + catalog-API registration check.
+#
+# Step 1: ajv validate catalog-info.yaml against JSON-schema
+#   tooling/catalog-schema/schema.json (from OPS-230 / OPS-227 child B).
+# Step 2: Query Backstage catalog API to verify entity is registered.
+#   404 → fail-warn (not hard-fail); 200 → pass.
+#   Mode: soft-fail initially. Flip to hard-fail in OPS-227 child F.
+#
+# Usage:
+#   - uses: ./.forgejo/actions/backstage-validate
+#     with:
+#       catalog-file: catalog-info.yaml            # optional, default shown
+#       schema-file: tooling/catalog-schema/schema.json  # optional, default shown
+#       backstage-url: https://backstage.208.haist.farm  # optional, default shown
+#       backstage-token: ${{ secrets.BACKSTAGE_API_TOKEN }}  # required for API check
+#       soft-fail: "true"                          # optional, default true
+#
+# Blocked-by: OPS-216 PR (Forgejo catalog ingestion) + OPS-230 (schema.json).
+# Both are Done as of 2026-05-22/2026-05-24.
+
+name: "Backstage Catalog Validate"
+description: >
+  Schema-lint catalog-info.yaml against JSON-schema (ajv), then verify
+  the entity is registered in Backstage catalog API. Soft-fail mode:
+  schema failures are hard errors; API 404 is a warning (OPS-232).
+
+inputs:
+  catalog-file:
+    description: "Path to catalog-info.yaml relative to repo root"
+    required: false
+    default: "catalog-info.yaml"
+
+  schema-file:
+    description: "Path to JSON-schema file relative to repo root"
+    required: false
+    default: "tooling/catalog-schema/schema.json"
+
+  backstage-url:
+    description: "Backstage base URL"
+    required: false
+    default: "https://backstage.208.haist.farm"
+
+  backstage-token:
+    description: "Backstage API bearer token (from Forgejo secret BACKSTAGE_API_TOKEN)"
+    required: false
+    default: ""
+
+  soft-fail:
+    description: >
+      When 'true', Backstage API failures (404, unreachable) are warnings not errors.
+      Schema validation failures are always hard errors regardless of this flag.
+      Set to 'false' in OPS-227 child F to flip API check to hard-fail.
+    required: false
+    default: "true"
+
+outputs:
+  schema-result:
+    description: "Schema validation result: pass or fail"
+    value: ${{ steps.schema-lint.outputs.schema_result }}
+  api-result:
+    description: "Backstage API check result: pass, warn, or skip"
+    value: ${{ steps.api-check.outputs.api_result }}
+
+runs:
+  using: "composite"
+  steps:
+    # ---------------------------------------------------------------
+    # STEP 1: Schema-lint catalog-info.yaml via ajv-cli
+    #
+    # Validates each YAML document in catalog-info.yaml against the
+    # JSON schema at tooling/catalog-schema/schema.json (OPS-230).
+    #
+    # ajv-cli is preferred if installed globally on runner.
+    # Falls back to npx ajv-cli@5 (no install, uses cached npx).
+    # The schema uses JSON Schema 2020-12; ajv v8 (ajv-cli v5) required.
+    # ---------------------------------------------------------------
+    - name: Schema-lint catalog-info.yaml
+      id: schema-lint
+      shell: bash
+      env:
+        CATALOG_FILE: ${{ inputs.catalog-file }}
+        SCHEMA_FILE: ${{ inputs.schema-file }}
+      run: |
+        set -euo pipefail
+        echo "=== OPS-232 Step 1: Schema-lint ${CATALOG_FILE} ==="
+
+        if [ ! -f "${CATALOG_FILE}" ]; then
+          echo "::notice::${CATALOG_FILE} not found — skipping schema-lint (repo has no catalog entity)"
+          echo "schema_result=skip" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        if [ ! -f "${SCHEMA_FILE}" ]; then
+          echo "::error::Schema file ${SCHEMA_FILE} not found. OPS-230 deliverable missing — check tooling/catalog-schema/schema.json"
+          echo "schema_result=fail" >> "${GITHUB_OUTPUT}"
+          exit 1
+        fi
+
+        # Convert YAML to JSON for ajv (ajv-cli v5 accepts YAML directly with --spec=draft2020)
+        # but converting is more reliable across environments.
+        # Use python3 (available on all iac runners via iac-control role).
+        echo "Converting ${CATALOG_FILE} YAML documents to JSON for ajv..."
+
+        # catalog-info.yaml may contain multiple YAML documents separated by ---
+        # We validate each document individually. Extract each document, convert, validate.
+        python3 - <<'PYEOF'
+        import sys, os, json, subprocess, tempfile
+
+        catalog_file = os.environ["CATALOG_FILE"]
+        schema_file = os.environ["SCHEMA_FILE"]
+
+        # Read and split YAML documents
+        with open(catalog_file, "r") as f:
+            content = f.read()
+
+        # Split on YAML document separators
+        import re
+        docs_raw = re.split(r"^\s*---\s*$", content, flags=re.MULTILINE)
+        docs_raw = [d.strip() for d in docs_raw if d.strip()]
+        print(f"Found {len(docs_raw)} YAML document(s) in {catalog_file}")
+
+        try:
+            import yaml
+        except ImportError:
+            # Install pyyaml if not present (iac runner has it, but be defensive)
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "pyyaml"], check=True)
+            import yaml
+
+        # Determine ajv binary
+        ajv_cmd = None
+        for candidate in ["ajv", "ajv-cli"]:
+            try:
+                result = subprocess.run([candidate, "--version"], capture_output=True)
+                if result.returncode == 0:
+                    ajv_cmd = [candidate]
+                    print(f"Using ajv binary: {candidate} ({result.stdout.decode().strip()})")
+                    break
+            except FileNotFoundError:
+                pass
+
+        if ajv_cmd is None:
+            # Fallback: npx ajv-cli@5 (JSON Schema 2020-12 support)
+            print("ajv not installed globally — using npx ajv-cli@5")
+            ajv_cmd = ["npx", "--yes", "ajv-cli@5"]
+
+        failures = []
+        for i, doc_raw in enumerate(docs_raw):
+            try:
+                doc = yaml.safe_load(doc_raw)
+            except yaml.YAMLError as e:
+                print(f"::error::Document {i+1}: YAML parse error: {e}", file=sys.stderr)
+                failures.append(f"document-{i+1}: YAML parse error")
+                continue
+
+            if not isinstance(doc, dict):
+                print(f"Document {i+1}: skipping non-mapping YAML ({type(doc).__name__})")
+                continue
+
+            kind = doc.get("kind", "unknown")
+            name = doc.get("metadata", {}).get("name", "unknown")
+            print(f"Document {i+1}: kind={kind} name={name}")
+
+            # Write document to temp JSON file
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
+                json.dump(doc, tf)
+                tf_path = tf.name
+
+            try:
+                cmd = ajv_cmd + [
+                    "validate",
+                    "-s", schema_file,
+                    "-d", tf_path,
+                    "--spec=draft2020",
+                    "--strict=false",
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode == 0:
+                    print(f"  PASS: {kind}/{name}")
+                else:
+                    print(f"  FAIL: {kind}/{name}")
+                    print(f"  ajv stdout: {result.stdout}")
+                    print(f"  ajv stderr: {result.stderr}")
+                    failures.append(f"{kind}/{name}: {result.stdout.strip() or result.stderr.strip()}")
+                    print(f"::error::Schema validation failed for {kind}/{name} in {catalog_file}")
+            finally:
+                os.unlink(tf_path)
+
+        if failures:
+            print(f"\nSchema-lint FAILED: {len(failures)} document(s) failed validation")
+            for f in failures:
+                print(f"  - {f}")
+            sys.exit(1)
+        else:
+            print(f"\nSchema-lint PASSED: all {len(docs_raw)} document(s) valid")
+        PYEOF
+
+        echo "schema_result=pass" >> "${GITHUB_OUTPUT}"
+        echo "=== Schema-lint PASSED ==="
+
+    # ---------------------------------------------------------------
+    # STEP 2: Backstage catalog API registration check
+    #
+    # Queries GET /api/catalog/entities/by-name/{kind}/{namespace}/{name}
+    # for each entity in catalog-info.yaml.
+    # 404 → fail-warn (::warning:: annotation, not error) per OPS-232 spec.
+    # 200 → pass.
+    # Requires BACKSTAGE_API_TOKEN Forgejo secret; skips gracefully if absent.
+    # ---------------------------------------------------------------
+    - name: Backstage catalog API check
+      id: api-check
+      shell: bash
+      env:
+        CATALOG_FILE: ${{ inputs.catalog-file }}
+        BACKSTAGE_URL: ${{ inputs.backstage-url }}
+        BACKSTAGE_TOKEN: ${{ inputs.backstage-token }}
+        SOFT_FAIL: ${{ inputs.soft-fail }}
+      run: |
+        set -euo pipefail
+        echo "=== OPS-232 Step 2: Backstage catalog API check ==="
+
+        if [ ! -f "${CATALOG_FILE}" ]; then
+          echo "::notice::${CATALOG_FILE} not found — skipping API check"
+          echo "api_result=skip" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        if [ -z "${BACKSTAGE_TOKEN}" ]; then
+          echo "::warning::BACKSTAGE_API_TOKEN secret not set — skipping catalog API check. Provision secret to enable."
+          echo "api_result=skip" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        python3 - <<'PYEOF'
+        import sys, os, json, re
+        import urllib.request, urllib.error
+
+        catalog_file = os.environ["CATALOG_FILE"]
+        backstage_url = os.environ["BACKSTAGE_URL"].rstrip("/")
+        token = os.environ["BACKSTAGE_TOKEN"]
+        soft_fail = os.environ.get("SOFT_FAIL", "true").lower() == "true"
+
+        try:
+            import yaml
+        except ImportError:
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "pyyaml"], check=True)
+            import yaml
+
+        with open(catalog_file, "r") as f:
+            content = f.read()
+
+        docs_raw = re.split(r"^\s*---\s*$", content, flags=re.MULTILINE)
+        docs_raw = [d.strip() for d in docs_raw if d.strip()]
+
+        warnings = []
+        for i, doc_raw in enumerate(docs_raw):
+            try:
+                doc = yaml.safe_load(doc_raw)
+            except yaml.YAMLError:
+                continue
+            if not isinstance(doc, dict):
+                continue
+
+            kind = doc.get("kind", "")
+            if kind not in ("Component", "Resource", "API", "System", "Group", "User"):
+                print(f"Document {i+1}: kind={kind} — skipping API check (Location/unknown kinds not indexed)")
+                continue
+
+            namespace = doc.get("metadata", {}).get("namespace", "default")
+            name = doc.get("metadata", {}).get("name", "")
+            if not name:
+                continue
+
+            url = f"{backstage_url}/api/catalog/entities/by-name/{kind}/{namespace}/{name}"
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            print(f"Checking: {kind}/{namespace}/{name}")
+            print(f"  URL: {url}")
+
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    status = resp.status
+                    if status == 200:
+                        print(f"  PASS: Entity registered in Backstage catalog (HTTP 200)")
+                    else:
+                        msg = f"  Unexpected HTTP {status} for {kind}/{namespace}/{name}"
+                        print(msg)
+                        warnings.append(msg)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    msg = f"{kind}/{namespace}/{name} not registered in Backstage catalog (HTTP 404) — entity exists in repo but not ingested yet"
+                    print(f"  WARN: {msg}")
+                    print(f"::warning::{msg}. Check Backstage catalog ingestion (OPS-216). This is a soft-fail gate per OPS-232.")
+                    warnings.append(msg)
+                elif e.code == 401:
+                    msg = f"Backstage API returned 401 for {kind}/{namespace}/{name} — BACKSTAGE_API_TOKEN may be invalid or expired"
+                    print(f"  WARN: {msg}")
+                    print(f"::warning::{msg}")
+                    warnings.append(msg)
+                else:
+                    msg = f"Backstage API returned HTTP {e.code} for {kind}/{namespace}/{name}: {e.reason}"
+                    print(f"  WARN: {msg}")
+                    print(f"::warning::{msg}")
+                    warnings.append(msg)
+            except OSError as e:
+                msg = f"Backstage API unreachable for {kind}/{namespace}/{name}: {e}"
+                print(f"  WARN: {msg}")
+                print(f"::warning::{msg}. Backstage may be down or the runner cannot reach {backstage_url}")
+                warnings.append(msg)
+
+        if warnings:
+            print(f"\nBackstage API check: {len(warnings)} warning(s)")
+            for w in warnings:
+                print(f"  - {w}")
+            if not soft_fail:
+                print("soft-fail=false: treating Backstage API warnings as errors (OPS-227 child F mode)")
+                sys.exit(1)
+            else:
+                print("soft-fail=true: warnings logged, not failing build (flip to false in OPS-227 child F)")
+                # Write api_result=warn to output — exit 0 so build continues
+                with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+                    f.write("api_result=warn\n")
+                sys.exit(0)
+        else:
+            print(f"\nBackstage API check PASSED: all entities registered")
+            with open(os.environ.get("GITHUB_OUTPUT", "/dev/null"), "a") as f:
+                f.write("api_result=pass\n")
+        PYEOF
+
+        # If GITHUB_OUTPUT wasn't written by the python block (e.g. skip case already set),
+        # ensure we have a default
+        if ! grep -q "api_result=" "${GITHUB_OUTPUT:-/dev/null}" 2>/dev/null; then
+          echo "api_result=pass" >> "${GITHUB_OUTPUT}"
+        fi
+        echo "=== Backstage API check complete ==="

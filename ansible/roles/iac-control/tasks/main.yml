@@ -1,0 +1,575 @@
+---
+# iac-control role - main tasks
+# Configures HAProxy, Squid, dnsmasq, iptables, netplan, IP forwarding
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name: "{{ required_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - iac-control
+    - packages
+
+# OPS-229: iptables-persistent + netfilter-persistent conflict with UFW
+# (apt auto-removes UFW when installing them, and vice versa). UFW is the
+# intended manager on iac-control — ensure the conflicting packages are
+# absent so the ping-pong stops.
+- name: Remove conflicting iptables-persistent packages (OPS-229)
+  ansible.builtin.apt:
+    name:
+      - iptables-persistent
+      - netfilter-persistent
+    state: absent
+    purge: true
+  tags:
+    - iac-control
+    - packages
+
+- name: Deploy HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "haproxy -c -f %s"
+  notify: Restart haproxy
+  tags:
+    - iac-control
+    - haproxy
+
+- name: Enable and start HAProxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: started
+    enabled: true
+  tags:
+    - iac-control
+    - haproxy
+
+- name: Deploy Squid configuration
+  ansible.builtin.template:
+    src: squid.conf.j2
+    dest: /etc/squid/squid.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart squid
+  tags:
+    - iac-control
+    - squid
+
+- name: Deploy Squid OKD egress allowlist
+  ansible.builtin.template:
+    src: okd-egress-allowlist.txt.j2
+    dest: /etc/squid/okd-egress-allowlist.txt
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart squid
+  tags:
+    - iac-control
+    - squid
+
+- name: Enable and start Squid
+  ansible.builtin.systemd:
+    name: squid
+    state: started
+    enabled: true
+  tags:
+    - iac-control
+    - squid
+
+- name: Remove ubuntu-fan dnsmasq config (conflicts with bind-dynamic)
+  ansible.builtin.file:
+    path: /etc/dnsmasq.d/ubuntu-fan
+    state: absent
+  notify: Restart dnsmasq
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Deploy dnsmasq configuration
+  ansible.builtin.template:
+    src: dnsmasq-overwatch.conf.j2
+    dest: /etc/dnsmasq.d/overwatch.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Deploy Sentinel services DNS configuration (SC-7(16))
+  ansible.builtin.template:
+    src: dnsmasq-sentinel-services.conf.j2
+    dest: /etc/dnsmasq.d/sentinel-services.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - iac-control
+    - dnsmasq
+    - nist-sc-7
+
+# OPS-492: Platform host overrides via addn-hosts
+# addn-hosts takes precedence over address= wildcards (dnsmasq first-match behavior).
+# New PVE/standalone hosts that are NOT behind Pangolin must be added to
+# dnsmasq_platform_hosts in defaults/main.yml.
+- name: Deploy platform-hosts addn-hosts directive (OPS-492)
+  ansible.builtin.copy:
+    content: |
+      # {{ ansible_managed | default('Managed by Ansible — do not edit manually') }}
+      # OPS-492: Platform-specific host overrides via addn-hosts
+      # addn-hosts entries take precedence over address= wildcards
+      addn-hosts=/etc/dnsmasq-platform-hosts
+    dest: /etc/dnsmasq.d/platform-hosts.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Deploy platform hosts file for dnsmasq addn-hosts (OPS-492)
+  ansible.builtin.template:
+    src: dnsmasq-platform-hosts.j2
+    dest: /etc/dnsmasq-platform-hosts
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Create dnsmasq override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/dnsmasq.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Deploy dnsmasq wait-for-ens19 override
+  ansible.builtin.template:
+    src: wait-for-ens19.conf.j2
+    dest: /etc/systemd/system/dnsmasq.service.d/wait-for-ens19.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart dnsmasq
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Enable and start dnsmasq
+  ansible.builtin.systemd:
+    name: dnsmasq
+    state: started
+    enabled: true
+  tags:
+    - iac-control
+    - dnsmasq
+
+- name: Deploy IP forwarding sysctl
+  ansible.builtin.template:
+    src: 99-ip-forward.conf.j2
+    dest: /etc/sysctl.d/99-ip-forward.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: sysctl_result
+  tags:
+    - iac-control
+    - networking
+
+- name: Apply sysctl changes
+  # noqa no-handler — sysctl must apply immediately; iac-control play has many
+  # subsequent networking tasks that rely on the new kernel parameters being active.
+  # Deferring to a handler would leave sysctl unapplied until end-of-play.
+  ansible.builtin.command:
+    cmd: sysctl --system
+  when: sysctl_result.changed
+  changed_when: true
+  tags:
+    - iac-control
+    - networking
+
+- name: Deploy netplan secondary interface
+  ansible.builtin.template:
+    src: 99-ens19.yaml.j2
+    dest: /etc/netplan/99-ens19.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Apply netplan
+  tags:
+    - iac-control
+    - networking
+
+# OPS-445: Ansible takes ownership of the primary interface netplan from cloud-init.
+# Adds okd_api_vip (.223) and okd_apps_vip (.224) alongside the management IP (.210).
+# HAProxy binds *:6443/*:443/*:80 and will answer on all three addresses.
+- name: Deploy netplan primary interface (eth0 with OKD VIPs)
+  ansible.builtin.template:
+    src: 50-eth0.yaml.j2
+    dest: /etc/netplan/50-cloud-init.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Apply netplan
+  tags:
+    - iac-control
+    - networking
+
+- name: Ensure /etc/iptables directory exists (for break-glass rules.v4 file)
+  # OPS-229: purging iptables-persistent removed this dir. The rules.v4
+  # file below is reference-backup only, but it needs a home.
+  ansible.builtin.file:
+    path: /etc/iptables
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - iac-control
+    - iptables
+
+- name: Deploy iptables rules (reference backup only — NOT loaded at boot)
+  # OPS-229: iptables-persistent has been removed from required_packages,
+  # so nothing loads /etc/iptables/rules.v4 automatically. Kept as a
+  # break-glass snapshot of the intended FORWARD chain — operator can
+  # `iptables-restore < /etc/iptables/rules.v4` during manual recovery.
+  ansible.builtin.template:
+    src: rules.v4.j2
+    dest: /etc/iptables/rules.v4
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - iac-control
+    - iptables
+
+# --- UFW firewall configuration ---
+# UFW manages the firewall on iac-control. FORWARD and NAT rules are
+# integrated into UFW's before.rules to persist across reboots.
+
+- name: Deploy UFW before.rules with OKD FORWARD and NAT rules
+  ansible.builtin.template:
+    src: ufw-before.rules.j2
+    dest: /etc/ufw/before.rules
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Reload ufw
+  tags:
+    - iac-control
+    - firewall
+    - egress
+
+- name: Allow HAProxy HTTPS ingress (port 443)
+  community.general.ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+    comment: "OKD Ingress HTTPS"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow HAProxy HTTP ingress (port 80)
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+    comment: "OKD Ingress HTTP"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow OKD API (port 6443)
+  community.general.ufw:
+    rule: allow
+    port: "6443"
+    proto: tcp
+    comment: "OKD API"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow OKD Machine Config Server (port 22623) from OKD node subnet only
+  community.general.ufw:
+    rule: allow
+    port: "22623"
+    proto: tcp
+    src: "10.0.0.0/24"
+    comment: "OKD MCS — OKD node subnet only (SEC-95)"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow DNS (port 53)
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    comment: "DNS"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow DHCP (port 67 UDP)
+  community.general.ufw:
+    rule: allow
+    port: "67"
+    proto: udp
+    comment: "DHCP"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow PXE nginx (port 8080)
+  community.general.ufw:
+    rule: allow
+    port: "8080"
+    proto: tcp
+    comment: "PXE nginx"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow Istio IngressGateway via HAProxy (port 8081)
+  community.general.ufw:
+    rule: allow
+    port: "8081"
+    proto: tcp
+    comment: "Istio IngressGateway"
+  tags:
+    - iac-control
+    - firewall
+
+# OPS-175: VRRP (IP protocol 112) cannot be expressed via `ufw` CLI —
+# `ufw allow proto 112` returns "Unsupported protocol '112'". The fix is raw
+# iptables rules in /etc/ufw/before.rules (ufw-before-input and
+# ufw-before-output) which ARE deployed by this role's ufw-before.rules.j2
+# template. No Ansible task needed here; the rules apply on ufw reload.
+
+- name: Allow Sentinel Matrix bot webhook (port 9095)
+  community.general.ufw:
+    rule: allow
+    port: "{{ matrix_bot_port }}"
+    proto: tcp
+    from_ip: "192.168.12.0/24"
+    comment: "Sentinel Matrix bot webhook"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow qBittorrent proxy for OKD arr stack (port 18080)
+  community.general.ufw:
+    rule: allow
+    port: "18080"
+    proto: tcp
+    from_ip: "10.0.0.0/24"
+    comment: "qBittorrent proxy for OKD arr stack"
+  tags:
+    - iac-control
+    - firewall
+
+
+- name: Allow Sentinel Prometheus scrape (port 9090)
+  community.general.ufw:
+    rule: allow
+    port: "9090"
+    proto: tcp
+    comment: "Prometheus"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow UniFi Prometheus exporter (port 9099)
+  community.general.ufw:
+    rule: allow
+    port: "9099"
+    proto: tcp
+    comment: "UniFi Prometheus"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow UniFi SNMP exporter (port 9120)
+  community.general.ufw:
+    rule: allow
+    port: "9120"
+    proto: tcp
+    comment: "UniFi exporter"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow Wazuh MCP Server from mgmt subnet (port 3000)
+  community.general.ufw:
+    rule: allow
+    port: "3000"
+    proto: tcp
+    from_ip: "192.168.12.0/24"
+    comment: "Wazuh MCP Server"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow Sentinel Matrix bot from OKD pods (port 9095)
+  community.general.ufw:
+    rule: allow
+    port: "9095"
+    proto: tcp
+    from_ip: "10.0.0.0/8"
+    comment: "OKD pods Matrix bot access"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow Docker Prometheus to wazuh-metrics-relay (port 9101)
+  community.general.ufw:
+    rule: allow
+    port: "9101"
+    proto: tcp
+    from_ip: "172.17.0.0/16"
+    comment: "Docker Prometheus to wazuh-metrics-relay"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow TFTP for PXE boot (port 69 UDP)
+  community.general.ufw:
+    rule: allow
+    port: "69"
+    proto: udp
+    comment: "TFTP for PXE boot"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow ProxyDHCP PXE follow-up (port 4011 UDP)
+  community.general.ufw:
+    rule: allow
+    port: "4011"
+    proto: udp
+    comment: "ProxyDHCP PXE follow-up"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow NBD Garuda PXE (port 10809)
+  community.general.ufw:
+    rule: allow
+    port: "10809"
+    proto: tcp
+    comment: "NBD Garuda PXE"
+  tags:
+    - iac-control
+    - firewall
+
+- name: Allow iSCSI Garuda PXE (port 3260)
+  community.general.ufw:
+    rule: allow
+    port: "3260"
+    proto: tcp
+    comment: "iSCSI Garuda PXE"
+  tags:
+    - iac-control
+    - firewall
+
+# OPS-352: SPIRE Server gRPC API (port 8444)
+# Port 8081 (SPIRE default) is occupied by Istio IngressGateway UFW rule;
+# remapped to 8444 to avoid host-level collision.
+# Tightened from LAN-wide 192.168.12.0/24 to specific SPIRE Agent hosts only (Phase 4.2).
+# Hosts defined in spire_agent_hosts (defaults/main.yml): .55, .210, .206
+- name: Allow SPIRE Server gRPC from specific agent hosts (port 8444)
+  community.general.ufw:
+    rule: allow
+    port: "{{ spire_server_host_port }}"
+    proto: tcp
+    from_ip: "{{ item }}"
+    comment: "SPIRE Server gRPC (OPS-352) — {{ item }}"
+  loop: "{{ spire_agent_hosts }}"
+  tags:
+    - iac-control
+    - firewall
+    - spire-server
+
+- name: Ensure UFW is enabled
+  community.general.ufw:
+    state: enabled
+  tags:
+    - iac-control
+    - firewall
+
+- name: Include keepalived configuration
+  ansible.builtin.include_tasks: keepalived.yml
+  tags:
+    - iac-control
+    - keepalived
+
+- name: Include NetBox sync configuration
+  ansible.builtin.include_tasks: netbox-sync.yml
+  tags:
+    - netbox
+
+- name: Include UniFi → NetBox drift detection (OPS-691)
+  ansible.builtin.include_tasks: unifi-netbox-drift.yml
+  tags:
+    - unifi-netbox-drift
+
+
+- name: Include additional service configuration
+  ansible.builtin.include_tasks: services.yml
+  tags:
+    - compliance
+    - services
+
+- name: Include platform timers (sentinel-agent, drift, compliance, vault, minio, harbor-sweep)
+  ansible.builtin.include_tasks: platform-timers.yml
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+- name: Include Docker services (vault-unseal, loki-stack, spire-server, spire-agent)
+  ansible.builtin.include_tasks: docker-services.yml
+  tags:
+    - docker-services
+    - vault-unseal
+    - loki
+    - spire-server
+    - spire-agent
+    - supply-chain
+
+- name: Include supply-chain tooling (syft, osv-scanner, cosign) — OPS-258
+  ansible.builtin.include_tasks: supply-chain-tooling.yml
+  tags:
+    - supply-chain-tooling
+
+- name: Include Forgejo runner binary management — OPS-319
+  ansible.builtin.include_tasks: forgejo-runner.yml
+  tags:
+    - forgejo-runner
+
+- name: Include kubeconfig drift cleanup — OPS-450 (idempotent)
+  ansible.builtin.include_tasks: kubeconfig-drift.yml
+  tags:
+    - kubeconfig-drift
+
+- name: Include Alertmanager dead-man switch (OPS-915)
+  ansible.builtin.include_tasks: alertmanager-deadman.yml
+  tags:
+    - alertmanager-deadman

@@ -1,0 +1,15 @@
+---
+- name: Restart seedbox
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ seedbox_dir }}"
+  changed_when: false
+  tags: [seedbox]
+
+# OPS-711: reload systemd after gluetun-watcher unit file changes
+- name: Reload systemd and restart gluetun-watcher
+  ansible.builtin.systemd:
+    name: gluetun-watcher
+    state: restarted
+    daemon_reload: true
+  tags: [seedbox]

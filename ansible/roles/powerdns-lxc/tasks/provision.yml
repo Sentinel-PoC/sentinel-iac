@@ -1,0 +1,234 @@
+---
+# tasks/provision.yml — OPS-673: Create PowerDNS nameserver LXC on Proxmox host
+# Pattern mirrors ha-lxc/tasks/lxc_provision.yml (OPS-585).
+# Targets: pve4-alienware (ns1, VMID 304) or pve3 (ns2, VMID 305) as root.  [ns1 migrated OPS-964]
+#
+# SSH bootstrap tasks (at end) allow subsequent Ansible plays (powerdns.yml)
+# to reach the LXC directly as ubuntu via key-based SSH.
+
+# ── Download Ubuntu 24.04 LXC template ────────────────────────────────────────
+
+- name: Update Proxmox template list (pveam update)
+  ansible.builtin.command:
+    cmd: pveam update
+  register: pveam_update
+  changed_when: "'No updates available' not in pveam_update.stdout"
+  failed_when: false
+  tags: [powerdns-lxc, lxc, template]
+
+- name: Check if Ubuntu 24.04 template is already downloaded
+  ansible.builtin.command:
+    cmd: "pveam list {{ pdns_lxc_template_storage }}"
+  register: pveam_list
+  changed_when: false
+  tags: [powerdns-lxc, lxc, template]
+
+- name: Download Ubuntu 24.04 LXC template if not present
+  ansible.builtin.command:
+    cmd: >
+      pveam download {{ pdns_lxc_template_storage }}
+      {{ pdns_lxc_ostemplate }}
+  when:
+    - pdns_lxc_ostemplate not in pveam_list.stdout
+    - not ansible_check_mode    # async + check_mode are incompatible — skip download in dry-runs
+  register: pveam_download
+  changed_when: true
+  async: 300
+  poll: 10
+  tags: [powerdns-lxc, lxc, template]
+
+# ── Create LXC (idempotent) ───────────────────────────────────────────────────
+
+- name: Check if PowerDNS LXC already exists
+  ansible.builtin.command:
+    cmd: "pct status {{ pdns_lxc_id }}"
+  register: lxc_exists
+  failed_when: false
+  changed_when: false
+  tags: [powerdns-lxc, lxc, create]
+
+- name: Create PowerDNS LXC container
+  # unprivileged=1: PowerDNS does not need Docker-in-LXC or elevated capabilities.
+  # Secure default — contrasts with ha-lxc (unprivileged=0) which runs Docker.
+  # onboot + startup ensure DNS survives PVE host reboots (critical for a nameserver).
+  # mountoptions=discard (OPS-1009): enables TRIM/UNMAP passthrough to LVM-thin so
+  # guest fstrim calls reclaim blocks in the thinpool.
+  ansible.builtin.command:
+    cmd: >
+      pct create {{ pdns_lxc_id }}
+      {{ pdns_lxc_template_storage }}:vztmpl/{{ pdns_lxc_ostemplate }}
+      --hostname {{ pdns_lxc_name }}
+      --cores {{ pdns_lxc_cores }}
+      --memory {{ pdns_lxc_memory }}
+      --swap {{ pdns_lxc_swap }}
+      --rootfs {{ pdns_lxc_rootfs_storage }}:{{ pdns_lxc_rootfs_size }},mountoptions={{ pdns_lxc_rootfs_mountoptions }}
+      --net0 name=eth0,bridge={{ pdns_lxc_bridge }},ip={{ pdns_lxc_ip }}/{{ pdns_lxc_cidr }},gw={{ pdns_lxc_gateway }}
+      --nameserver {{ pdns_lxc_nameserver }}
+      --searchdomain {{ pdns_lxc_searchdomain }}
+      --unprivileged {{ pdns_lxc_unprivileged }}
+      --onboot {{ pdns_lxc_onboot }}
+      --startup {{ pdns_lxc_startup }}
+      --start 0
+  when: lxc_exists.rc != 0
+  changed_when: lxc_exists.rc != 0
+  tags: [powerdns-lxc, lxc, create]
+
+- name: Ensure onboot and startup are set on existing LXC (idempotent)
+  # pct set is idempotent — Proxmox no-ops when values already match.
+  # This covers LXCs provisioned before this task existed (onboot omitted).
+  ansible.builtin.command:
+    cmd: >
+      pct set {{ pdns_lxc_id }}
+      -onboot {{ pdns_lxc_onboot }}
+      -startup {{ pdns_lxc_startup }}
+  changed_when: false
+  tags: [powerdns-lxc, lxc, create]
+
+- name: Ensure rootfs mountoptions=discard is set on existing LXC (idempotent)
+  # OPS-1009: Apply discard mountoption to LXCs that predate this task.
+  # pct config shows merged pending+live state; grep checks both.
+  # pct set writes a [pve:pending] delta — active after next container restart.
+  ansible.builtin.shell: |
+    current=$(pct config {{ pdns_lxc_id }} | grep '^rootfs:' | grep -o 'mountoptions=[^ ,]*' || true)
+    if echo "$current" | grep -q 'discard'; then
+      echo "already_set"
+    else
+      pct set {{ pdns_lxc_id }} \
+        -rootfs $(pct config {{ pdns_lxc_id }} | grep '^rootfs:' | sed 's/rootfs: //' | sed 's/,mountoptions=[^ ,]*//'| tr -d '\n'),mountoptions={{ pdns_lxc_rootfs_mountoptions }}
+      echo "applied"
+    fi
+  register: _discard_result
+  changed_when: "'applied' in _discard_result.stdout"
+  tags: [powerdns-lxc, lxc, create, discard]
+
+# ── Start the LXC ─────────────────────────────────────────────────────────────
+
+- name: Check PowerDNS LXC running status
+  ansible.builtin.command:
+    cmd: "pct status {{ pdns_lxc_id }}"
+  register: lxc_status
+  changed_when: false
+  tags: [powerdns-lxc, lxc, start]
+
+- name: Start PowerDNS LXC if not running
+  ansible.builtin.command:
+    cmd: "pct start {{ pdns_lxc_id }}"
+  when: "'running' not in lxc_status.stdout"
+  changed_when: "'running' not in lxc_status.stdout"
+  tags: [powerdns-lxc, lxc, start]
+
+- name: Wait for LXC networking to be ready (max 60s)
+  ansible.builtin.command:
+    cmd: "pct exec {{ pdns_lxc_id }} -- ip route show default"
+  register: lxc_network_ready
+  until: lxc_network_ready.rc == 0 and lxc_network_ready.stdout != ""
+  retries: 12
+  delay: 5
+  changed_when: false
+  when: not ansible_check_mode    # LXC doesn't exist in check mode; pct exec would fail
+  tags: [powerdns-lxc, lxc, start]
+
+# ── SSH bootstrap — enable Ansible access to the LXC ─────────────────────────
+# The Proxmox Ubuntu 24.04 standard LXC template starts with root only.
+# We create the ubuntu admin user, grant passwordless sudo, and inject
+# the id_sentinel public key so powerdns.yml (Play 3) can target the LXC
+# directly via SSH as ubuntu (matching [nameservers] inventory ansible_user=ubuntu).
+#
+# All pct exec tasks run via the PVE host — no direct SSH to LXC needed here.
+# Skipped in check mode (LXC may not exist for pct exec to target).
+
+- name: Read id_sentinel public key from Ansible controller (lookup)
+  # lookup('file') always runs on the controller — no delegation needed.
+  # Avoids ~ expansion issues when delegate_to: localhost inherits ansible_user=root from play.
+  ansible.builtin.set_fact:
+    _sentinel_pubkey_content: "{{ lookup('file', pdns_lxc_admin_ssh_key_file) }}"
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Bootstrap base packages inside LXC (curl, openssh-server, ca-certificates)
+  # curl and ca-certificates are absent on fresh Proxmox Ubuntu 24.04 standard LXC.
+  # They are required by the common role (wazuh-agent curl step) and TLS operations.
+  # openssh-server enables Ansible SSH access after bootstrap.
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ pdns_lxc_id }} -- bash -c
+      "apt-get update -qq &&
+       apt-get install -y --no-install-recommends curl ca-certificates openssh-server"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Create ubuntu admin user inside LXC (idempotent)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ pdns_lxc_id }} -- bash -c
+      "id ubuntu &>/dev/null || useradd -m -s /bin/bash -G sudo ubuntu"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Set up passwordless sudo for ubuntu inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ pdns_lxc_id }} -- bash -c
+      "echo 'ubuntu ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/90-ubuntu-nopasswd &&
+       chmod 440 /etc/sudoers.d/90-ubuntu-nopasswd"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Create .ssh directory for ubuntu inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ pdns_lxc_id }} -- bash -c
+      "mkdir -p /home/ubuntu/.ssh &&
+       chmod 700 /home/ubuntu/.ssh &&
+       chown ubuntu:ubuntu /home/ubuntu/.ssh"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Inject id_sentinel public key into ubuntu authorized_keys inside LXC
+  # Single-line bash command to avoid YAML fold inserting newlines mid-command.
+  # grep -qF prevents duplicate key entries (idempotent on re-run).
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ pdns_lxc_id }}"
+      - "--"
+      - bash
+      - "-c"
+      - >-
+        grep -qF '{{ _sentinel_pubkey_content | trim }}' /home/ubuntu/.ssh/authorized_keys 2>/dev/null
+        || echo '{{ _sentinel_pubkey_content | trim }}' >> /home/ubuntu/.ssh/authorized_keys;
+        chmod 600 /home/ubuntu/.ssh/authorized_keys;
+        chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Enable and start openssh-server inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ pdns_lxc_id }} -- bash -c
+      "systemctl enable ssh && systemctl start ssh"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]
+
+- name: Verify authorized_keys was written inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ pdns_lxc_id }} -- test -s /home/ubuntu/.ssh/authorized_keys"
+  register: ssh_key_verify
+  changed_when: false
+  failed_when: ssh_key_verify.rc != 0
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap, verify]
+
+- name: Display SSH bootstrap status
+  ansible.builtin.debug:
+    msg: >-
+      LXC {{ pdns_lxc_id }} ({{ pdns_lxc_name }}) SSH bootstrap complete.
+      ubuntu@{{ pdns_lxc_ip }} ready for Ansible (id_sentinel key installed).
+  when: not ansible_check_mode
+  tags: [powerdns-lxc, lxc, ssh-bootstrap]

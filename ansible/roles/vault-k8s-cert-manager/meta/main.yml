@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  author: sentinel-iac
+  description: Vault Kubernetes auth role + policy for cert-manager (OPS-1202)
+  min_ansible_version: "2.14"
+dependencies: []

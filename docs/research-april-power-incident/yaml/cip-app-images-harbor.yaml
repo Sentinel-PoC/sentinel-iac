@@ -1,0 +1,46 @@
+# ClusterImagePolicy: app-images-harbor-signed
+#
+# Scope: application images served from Harbor under harbor.208.haist.farm
+# (the sentinel/* path covers our app images). Signed with the existing
+# Harbor cosign key — the SAME key currently inlined in the Kyverno
+# verify-image-signatures ClusterPolicy. Pull-time verification at cri-o.
+#
+# Public key extracted 2026-04-27 from `oc get cpol verify-image-signatures
+# -o yaml` (kyverno/ClusterPolicy/verify-image-signatures, spec.rules[0]
+# .verifyImages[0].attestors[0].entries[0].keys.publicKeys). Identical key
+# is also used by verify-attestations.
+#
+# Once this CIP is rolled by MCO, the cryptographic signature check can be
+# removed from Kyverno (Kyverno keeps SLSA attestation logic in audit mode —
+# see verify-attestations).
+#
+apiVersion: config.openshift.io/v1alpha1
+kind: ClusterImagePolicy
+metadata:
+  name: app-images-harbor-signed
+  annotations:
+    sentinel.haist.farm/issue: OPS-147
+    sentinel.haist.farm/purpose: |
+      Pull-time signature verification for application images served by
+      Harbor (harbor.208.haist.farm/sentinel/*). Cryptographic enforcement
+      moves from Kyverno admission to cri-o pull-time.
+    sentinel.haist.farm/key-source: |
+      Existing Harbor cosign key, currently inlined in
+      kyverno/ClusterPolicy/verify-image-signatures. Source of truth in
+      Vault at secret/data/cosign/harbor.
+spec:
+  scopes:
+    - harbor.208.haist.farm/sentinel
+  policy:
+    rootOfTrust:
+      policyType: PublicKey
+      publicKey:
+        # base64 of:
+        # -----BEGIN PUBLIC KEY-----
+        # MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEeoZ6uG2ZJhmfixK+kqpiKQlWwJIb
+        # n/B7orsb2bAk8l/mlmsd1jebbdtNLoG1F6qgbvqOXLDwwSqlS/qXR5kUrg==
+        # -----END PUBLIC KEY-----
+        # yamllint disable-line rule:line-length
+        keyData: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFZW9aNnVHMlpKaG1maXhLK2txcGlLUWxXd0pJYgpuL0I3b3JzYjJiQWs4bC9tbG1zZDFqZWJiZHROTG9HMUY2cWdidnFPWExEd3dTcWxTL3FYUjVrVXJnPT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==
+    signedIdentity:
+      matchPolicy: MatchRepoDigestOrExact

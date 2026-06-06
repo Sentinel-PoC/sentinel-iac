@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Vault data backup - tar vault data, upload to MinIO, prune old backups
+set -euo pipefail
+
+source /etc/vault-backup.env
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP_FILE="/tmp/vault-backup-${TIMESTAMP}.tar.gz"
+BUCKET="vault-backups"
+RETENTION_DAYS="{{ vault_backup_retention_days }}"
+
+echo "[$(date)] Starting Vault backup..."
+
+# Stop vault briefly to get consistent snapshot
+docker stop vault
+tar -czf "${BACKUP_FILE}" -C {{ vault_data_dir }} .
+docker start vault
+
+echo "[$(date)] Backup created: ${BACKUP_FILE}"
+
+# Upload to MinIO
+mc alias set backup "${MINIO_ENDPOINT}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" --api S3v4 2>/dev/null || true
+mc cp "${BACKUP_FILE}" "backup/${BUCKET}/"
+echo "[$(date)] Uploaded to MinIO ${BUCKET}"
+
+# Prune old backups
+CUTOFF=$(date -d "-${RETENTION_DAYS} days" +%Y%m%d)
+mc ls "backup/${BUCKET}/" | awk '{print $NF}' | while read -r file; do
+    FILE_DATE=$(echo "${file}" | grep -oP '\d{8}' | head -1)
+    if [[ -n "${FILE_DATE}" && "${FILE_DATE}" -lt "${CUTOFF}" ]]; then
+        mc rm "backup/${BUCKET}/${file}"
+        echo "[$(date)] Pruned old backup: ${file}"
+    fi
+done
+
+# Cleanup
+rm -f "${BACKUP_FILE}"
+echo "[$(date)] Vault backup completed successfully"

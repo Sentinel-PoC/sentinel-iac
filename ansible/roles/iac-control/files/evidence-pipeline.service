@@ -1,0 +1,10 @@
+[Unit]
+Description=Compliance Evidence Auto-Commit Pipeline
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/scripts/evidence-pipeline.sh
+StandardOutput=journal
+StandardError=journal

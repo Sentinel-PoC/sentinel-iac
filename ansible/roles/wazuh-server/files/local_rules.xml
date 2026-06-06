@@ -1,0 +1,835 @@
+<!-- Local rules -->
+<!-- Copyright (C) 2015, Wazuh Inc. -->
+
+<group name="local,dpkg,">
+  <rule id="100002" level="3">
+    <if_sid>2904</if_sid>
+    <description>Dpkg: Package half-configured (routine apt operation, suppressed)</description>
+    <group>dpkg,</group>
+  </rule>
+  <rule id="100003" level="3">
+    <if_sid>2902</if_sid>
+    <description>Dpkg: New package installed (routine system maintenance, suppressed)</description>
+    <group>dpkg,</group>
+  </rule>
+</group>
+
+<group name="local,rootcheck,">
+  <rule id="100004" level="3">
+    <if_sid>510</if_sid>
+    <field name="agent.name">^pve$|^pve3$|^208-pve2$</field>
+    <description>Rootcheck: FALSE POSITIVE on Proxmox host - Generic signature matches /dev/null in clean passwd/chfn/chsh binaries. Verified via dpkg --verify.</description>
+    <group>rootcheck,</group>
+  </rule>
+</group>
+
+<group name="local,network,">
+  <rule id="100005" level="3">
+    <if_sid>533</if_sid>
+    <field name="agent.name">^iac-control$</field>
+    <description>Network: Port change on iac-control - expected (socat/service management)</description>
+    <group>network,</group>
+  </rule>
+</group>
+
+<!-- OPS-813: Suppress rule 80710 (NETDEV_CHANGE PROMISC) false positives on Docker bridges -->
+<!-- Rule IDs: 100007-100008                                                                  -->
+<!-- Context: Docker bridge interfaces (br-* and docker0) enter promiscuous mode as part of  -->
+<!-- normal container networking. This is expected/designed Docker behavior, not a threat.   -->
+<!-- pangolin-proxy runs Docker (pangolin_default bridge + docker0), generating 80710 alerts -->
+<!-- every time Docker manages bridge promisc state. These rules suppress at level 0.        -->
+<!-- Scope: all agents — any Docker host legitimately generates these events.                -->
+<!-- NIST Controls: SI-4 (System Monitoring) — reducing noise to preserve signal quality     -->
+<group name="local,docker,network,">
+  <!-- Suppress promiscuous mode alerts for Docker bridge interfaces (br-XXXXXXXX pattern) -->
+  <rule id="100007" level="0">
+    <if_sid>80710</if_sid>
+    <match>dev=br-</match>
+    <description>Docker bridge interface (br-*) in promiscuous mode — expected container networking, not a threat (OPS-813)</description>
+    <group>docker,network,promisc,</group>
+  </rule>
+
+  <!-- Suppress promiscuous mode alerts for docker0 (Docker default bridge) -->
+  <rule id="100008" level="0">
+    <if_sid>80710</if_sid>
+    <match>dev=docker0</match>
+    <description>docker0 bridge in promiscuous mode — expected Docker default bridge behavior (OPS-813)</description>
+    <group>docker,network,promisc,</group>
+  </rule>
+</group>
+
+<group name="local,vault,authentication_failed,">
+  <rule id="100006" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="type">response</field>
+    <match>permission denied|invalid credentials|missing client token</match>
+    <description>Vault: Authentication failure detected - potential unauthorized access attempt</description>
+    <group>authentication_failed,vault,</group>
+  </rule>
+</group>
+
+<!-- Vault audit log integration (SEC-39) -->
+<!-- Rule IDs: 100010-100025 -->
+<!-- NIST Controls: AU-2, AU-3, AU-6, AC-2, AC-6, SI-4 -->
+<group name="vault,audit,">
+  <!-- Base rule: any Vault audit event -->
+  <rule id="100010" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="source">vault-audit</field>
+    <description>Vault audit: $(type) — $(request.path)</description>
+    <group>vault,audit,</group>
+  </rule>
+
+  <!-- Auth login events -->
+  <rule id="100011" level="5">
+    <if_sid>100010</if_sid>
+    <field name="request.path">^auth/</field>
+    <field name="type">response</field>
+    <description>Vault: Authentication attempt via $(request.path)</description>
+    <group>vault,audit,authentication,</group>
+  </rule>
+
+  <!-- Secret read operations -->
+  <rule id="100012" level="3">
+    <if_sid>100010</if_sid>
+    <field name="request.operation">read</field>
+    <field name="request.path">^secret/</field>
+    <description>Vault: Secret read — $(request.path)</description>
+    <group>vault,audit,secret_access,</group>
+  </rule>
+
+  <!-- Secret write/update operations -->
+  <rule id="100013" level="7">
+    <if_sid>100010</if_sid>
+    <field name="request.operation">update|create</field>
+    <field name="request.path">^secret/</field>
+    <description>Vault: Secret write — $(request.path) ($(request.operation))</description>
+    <group>vault,audit,secret_write,</group>
+  </rule>
+
+  <!-- Secret delete operations -->
+  <rule id="100014" level="10">
+    <if_sid>100010</if_sid>
+    <field name="request.operation">delete</field>
+    <field name="request.path">^secret/</field>
+    <description>Vault: Secret deleted — $(request.path)</description>
+    <group>vault,audit,secret_delete,</group>
+  </rule>
+
+  <!-- Policy changes -->
+  <rule id="100015" level="12">
+    <if_sid>100010</if_sid>
+    <field name="request.path">^sys/policies/|^sys/policy/</field>
+    <field name="request.operation">update|create|delete</field>
+    <description>Vault: Policy change — $(request.operation) $(request.path)</description>
+    <group>vault,audit,policy_change,</group>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+  </rule>
+
+  <!-- Auth method changes -->
+  <rule id="100016" level="12">
+    <if_sid>100010</if_sid>
+    <field name="request.path">^sys/auth/</field>
+    <field name="request.operation">update|create|delete</field>
+    <description>Vault: Auth method change — $(request.operation) $(request.path)</description>
+    <group>vault,audit,auth_change,</group>
+    <mitre>
+      <id>T1098</id>
+    </mitre>
+  </rule>
+
+  <!-- SSH cert signing -->
+  <rule id="100017" level="5">
+    <if_sid>100010</if_sid>
+    <field name="request.path">^ssh/sign/</field>
+    <description>Vault: SSH cert signed via $(request.path)</description>
+    <group>vault,audit,ssh_signing,</group>
+  </rule>
+
+  <!-- Token creation -->
+  <rule id="100018" level="5">
+    <if_sid>100010</if_sid>
+    <field name="request.path">^auth/token/create</field>
+    <description>Vault: Token created</description>
+    <group>vault,audit,token_create,</group>
+  </rule>
+
+  <!-- Root token usage (critical) -->
+  <rule id="100019" level="14">
+    <if_sid>100010</if_sid>
+    <field name="auth.token_type">service</field>
+    <field name="auth.policies">root</field>
+    <description>Vault: ROOT TOKEN used — $(request.path)</description>
+    <group>vault,audit,root_token,</group>
+    <mitre>
+      <id>T1078.004</id>
+    </mitre>
+  </rule>
+
+  <!-- Seal/unseal operations -->
+  <rule id="100020" level="10">
+    <if_sid>100010</if_sid>
+    <field name="request.path">^sys/seal$|^sys/unseal$</field>
+    <description>Vault: Seal/unseal operation — $(request.path)</description>
+    <group>vault,audit,seal,</group>
+  </rule>
+
+  <!-- Denied requests (403) -->
+  <rule id="100021" level="10">
+    <if_sid>100010</if_sid>
+    <field name="type">response</field>
+    <match>permission denied</match>
+    <description>Vault: Permission denied — $(request.path) by $(auth.display_name)</description>
+    <group>vault,audit,access_denied,</group>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+</group>
+
+<group name="local,vulnerability-detection,">
+  <!-- CRITICAL CVE: level 14 (above built-in 13) ensures Discord notification -->
+  <rule id="100700" level="14">
+    <if_sid>23506</if_sid>
+    <description>SENTINEL: CRITICAL CVE detected - $(vulnerability.cve) on $(agent.name)</description>
+    <group>vulnerability-detection,critical_cve,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+  <!-- HIGH CVE: level 11 (above built-in 10) ensures Discord notification -->
+  <rule id="100701" level="11">
+    <if_sid>23505</if_sid>
+    <description>SENTINEL: HIGH CVE detected - $(vulnerability.cve) on $(agent.name)</description>
+    <group>vulnerability-detection,high_cve,</group>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+  </rule>
+
+  <!-- CVE resolved: informational, matches "resolved" text from base rule -->
+  <rule id="100702" level="3">
+    <if_sid>23501</if_sid>
+    <match>resolved</match>
+    <description>SENTINEL: CVE resolved on $(agent.name)</description>
+    <group>vulnerability-detection,cve_resolved,</group>
+  </rule>
+</group>
+
+<!-- Falco runtime security alerts (forwarded via falco-wazuh-forwarder) -->
+<!-- Rule IDs: 100800-100810 -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events) -->
+<group name="falco,">
+  <rule id="100800" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="source">falco</field>
+    <description>Falco: $(rule) in $(output_fields.k8s.ns.name)/$(output_fields.k8s.pod.name)</description>
+    <group>falco,</group>
+  </rule>
+
+  <rule id="100801" level="10">
+    <if_sid>100800</if_sid>
+    <field name="priority">Emergency|Alert|Critical</field>
+    <description>Falco CRITICAL: $(rule) in $(output_fields.k8s.ns.name)/$(output_fields.k8s.pod.name)</description>
+    <group>falco,critical,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <rule id="100802" level="7">
+    <if_sid>100800</if_sid>
+    <field name="priority">Error</field>
+    <description>Falco ERROR: $(rule) in $(output_fields.k8s.ns.name)/$(output_fields.k8s.pod.name)</description>
+    <group>falco,error,</group>
+  </rule>
+
+  <rule id="100803" level="5">
+    <if_sid>100800</if_sid>
+    <field name="priority">Warning</field>
+    <description>Falco WARNING: $(rule) in $(output_fields.k8s.ns.name)/$(output_fields.k8s.pod.name)</description>
+    <group>falco,warning,</group>
+  </rule>
+
+  <rule id="100804" level="12">
+    <if_sid>100800</if_sid>
+    <field name="rule">Terminal shell in container</field>
+    <description>Falco: Interactive shell opened in container $(output_fields.k8s.pod.name)</description>
+    <group>falco,shell,</group>
+    <mitre>
+      <id>T1059.004</id>
+    </mitre>
+  </rule>
+
+  <rule id="100805" level="12">
+    <if_sid>100800</if_sid>
+    <field name="rule">Read sensitive file</field>
+    <description>Falco: Sensitive file access in container $(output_fields.k8s.pod.name)</description>
+    <group>falco,credential_access,</group>
+    <mitre>
+      <id>T1003</id>
+    </mitre>
+  </rule>
+
+  <rule id="100806" level="14">
+    <if_sid>100800</if_sid>
+    <field name="rule">Write below binary dir</field>
+    <description>Falco: Binary directory modification in $(output_fields.k8s.pod.name) - potential malware</description>
+    <group>falco,persistence,</group>
+    <mitre>
+      <id>T1554</id>
+    </mitre>
+  </rule>
+
+  <rule id="100807" level="14">
+    <if_sid>100800</if_sid>
+    <field name="rule">Launch Privileged Container</field>
+    <description>Falco: Privileged container launched in $(output_fields.k8s.ns.name)</description>
+    <group>falco,privilege_escalation,</group>
+    <mitre>
+      <id>T1610</id>
+    </mitre>
+  </rule>
+
+  <rule id="100808" level="10">
+    <if_sid>100800</if_sid>
+    <field name="rule">Contact K8S API Server From Container</field>
+    <description>Falco: K8s API access from container $(output_fields.k8s.pod.name)</description>
+    <group>falco,discovery,</group>
+    <mitre>
+      <id>T1613</id>
+    </mitre>
+  </rule>
+
+  <rule id="100809" level="12">
+    <if_sid>100800</if_sid>
+    <field name="rule">Netcat Remote Code Execution</field>
+    <description>Falco: Reverse shell attempt in $(output_fields.k8s.pod.name)</description>
+    <group>falco,command_and_control,</group>
+    <mitre>
+      <id>T1059</id>
+    </mitre>
+  </rule>
+
+  <rule id="100810" level="3">
+    <if_sid>100800</if_sid>
+    <field name="priority">Notice|Informational|Debug</field>
+    <description>Falco INFO: $(rule)</description>
+    <group>falco,informational,</group>
+  </rule>
+</group>
+
+<!-- sentinel-agent LLM decision logging (OPS-107) -->
+<!-- Rule IDs: 100900-100905 -->
+<!-- NIST Controls: AU-2 (Audit Events), AU-12 (Audit Record Generation) -->
+<group name="sentinel-agent,llm,">
+  <rule id="100900" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="source">sentinel-agent-llm</field>
+    <description>sentinel-agent LLM decision: $(model) — $(action)</description>
+    <group>sentinel-agent,llm,</group>
+  </rule>
+
+  <rule id="100901" level="7">
+    <if_sid>100900</if_sid>
+    <field name="tier">tier3</field>
+    <description>sentinel-agent LLM: Tier 3 Git change recommended — $(action)</description>
+    <group>sentinel-agent,llm,tier3,</group>
+  </rule>
+
+  <rule id="100902" level="5">
+    <if_sid>100900</if_sid>
+    <field name="tier">tier2</field>
+    <description>sentinel-agent LLM: Tier 2 operational action — $(action)</description>
+    <group>sentinel-agent,llm,tier2,</group>
+  </rule>
+
+  <rule id="100903" level="3">
+    <if_sid>100900</if_sid>
+    <field name="tier">escalate</field>
+    <description>sentinel-agent LLM: Escalation recommended — $(action)</description>
+    <group>sentinel-agent,llm,escalate,</group>
+  </rule>
+
+  <rule id="100904" level="10">
+    <if_sid>100900</if_sid>
+    <field name="success">false</field>
+    <description>sentinel-agent LLM: Decision failed — $(error)</description>
+    <group>sentinel-agent,llm,error,</group>
+  </rule>
+</group>
+
+<!-- sentinel-agent operational logging -->
+<group name="sentinel-agent,">
+  <rule id="100905" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="source">sentinel-agent</field>
+    <description>sentinel-agent: $(message)</description>
+    <group>sentinel-agent,</group>
+  </rule>
+
+  <rule id="100906" level="7">
+    <if_sid>100905</if_sid>
+    <field name="level">ERROR</field>
+    <description>sentinel-agent ERROR: $(message)</description>
+    <group>sentinel-agent,error,</group>
+  </rule>
+</group>
+
+<!-- Vault probe monitoring (OPS-144 — SEC-44 follow-up #4) -->
+<!-- Rule IDs: 100950-100959 -->
+<!-- Sources: vault-token-watchdog (vault-server), vault-health-probe (iac-control) -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events), SC-28 (Protection at Rest) -->
+<group name="vault,probe,">
+  <!-- Base rule: any JSON line from vault-token-watchdog -->
+  <!-- decoded_as references the parent decoder name (Wazuh reports parent name after JSON_Decoder child) -->
+  <rule id="100950" level="3">
+    <decoded_as>vault-token-watchdog</decoded_as>
+    <description>Vault token watchdog: $(message)</description>
+    <group>vault,probe,watchdog,</group>
+  </rule>
+
+  <!-- Base rule: any JSON line from vault-health-probe -->
+  <rule id="100951" level="3">
+    <decoded_as>vault-health-probe</decoded_as>
+    <description>Vault health probe: $(message)</description>
+    <group>vault,probe,health,</group>
+  </rule>
+
+  <!-- Critical: vault-token-watchdog emitted level=critical (token TTL < threshold) -->
+  <rule id="100952" level="12">
+    <if_sid>100950</if_sid>
+    <field name="level">^critical$</field>
+    <description>Vault probe critical state — vault-token-watchdog: $(message)</description>
+    <group>vault,probe,watchdog,critical,</group>
+    <mitre>
+      <id>T1552.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Critical: vault-health-probe emitted level=critical (vault sealed or unreachable) -->
+  <rule id="100953" level="12">
+    <if_sid>100951</if_sid>
+    <field name="level">^critical$</field>
+    <description>Vault probe critical state — vault-health-probe: $(message)</description>
+    <group>vault,probe,health,critical,</group>
+    <mitre>
+      <id>T1552.001</id>
+    </mitre>
+  </rule>
+
+  <!-- Warning: vault-token-watchdog emitted level=warning (token TTL low) -->
+  <rule id="100954" level="7">
+    <if_sid>100950</if_sid>
+    <field name="level">^warning$</field>
+    <description>Vault probe warning — vault-token-watchdog: $(message)</description>
+    <group>vault,probe,watchdog,warning,</group>
+  </rule>
+
+  <!-- Warning: vault-health-probe emitted level=warning (vault on standby or degraded) -->
+  <rule id="100955" level="7">
+    <if_sid>100951</if_sid>
+    <field name="level">^warning$</field>
+    <description>Vault probe warning — vault-health-probe: $(message)</description>
+    <group>vault,probe,health,warning,</group>
+  </rule>
+
+  <!-- =================================================================== -->
+  <!-- vault-autounseal-token-ttl monitor (OPS-190 — SEC-44 follow-up) -->
+  <!-- Daily check on iac-control: queries Transit Vault for the prod-Vault -->
+  <!-- auto-unseal token's remaining lease. WARN < 7d, CRIT < 24h. JSON     -->
+  <!-- payload includes status=OK|WARN|CRIT|ERROR + remaining_seconds.      -->
+  <!-- Rule IDs: 100956-100958.                                             -->
+  <!-- =================================================================== -->
+  <rule id="100956" level="3">
+    <decoded_as>vault-autounseal-token-ttl</decoded_as>
+    <description>Vault auto-unseal token TTL probe: $(message)</description>
+    <group>vault,probe,autounseal,</group>
+  </rule>
+
+  <!-- OPS-402: was <field name="status">^WARN$</field> — "status" is a reserved static field in Wazuh. -->
+  <!-- The emitter emits both status=WARN and level=warning; use level instead (not reserved). -->
+  <rule id="100957" level="7">
+    <if_sid>100956</if_sid>
+    <field name="level">^warning$</field>
+    <description>Vault auto-unseal token TTL warning — token expires in $(remaining_human); rotate within the week</description>
+    <group>vault,probe,autounseal,warning,</group>
+    <mitre>
+      <id>T1552.001</id>
+    </mitre>
+  </rule>
+
+  <!-- OPS-402: was <field name="status">^(CRIT|ERROR)$</field> — same reserved-field issue. -->
+  <!-- CRIT and ERROR both emit level=critical in the upstream script; level match is equivalent. -->
+  <rule id="100958" level="12">
+    <if_sid>100956</if_sid>
+    <field name="level">^critical$</field>
+    <description>Vault auto-unseal token TTL critical — $(message); SEC-44-class outage imminent without rotation</description>
+    <group>vault,probe,autounseal,critical,</group>
+    <mitre>
+      <id>T1552.001</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- IaC drift detection (OPS-193) — diff live config vs Ansible/IaC source-of-truth -->
+<!-- Daily systemd timer on iac-control. Each rule in rules.yaml emits one JSON line  -->
+<!-- per run plus a _summary line. Status field is OK|WARN|CRIT.                      -->
+<!-- Rule IDs: 100961-100965.                                                          -->
+<!-- NIST: CM-3 (Configuration Change Control), CM-6 (Configuration Settings),         -->
+<!--       SI-4 (System Monitoring), AU-2 / AU-12 (Audit Events).                      -->
+<group name="iac,drift,">
+  <rule id="100961" level="3">
+    <decoded_as>iac-drift-check</decoded_as>
+    <description>IaC drift check: $(rule_id) status=$(status)</description>
+    <group>iac,drift,</group>
+  </rule>
+
+  <!-- OPS-402: was <field name="status">^WARN$</field> — "status" is a reserved static field in Wazuh. -->
+  <!-- iac-drift-check.py emits plain json.dumps; "status": "WARN" is stable serialisation.        -->
+  <!-- Use <match> against the raw JSON log text instead.                                           -->
+  <rule id="100962" level="7">
+    <if_sid>100961</if_sid>
+    <match>"status": "WARN"</match>
+    <description>IaC drift WARN — $(rule_id): $(diff)</description>
+    <group>iac,drift,warning,</group>
+  </rule>
+
+  <!-- OPS-402: was <field name="status">^CRIT$</field> — same reserved-field issue. -->
+  <rule id="100963" level="12">
+    <if_sid>100961</if_sid>
+    <match>"status": "CRIT"</match>
+    <description>IaC drift CRIT — $(rule_id): $(diff); Ansible re-run risk or security-posture loss</description>
+    <group>iac,drift,critical,</group>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+  </rule>
+
+  <!-- _summary aggregate rule — fires once per check run with totals. -->
+  <!-- High-level signal for ops dashboards: any non-zero CRIT/WARN totals across the run. -->
+  <!-- OPS-402: replaced <field name="status"> with <match> (same reserved-field reason). -->
+  <!-- rule_id is a custom decoded field (not reserved) — <field name="rule_id"> stays.   -->
+  <rule id="100964" level="7">
+    <if_sid>100961</if_sid>
+    <field name="rule_id">^_summary$</field>
+    <match>"status": "WARN"</match>
+    <description>IaC drift run summary — $(totals.WARN) WARN total this run</description>
+    <group>iac,drift,summary,warning,</group>
+  </rule>
+
+  <rule id="100965" level="12">
+    <if_sid>100961</if_sid>
+    <field name="rule_id">^_summary$</field>
+    <match>"status": "CRIT"</match>
+    <description>IaC drift run summary — $(totals.CRIT) CRIT this run; do NOT re-run Ansible until reconciled</description>
+    <group>iac,drift,summary,critical,</group>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- Terraform/OpenTofu drift detection alerts -->
+<!-- Rule IDs: 100430-100435 -->
+<!-- NIST Controls: CM-3 (Configuration Change Control), CM-6 (Configuration Settings) -->
+<group name="terraform,drift,">
+  <rule id="100430" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="event">TOFU_DRIFT_CHECK_COMPLETE</field>
+    <description>Terraform drift check completed - no drift detected</description>
+    <group>terraform,drift,</group>
+  </rule>
+
+  <rule id="100431" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="event">TOFU_DRIFT_DETECTED</field>
+    <description>Terraform drift detected: $(changes) resource(s) changed</description>
+    <group>terraform,drift,</group>
+    <mitre>
+      <id>T1578</id>
+    </mitre>
+  </rule>
+
+  <rule id="100432" level="7">
+    <decoded_as>json</decoded_as>
+    <field name="event">TOFU_DRIFT_CHECK_FAILED</field>
+    <description>Terraform drift check failed: $(error)</description>
+    <group>terraform,drift,error,</group>
+  </rule>
+
+  <rule id="100433" level="5">
+    <decoded_as>json</decoded_as>
+    <field name="event">TOFU_DRIFT_RESOURCES</field>
+    <description>Terraform drift details: $(resources)</description>
+    <group>terraform,drift,</group>
+  </rule>
+</group>
+
+<!-- OPS-356: Seedbox disk overflow guard -->
+<!-- Rule IDs: 101000 -->
+<!-- Source: python3 df-check command in ossec.conf.j2 (seedbox-specific block) -->
+<!-- Fires when any filesystem on the seedbox exceeds 85% used.                  -->
+<!-- Level 10 ensures Discord notification through the existing alert pipeline.  -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)               -->
+<group name="local,disk,seedbox,">
+  <rule id="101000" level="10">
+    <decoded_as>json</decoded_as>
+    <field name="event">^seedbox_disk_high$</field>
+    <description>Seedbox: $(filesystem) at $(percent_used)% used — storage-overflow risk (OPS-356)</description>
+    <group>disk,seedbox,overflow,</group>
+  </rule>
+</group>
+
+<!-- OPS-799: pangolin-proxy disk space guard + auditd halt alerting           -->
+<!-- Rule IDs: 101001-101003                                                    -->
+<!-- Root cause of 2026-05-21 outage: Traefik access logs filled root FS,      -->
+<!-- triggering auditd admin_space_left_action=HALT, crashing the VM.          -->
+<!-- Two-tier disk alerting from the agent-side command probe (ossec.conf.j2): -->
+<!--   101001: ≥70% warn  — level 7  (Discord notification, corrective action)  -->
+<!--   101002: ≥85% crit  — level 12 (urgent Discord; HALT imminent at 100%)   -->
+<!--   101003: DAEMON_ABORT — level 14 (critical; halt already triggered)       -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)               -->
+<group name="local,disk,pangolin,">
+  <rule id="101001" level="7">
+    <decoded_as>json</decoded_as>
+    <field name="event">^pangolin_disk_warn$</field>
+    <description>pangolin-proxy: $(filesystem) at $(percent_used)% used — WARNING (70% threshold), Traefik log growth risk (OPS-799)</description>
+    <group>disk,pangolin,warning,</group>
+  </rule>
+
+  <rule id="101002" level="12">
+    <decoded_as>json</decoded_as>
+    <field name="event">^pangolin_disk_crit$</field>
+    <description>pangolin-proxy: $(filesystem) at $(percent_used)% used — CRITICAL (85% threshold), auditd HALT imminent if not cleared (OPS-799)</description>
+    <group>disk,pangolin,critical,</group>
+    <mitre>
+      <id>T1499.002</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- OPS-799: pangolin-proxy auditd DAEMON_ABORT alert                          -->
+<!-- Rule ID: 101003                                                             -->
+<!-- Source: audit localfile in ossec.conf.j2 (pangolin-proxy conditional)      -->
+<!-- Fires when auditd replays audit.log after a reboot following a HALT event. -->
+<!-- DAEMON_ABORT is the record auditd writes before taking the HALT action.    -->
+<!-- Level 14 = critical — this means the disk-full crash already happened.    -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)               -->
+<group name="local,audit,pangolin,">
+  <rule id="101003" level="14">
+    <match>type=DAEMON_ABORT</match>
+    <field name="agent.name">^pangolin-proxy$</field>
+    <description>pangolin-proxy: auditd DAEMON_ABORT — disk full triggered system halt (OPS-799 root cause event type)</description>
+    <group>audit,pangolin,halt,</group>
+    <mitre>
+      <id>T1499.002</id>
+    </mitre>
+  </rule>
+</group>
+
+<!-- OPS-674: Suppress rule 5904 noise on Ansible-managed hosts -->
+<!-- Rule IDs: 101100 -->
+<!-- Rule 5904 fires when Wazuh syscheck detects /etc/passwd was modified.      -->
+<!-- On this platform all user management is Ansible-driven (ansible.builtin.user -->
+<!-- module). Every Ansible run touching user accounts triggers 5904, creating   -->
+<!-- alert noise with no security signal. Genuine unauthorized user creation     -->
+<!-- appears as rules 5902/5903 (user added/removed), not 5904.                 -->
+<!-- Child rule suppresses parent: in Wazuh, when a more-specific child rule     -->
+<!-- matches, the parent rule is NOT fired — only the child rule fires.          -->
+<!-- Level 3 = informational; below the Discord notification threshold (≥7).    -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)               -->
+<group name="local,syscheck,users,">
+  <rule id="101100" level="3">
+    <if_sid>5904</if_sid>
+    <description>User information changed (Ansible-managed host — expected IaC operation, OPS-674)</description>
+    <group>syscheck,users,ansible,</group>
+  </rule>
+</group>
+
+<!-- OPS-708: Suppress rule 80717 noise from AIDE file integrity scans -->
+<!-- Rule IDs: 101101 -->
+<!-- Rule 80717 fires for auditd ANOM_RBAC_INTEGRITY_FAIL events. On this    -->
+<!-- platform the sole trigger is AIDE (/usr/bin/aide) running its scheduled  -->
+<!-- integrity scan. AIDE fires ANOM_RBAC_INTEGRITY_FAIL when it detects      -->
+<!-- RBAC-metadata changes (file capabilities, ACLs) in tracked files —       -->
+<!-- routine churn from package updates on a regularly-patched Ubuntu system. -->
+<!-- This is NOT a genuine RBAC violation. The child rule uses an exe= match  -->
+<!-- to target AIDE specifically: genuine RBAC failures from other processes  -->
+<!-- still fire rule 80717 at level 8.                                        -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)             -->
+<group name="local,audit,aide,">
+  <rule id="101101" level="3">
+    <if_sid>80717</if_sid>
+    <match>exe="/usr/bin/aide"</match>
+    <description>Auditd RBAC integrity report by AIDE (scheduled scan, OPS-708) — expected platform churn, not a violation</description>
+    <group>audit,aide,</group>
+  </rule>
+</group>
+
+<!-- OPS-248: Suppress rules 5901/5902 noise from Ansible IaC fleet provisioning -->
+<!-- Rule IDs: 101102 (new group), 101103 (new user)                              -->
+<!-- Rules 5901 (new group added) and 5902 (new user added) fire at level 8 when  -->
+<!-- Wazuh detects /etc/group or /etc/passwd additions. On this platform ALL      -->
+<!-- user/group management is Ansible-driven (ansible.builtin.user module).       -->
+<!-- Every fleet-wide Ansible provisioning run triggers 5901/5902 across hosts,   -->
+<!-- creating alert noise with zero security signal — 23 alerts observed across   -->
+<!-- vault-server, pangolin-proxy, ns1, ns2, 208-pi-001, iac-control, seedbox-vm. -->
+<!-- Mirrors rule 101100 (OPS-674, if_sid 5904 user-info-changed) from PR #277.  -->
+<!-- Level 3 = informational; below the Discord notification threshold (>=7).     -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)                 -->
+<group name="local,syscheck,users,">
+  <!-- Suppress 5901 (new group) from Ansible IaC provisioning runs -->
+  <rule id="101102" level="3">
+    <if_sid>5901</if_sid>
+    <description>New group added by Ansible IaC provisioning (expected fleet operation, OPS-248)</description>
+    <group>syscheck,users,ansible,</group>
+  </rule>
+
+  <!-- Suppress 5902 (new user) from Ansible IaC provisioning runs -->
+  <rule id="101103" level="3">
+    <if_sid>5902</if_sid>
+    <description>New user added by Ansible IaC provisioning (expected fleet operation, OPS-248)</description>
+    <group>syscheck,users,ansible,</group>
+  </rule>
+</group>
+
+<!-- OPS-279: Suppress rule 5104 noise for Docker veth interface promiscuous mode -->
+<!-- Rule IDs: 101104                                                               -->
+<!-- NOTE: 101101 is taken by OPS-708 (AIDE); using 101104 as next available ID.   -->
+<!-- Rule 5104 fires at level 8 when a network interface enters promiscuous mode.  -->
+<!-- Docker veth (virtual ethernet) interfaces legitimately enter promiscuous mode  -->
+<!-- as part of container bridge networking — every container start/stop on a      -->
+<!-- Docker host generates this event. The 'veth' prefix with a random hex suffix  -->
+<!-- (e.g. vethe6f6811) is the kernel naming convention for Docker veth pairs,    -->
+<!-- unambiguously identifying virtual interfaces. This is categorically different  -->
+<!-- from physical NIC promiscuous mode (which would indicate packet sniffing).    -->
+<!-- Wazuh rule 5104 does not distinguish virtual vs. physical interfaces.         -->
+<!-- 26 alerts observed from seedbox-vm (docker host), all identical.             -->
+<!-- Level 3 = informational; below the Discord notification threshold (>=7).     -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events)                 -->
+<group name="local,docker,network,">
+  <rule id="101104" level="3">
+    <if_sid>5104</if_sid>
+    <match>veth</match>
+    <description>Docker veth interface entered promiscuous mode (expected container bridge behavior, OPS-279)</description>
+    <group>docker,network,promisc,</group>
+  </rule>
+</group>
+
+<!-- OPS-483: iSCSI session loss and NFS stall monitoring on OKD nodes            -->
+<!-- Rule IDs: 101105-101108                                                        -->
+<!-- Source: iscsid daemon and kernel syslog/journald messages on OKD/CoreOS nodes  -->
+<!-- Detects storage-outage precursors: iSCSI session drops and NFS stalls          -->
+<!-- before operators notice via "things break" (COMP-3 tabletop gap 3, 2026-05-10) -->
+<!-- Level 10: above Discord notification threshold — these are critical storage     -->
+<!-- signals. Wazuh MITRE mapping: T1499.002 (Service Exhaustion / storage I/O).   -->
+<!-- Syntax: <match> only on free-text log content — no <field> on decoded text     -->
+<!-- (avoids the reserved-field trap documented in OPS-823 and OPS-402).            -->
+<!-- NIST Controls: SI-4 (System Monitoring), AU-2 (Audit Events), CP-2 (Contingency Plan) -->
+<!-- Note on Prometheus NFS alert: node_filesystem_avail_bytes metrics for OKD      -->
+<!-- nodes are scraped by the OKD in-cluster Prometheus (not iac-control Prometheus) -->
+<!-- — a PrometheusRule CRD in overwatch-gitops is required (tracked: OPS-483).    -->
+<group name="local,storage,iscsi,">
+
+  <!-- iSCSI: session or connection failure reported by iscsid daemon               -->
+  <!-- Matches iscsid syslog lines indicating session loss or connection failure.    -->
+  <!-- Typical patterns: "iscsid: failed to open iscsi_sysfs_path",                 -->
+  <!--   "iscsid: Could not log into all portals",                                   -->
+  <!--   "iscsid: connection1:0 failed", "iscsid: ping timeout of N secs expired"   -->
+  <rule id="101105" level="10">
+    <match>iscsid</match>
+    <match>error|failed|lost|loss|timeout|could not</match>
+    <description>iSCSI: session or connection failure detected by iscsid on OKD node (OPS-483) — storage outage precursor</description>
+    <group>storage,iscsi,session_loss,</group>
+    <mitre>
+      <id>T1499.002</id>
+    </mitre>
+  </rule>
+
+  <!-- iSCSI: kernel-level connection error                                          -->
+  <!-- Matches kernel messages: "Kernel reported iSCSI connection N:M error          -->
+  <!--   (1011 - ISCSI_ERR_CONN_FAILED) state (3)"                                  -->
+  <rule id="101106" level="10">
+    <match>Kernel reported iSCSI connection</match>
+    <match>error</match>
+    <description>iSCSI: kernel reported connection error on OKD node (OPS-483) — session recovery may be in progress</description>
+    <group>storage,iscsi,connection_error,</group>
+    <mitre>
+      <id>T1499.002</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<group name="local,storage,nfs,">
+
+  <!-- NFS: stale file handle (ESTALE from NFS client)                              -->
+  <!-- Fired when applications on OKD nodes receive ESTALE on a TrueNAS NFS mount.  -->
+  <!-- Typical patterns: "stale file handle", "Stale NFS file handle"               -->
+  <rule id="101107" level="10">
+    <match>stale file handle|Stale file handle|Stale NFS file handle</match>
+    <description>NFS: stale file handle on OKD node — TrueNAS NFS mount degraded (OPS-483)</description>
+    <group>storage,nfs,stale_handle,</group>
+    <mitre>
+      <id>T1499.002</id>
+    </mitre>
+  </rule>
+
+  <!-- NFS: server not responding (mount stall or TrueNAS unreachable)              -->
+  <!-- Matches kernel NFS client messages: "nfs: server X not responding, timed out" -->
+  <!--   "nfs: server X not responding, still trying"                                -->
+  <!--   "NFS: v4 server X not responding, still trying"                             -->
+  <rule id="101108" level="10">
+    <match>not responding</match>
+    <match>nfs|NFS</match>
+    <description>NFS: server not responding on OKD node — mount stall or TrueNAS unreachable (OPS-483)</description>
+    <group>storage,nfs,server_unreachable,</group>
+    <mitre>
+      <id>T1499.002</id>
+    </mitre>
+  </rule>
+
+</group>
+
+<!-- AU-9 SEC-108: Audit log tamper detection via Wazuh syscheck FIM             -->
+<!-- Rule IDs: 101200-101201                                                       -->
+<!-- MITRE: T1070.002 — Indicator Removal, Clear Linux/Mac System Logs            -->
+<!-- Fires on any syscheck event (integrity changed, file added, file deleted,     -->
+<!-- permission changed) within the audit log directories monitored via            -->
+<!-- ossec.conf.j2 syscheck entries (added SEC-108).                              -->
+<!-- Note: the <ignore type="sregex">.log$</ignore> in ossec.conf.j2 suppresses  -->
+<!-- per-file audit.log tracking, so these rules catch directory-level changes    -->
+<!-- (mtime change when files are added/deleted inside /var/log/audit). Logrotate -->
+<!-- may also trigger 101200 — operators should correlate with scheduled runs.    -->
+<!-- NIST Controls: AU-9 (Protection of Audit Information)                        -->
+<group name="local,audit,tamper,">
+
+  <!-- Alert when syscheck detects any modification in the auditd log directory -->
+  <!-- Catches: audit.log deletion, file creation, permission/owner changes      -->
+  <rule id="101200" level="12">
+    <if_group>syscheck</if_group>
+    <match>/var/log/audit</match>
+    <description>AU-9 SEC-108: Audit log directory modified — file added, deleted, or permissions changed; investigate for log tampering (T1070.002)</description>
+    <group>audit,tamper,syscheck,</group>
+    <mitre>
+      <id>T1070.002</id>
+    </mitre>
+  </rule>
+
+  <!-- Alert when syscheck detects any modification in the Vault audit log dir   -->
+  <!-- Catches: vault audit.log deletion, file creation, permission/owner changes -->
+  <rule id="101201" level="12">
+    <if_group>syscheck</if_group>
+    <match>/opt/vault/logs</match>
+    <description>AU-9 SEC-108: Vault audit log directory modified — file added, deleted, or permissions changed; investigate for log tampering (T1070.002)</description>
+    <group>vault,audit,tamper,syscheck,</group>
+    <mitre>
+      <id>T1070.002</id>
+    </mitre>
+  </rule>
+
+</group>

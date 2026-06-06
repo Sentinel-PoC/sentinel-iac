@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=iDRAC Watchdog — Automatic Node Recovery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/idrac-watchdog.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=idrac-watchdog
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

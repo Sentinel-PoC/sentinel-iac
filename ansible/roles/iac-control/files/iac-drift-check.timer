@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily IaC drift detection (OPS-193)
+
+[Timer]
+# OnBootSec=5min — first check shortly after boot for a baseline reading.
+# OnCalendar=*-*-* 05:00:00 — daily at 05:00 UTC. Drift is slow; daily covers
+# normal operations comfortably. The recurring vault-autounseal-token-ttl is
+# at 04:30 UTC, so this lands afterwards and avoids waking the same minute.
+# Persistent=true catches up on missed runs after host sleep / restart.
+OnBootSec=5min
+OnCalendar=*-*-* 05:00:00
+Persistent=true
+AccuracySec=15min
+
+[Install]
+WantedBy=timers.target

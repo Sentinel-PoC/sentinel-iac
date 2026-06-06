@@ -1,0 +1,35 @@
+---
+# suricata-nids role main tasks — OPS-569
+# Suricata standalone NIDS deployment: ET Open + PCAP rotation + Wazuh forwarding
+
+- name: Import install tasks
+  ansible.builtin.import_tasks: install.yml
+  tags:
+    - suricata
+    - install
+
+- name: Import configuration tasks
+  ansible.builtin.import_tasks: configure.yml
+  tags:
+    - suricata
+    - config
+
+- name: Import rule management tasks
+  ansible.builtin.import_tasks: rules.yml
+  tags:
+    - suricata
+    - rules
+
+- name: Import Wazuh integration tasks
+  ansible.builtin.import_tasks: wazuh.yml
+  tags:
+    - suricata
+    - wazuh
+
+- name: Ensure Suricata service is running
+  ansible.builtin.service:
+    name: suricata
+    state: started
+    enabled: true
+  tags:
+    - suricata

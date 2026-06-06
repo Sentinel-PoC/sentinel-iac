@@ -1,0 +1,62 @@
+[Unit]
+Description=UniFi → NetBox drift detection (OPS-691)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/unifi-netbox-drift.py
+EnvironmentFile=/etc/sentinel/unifi-netbox-drift.env
+StandardOutput=journal
+StandardError=journal
+
+# --- Systemd hardening (OPS-694) ---
+
+# Mount all filesystems read-only; explicitly carve out paths the service writes:
+#   - drift report parent dir (for the JSON report + atomic temp file in same dir)
+#   - historical log directory
+ProtectSystem=strict
+ReadWritePaths={{ unifi_netbox_drift_report_path | dirname }} {{ unifi_netbox_drift_log_dir }}
+
+# read-only (not true/full) because the sentinel-unifi Python library lives
+# at /home/ubuntu/sentinel-unifi and is imported at runtime via sys.path.
+# Setting true would make /home inaccessible and break the import.
+ProtectHome=read-only
+
+# Give the service its own /tmp and /var/tmp (no cross-service temp leakage).
+# Safe: the script writes temp files into the report parent dir, not /tmp.
+PrivateTmp=true
+
+# Prevent the process or any child from gaining new privileges via setuid/caps.
+NoNewPrivileges=true
+
+# The service runs as non-root ubuntu; no Linux capabilities required at all.
+CapabilityBoundingSet=
+
+# Allow only the address families the service actually uses:
+#   AF_INET / AF_INET6  — HTTPS to UniFi controller + NetBox API
+#   AF_UNIX             — journald socket (StandardOutput=journal) + systemd-resolved
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Default-deny syscall allowlist for well-behaved non-privileged services.
+SystemCallFilter=@system-service
+# Only allow native-ABI syscalls (no 32-bit compat on 64-bit hosts).
+SystemCallArchitectures=native
+
+# Expose no real /dev devices; /dev/null, /dev/zero, /dev/urandom are still
+# available via a synthetic devtmpfs.
+PrivateDevices=true
+
+# Prevent writes to kernel tunables (/proc/sys, /sys).
+ProtectKernelTunables=true
+# Prevent loading/unloading kernel modules.
+ProtectKernelModules=true
+# Prevent modifications to the cgroup hierarchy.
+ProtectControlGroups=true
+
+# Lock execution personality to the native ABI (prevents personality(2) tricks).
+LockPersonality=true
+# Deny real-time scheduling (SCHED_FIFO/SCHED_RR) — not needed for a drift check.
+RestrictRealtime=true

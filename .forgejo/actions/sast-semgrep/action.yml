@@ -1,0 +1,257 @@
+---
+# SAST composite action — semgrep
+# OPS-204: Add SAST (semgrep) coverage across all repos with source code
+#
+# Usage (from a workflow job that has checked out the repo):
+#   - uses: ./.forgejo/actions/sast-semgrep
+#     with:
+#       source-dir: .
+#       semgrep-config: "p/security-audit p/secrets"
+#       defectdojo-token: ${{ secrets.DEFECTDOJO_API_KEY }}
+#       product-name: "Sentinel IaC"
+#       engagement-name: "Main Branch CI/CD — SAST"
+#
+# NOTE: semgrep is self-installed via a Python venv if absent from the runner.
+# OPS-207 tracks the runner base-image fix (packer/iac-control.pkr.hcl).
+# OPS-405 switched the fallback from bare pip3 to venv (PEP 668 compliance).
+#
+# NIST controls addressed: SA-11 (Developer Testing), SA-15 (Dev Process/Tools)
+
+name: "SAST — Semgrep"
+description: >
+  Static Application Security Testing via semgrep. Self-installs semgrep
+  via Python venv if absent from the iac runner (PEP 668 safe; OPS-207
+  tracks adding semgrep to the base image so the venv fallback becomes a no-op).
+  Outputs semgrep-report.json, uploads to DefectDojo as "Semgrep JSON Report",
+  and saves the report as a workflow artifact. SA-11 / SA-15 coverage.
+
+inputs:
+  source-dir:
+    description: "Directory to scan (relative to workspace root)"
+    required: false
+    default: "."
+
+  semgrep-config:
+    description: >
+      Space-separated semgrep ruleset configs.
+      Supports p/<name> (registry), r/<path> (file), or local paths.
+      Example: "p/security-audit p/secrets"
+    required: false
+    default: "p/security-audit p/secrets"
+
+  fail-on-findings:
+    description: >
+      If "true", exit non-zero when semgrep reports findings above the
+      severity threshold. Set to "false" for first-iteration soft deployment;
+      tighten in a follow-up issue once the findings backlog is triaged.
+    required: false
+    default: "false"
+
+  severity-threshold:
+    description: >
+      Report only findings at or above this severity.
+      Valid values: ERROR, WARNING, INFO.
+      Start at ERROR to keep noise low; tune downward after triage.
+    required: false
+    default: "ERROR"
+
+  defectdojo-url:
+    description: "DefectDojo base URL"
+    required: false
+    default: "https://defectdojo.208.haist.farm"
+
+  defectdojo-engagement-id:
+    description: "Numeric DefectDojo engagement ID (preferred over product-name)"
+    required: false
+    default: ""
+
+  defectdojo-token:
+    description: >
+      DefectDojo API token. Leave empty to skip upload (e.g. on PR builds).
+    required: false
+    default: ""
+
+  product-name:
+    description: "DefectDojo product name (used when defectdojo-engagement-id is empty)"
+    required: false
+    default: "Sentinel Platform"
+
+  engagement-name:
+    description: "DefectDojo engagement name (for auto_create_context)"
+    required: false
+    default: "Main Branch CI/CD — SAST"
+
+runs:
+  using: "composite"
+  steps:
+    # -----------------------------------------------------------------------
+    # STEP 1: Ensure semgrep is installed
+    # The iac-control runner base image does not include semgrep (OPS-207).
+    # Fallback: create a per-run Python venv and install semgrep into it,
+    # then append the venv bin dir to GITHUB_PATH so subsequent steps
+    # resolve `semgrep` correctly. PEP 668 safe (no --break-system-packages).
+    # Once OPS-207 lands, the `command -v semgrep` guard short-circuits and
+    # this block is a no-op — the venv is never created.
+    # -----------------------------------------------------------------------
+    - name: Ensure semgrep is installed
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v semgrep >/dev/null 2>&1; then
+          echo "semgrep found: $(semgrep --version)"
+        else
+          echo "::warning::semgrep not found on runner — installing in venv (PEP 668 / OPS-405)."
+          echo "::warning::OPS-207 tracks adding semgrep to the iac-control runner base image."
+          python3 -m venv /tmp/semgrep-venv
+          /tmp/semgrep-venv/bin/pip install --quiet semgrep
+          # Make the venv bin available to all subsequent steps in this job.
+          # When OPS-207 lands and semgrep is on PATH natively, the guard above
+          # short-circuits and this block never runs — no shadowing concern.
+          echo "/tmp/semgrep-venv/bin" >> "${GITHUB_PATH}"
+          echo "semgrep installed: $(/tmp/semgrep-venv/bin/semgrep --version)"
+        fi
+
+    # -----------------------------------------------------------------------
+    # STEP 2: Run semgrep SAST scan
+    # Writes semgrep-report.json to the workspace root.
+    # Exit codes: 0 = clean, 1 = findings (not an error), 2+ = error.
+    # When fail-on-findings=false (default), exits 0 regardless of findings.
+    # -----------------------------------------------------------------------
+    - name: Run semgrep SAST scan
+      shell: bash
+      # timeout-minutes is NOT valid on composite-action steps (OPS-781 fix).
+      # Step-level timeout removed. The job-level timeout-minutes: 15 in
+      # sast-semgrep.yml already caps the entire scan. If a tighter per-step
+      # limit is needed, wrap the semgrep command with: timeout 12m semgrep ...
+      env:
+        SOURCE_DIR: ${{ inputs.source-dir }}
+        SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+      run: |
+        set -euo pipefail
+        echo "=== OPS-204: SAST scan (semgrep) ==="
+        echo "Source:    ${SOURCE_DIR}"
+        echo "Config:    ${SEMGREP_CONFIG}"
+        echo "Severity:  ${SEVERITY_THRESHOLD}"
+        echo "Fail mode: ${FAIL_ON_FINDINGS}"
+
+        # Build --config flags from space-separated input
+        CONFIG_FLAGS=""
+        for cfg in ${SEMGREP_CONFIG}; do
+          CONFIG_FLAGS="${CONFIG_FLAGS} --config ${cfg}"
+        done
+
+        # Run semgrep; capture exit code separately so we can inspect it.
+        # semgrep exits 1 when findings are reported — this is not a scan error.
+        SEMGREP_EXIT=0
+        semgrep \
+          ${CONFIG_FLAGS} \
+          --severity "${SEVERITY_THRESHOLD}" \
+          --json \
+          --output semgrep-report.json \
+          --no-rewrite-rule-ids \
+          "${SOURCE_DIR}" 2>&1 || SEMGREP_EXIT=$?
+
+        # Count findings from JSON output
+        FINDING_COUNT=0
+        if [ -f semgrep-report.json ]; then
+          FINDING_COUNT=$(python3 -c "
+        import json, sys
+        try:
+            d = json.load(open('semgrep-report.json'))
+            print(len(d.get('results', [])))
+        except Exception:
+            print(0)
+          " 2>/dev/null || echo 0)
+        else
+          echo "::warning::semgrep-report.json not written — scan may have failed"
+          echo '{"results":[],"errors":[],"version":"unknown"}' > semgrep-report.json
+        fi
+
+        echo "Semgrep findings : ${FINDING_COUNT} (severity >= ${SEVERITY_THRESHOLD})"
+        echo "Semgrep exit code: ${SEMGREP_EXIT}"
+        echo "finding_count=${FINDING_COUNT}" >> "${GITHUB_OUTPUT}"
+
+        # Exit code 2+ is a real scan error (config not found, auth fail, etc.)
+        if [ "${SEMGREP_EXIT}" -gt 1 ]; then
+          echo "::error::semgrep scan error (exit ${SEMGREP_EXIT}) — check output above"
+          exit 1
+        fi
+
+        # Report findings as a notice (not a warning/error — this is a triage list)
+        if [ "${FINDING_COUNT}" -gt 0 ]; then
+          echo "::notice::Semgrep found ${FINDING_COUNT} findings — review semgrep-report.json or DefectDojo for triage (OPS-204 first-iteration: non-blocking)"
+        else
+          echo "Semgrep: 0 findings at severity >= ${SEVERITY_THRESHOLD}"
+        fi
+
+        # Gate on findings only if operator has opted in
+        if [ "${FAIL_ON_FINDINGS}" = "true" ] && [ "${FINDING_COUNT}" -gt 0 ]; then
+          echo "::error::fail-on-findings=true and ${FINDING_COUNT} findings found. Set fail-on-findings=false to soft-deploy."
+          exit 1
+        fi
+
+    # -----------------------------------------------------------------------
+    # STEP 3: Upload findings to DefectDojo
+    # Skipped when defectdojo-token is empty (e.g. PR builds).
+    # Uses reimport-scan with scan_type="Semgrep JSON Report" (native parser).
+    # auto_create_context creates product/engagement if they don't exist.
+    # -----------------------------------------------------------------------
+    - name: Upload findings to DefectDojo
+      shell: bash
+      if: ${{ inputs.defectdojo-token != '' && hashFiles('semgrep-report.json') != '' }}
+      env:
+        DD_URL: ${{ inputs.defectdojo-url }}
+        DD_TOKEN: ${{ inputs.defectdojo-token }}
+        DD_ENGAGEMENT_ID: ${{ inputs.defectdojo-engagement-id }}
+        DD_PRODUCT_NAME: ${{ inputs.product-name }}
+        DD_ENGAGEMENT_NAME: ${{ inputs.engagement-name }}
+      run: |
+        set -euo pipefail
+        echo "=== OPS-204: Upload semgrep findings to DefectDojo ==="
+
+        if [ -n "${DD_ENGAGEMENT_ID}" ]; then
+          ENGAGEMENT_FIELDS="-F engagement=${DD_ENGAGEMENT_ID}"
+        else
+          ENGAGEMENT_FIELDS="-F product_name=${DD_PRODUCT_NAME} -F engagement_name=${DD_ENGAGEMENT_NAME} -F auto_create_context=true"
+        fi
+
+        RESPONSE=$(curl -sk -X POST "${DD_URL}/api/v2/reimport-scan/" \
+          -H "Authorization: Token ${DD_TOKEN}" \
+          -F "scan_type=Semgrep JSON Report" \
+          ${ENGAGEMENT_FIELDS} \
+          -F "test_title=Semgrep SAST" \
+          -F "file=@semgrep-report.json" \
+          -F "active=true" \
+          -F "verified=false" \
+          -F "close_old_findings=true" \
+          -F "minimum_severity=Info" \
+          -F "scan_date=$(date +%Y-%m-%d)" \
+          -F "tags=semgrep,sast,sa-11,sa-15,ops-204" \
+          -w "\n%{http_code}" 2>/dev/null)
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -1)
+        echo "DefectDojo upload HTTP status: ${HTTP_CODE}"
+
+        if [ "${HTTP_CODE}" -ge 400 ]; then
+          echo "::warning::DefectDojo upload failed (HTTP ${HTTP_CODE}): ${BODY}"
+          echo "::warning::Semgrep findings are available as workflow artifact"
+        else
+          echo "Semgrep findings uploaded to DefectDojo (product: ${DD_PRODUCT_NAME})"
+        fi
+
+    # -----------------------------------------------------------------------
+    # STEP 4: Upload semgrep report as workflow artifact
+    # Always runs (even on scan failure) so findings are never lost.
+    # 90-day retention matches other security scan artifacts.
+    # -----------------------------------------------------------------------
+    - name: Upload semgrep report artifact
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: semgrep-report-${{ github.run_id }}
+        path: semgrep-report.json
+        if-no-files-found: ignore
+        retention-days: 90

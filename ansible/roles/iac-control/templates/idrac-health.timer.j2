@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=iDRAC Health Check every 5 minutes
+
+[Timer]
+OnCalendar={{ idrac_health_check_schedule }}
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

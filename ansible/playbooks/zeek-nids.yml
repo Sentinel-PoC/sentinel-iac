@@ -1,0 +1,31 @@
+---
+# ansible/playbooks/zeek-nids.yml — OPS-568
+# Deploys Zeek standalone NIDS with JA3/JA4 intel framework and Wazuh log forwarding.
+#
+# Target group: nids (add NIDS sensor hosts to ansible/inventory/hosts.yml under [nids])
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/zeek-nids.yml
+#   ansible-playbook ansible/playbooks/zeek-nids.yml --tags zeek-install     # package only
+#   ansible-playbook ansible/playbooks/zeek-nids.yml --tags zeek-config      # config only
+#   ansible-playbook ansible/playbooks/zeek-nids.yml --tags zeek-wazuh       # Wazuh forwarder only
+#   ansible-playbook ansible/playbooks/zeek-nids.yml --check                 # dry-run
+#
+# NIST SI-4 (information system monitoring), AU-2 (auditable events)
+
+- name: Deploy Zeek NIDS with Wazuh forwarding
+  hosts: nids
+  become: true
+  roles:
+    - role: common
+      tags:
+        - common
+    - role: zeek-nids
+      tags:
+        - zeek
+        - nids
+        - zeek-install
+        - zeek-config
+        - zeek-intel
+        - zeek-wazuh
+        - zeek-logrotate

@@ -1,0 +1,111 @@
+http:
+  routers:
+    router-oauth2-proxy:
+      rule: "Host(`oauth2.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-oauth2-proxy"
+      tls:
+        certResolver: "cloudflare"
+        domains:
+          - main: "haist.farm"
+            sans:
+              - "*.haist.farm"
+          - main: "208.haist.farm"
+            sans:
+              - "*.208.haist.farm"
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-auth-ext-block-admin:
+      rule: "Host(`auth.haist.farm`) && PathPrefix(`/admin`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 200
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "oauth2-forward-auth@file"
+        - "security-headers-keycloak@file"
+    router-auth-ext:
+      rule: "Host(`auth.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 100
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers-keycloak@file"
+    router-matrix-ext-admin-block:
+      rule: "Host(`matrix.haist.farm`) && PathPrefix(`/_synapse/admin`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 300
+      tls: {}
+      middlewares:
+        - "block-metrics-external@file"
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-matrix-ext-bypass:
+      rule: "Host(`matrix.haist.farm`) && (PathPrefix(`/_matrix/`) || PathPrefix(`/_synapse/client/`) || PathPrefix(`/.well-known/`))"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 200
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-matrix-ext:
+      rule: "Host(`matrix.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 100
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-www-ext:
+      rule: "Host(`www.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers-public@file"
+
+    # HAIST-25 / OPS-802: CFWC website at cfwc.dev.haist.farm.
+    # Inline cert block adds the dev.haist.farm + *.dev.haist.farm SANs to the
+    # cert pool so Traefik can serve a matching cert; the existing *.haist.farm
+    # wildcard only covers single-label subdomains. Cloudflare DNS-01 issues
+    # against the haist.farm zone so no zone-level config change needed.
+    # OPS-802: cfwc must be INTERNAL-ONLY — internal-only@file middleware blocks
+    # all non-LAN requests. No public Cloudflare DNS entry exists for this host;
+    # the internal-only guard is defence-in-depth against accidental DNS addition.
+    router-cfwc-dev:
+      rule: "Host(`cfwc.dev.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls:
+        certResolver: "cloudflare"
+        domains:
+          - main: "dev.haist.farm"
+            sans:
+              - "*.dev.haist.farm"
+      middlewares:
+        - "internal-only@file"
+        - "rate-limit@file"
+        - "security-headers-public@file"
+
+  services:
+    service-oauth2-proxy:
+      loadBalancer:
+        servers:
+          - url: "http://oauth2-proxy:4180"

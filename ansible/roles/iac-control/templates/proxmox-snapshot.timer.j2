@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Daily Proxmox VM Snapshots
+
+[Timer]
+OnCalendar={{ proxmox_snapshot_schedule }}
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

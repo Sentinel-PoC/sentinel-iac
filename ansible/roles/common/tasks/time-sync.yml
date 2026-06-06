@@ -1,0 +1,35 @@
+---
+# Chrony NTP time synchronization (CIS 2.1.2)
+- name: Install chrony package
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - common
+    - ntp
+    - time
+
+- name: Deploy chrony configuration
+  ansible.builtin.template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chrony
+  tags:
+    - common
+    - ntp
+    - time
+
+- name: Enable and start chronyd service
+  ansible.builtin.service:
+    name: chrony
+    enabled: true
+    state: started
+  tags:
+    - common
+    - ntp
+    - time

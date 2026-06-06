@@ -1,0 +1,6 @@
+---
+galaxy_info:
+  author: sentinel-iac
+  description: IaC codification of pre-existing Vault k8s auth roles (OPS-1206)
+  min_ansible_version: "2.14"
+dependencies: []

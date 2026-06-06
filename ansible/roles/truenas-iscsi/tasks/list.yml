@@ -1,0 +1,70 @@
+---
+# truenas-iscsi | list — read-only iSCSI state enumeration (OPS-1011)
+#
+# Always safe to run. Gathers current iSCSI state without making any changes.
+# Output facts:
+#   truenas_iscsi_extents_result      — all extents from /api/v2.0/iscsi/extent
+#   truenas_iscsi_targets_result      — all targets from /api/v2.0/iscsi/target
+#   truenas_iscsi_targetextents_result — all associations from /api/v2.0/iscsi/targetextent
+
+- name: truenas-iscsi/list | fetch all iSCSI extents
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_extents_result
+  changed_when: false
+
+- name: truenas-iscsi/list | display extent summary
+  ansible.builtin.debug:
+    msg: >-
+      iSCSI extents ({{ truenas_iscsi_extents_result.json | length }} total):
+      {% for e in truenas_iscsi_extents_result.json %}
+      id={{ e.id }} name={{ e.name }} type={{ e.type }}
+      path={{ e.path | default('-') }} blocksize={{ e.blocksize }} rpm={{ e.rpm | default('-') }}
+      {% endfor %}
+  changed_when: false
+
+- name: truenas-iscsi/list | fetch all iSCSI targets
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/target"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_targets_result
+  changed_when: false
+
+- name: truenas-iscsi/list | display target summary
+  ansible.builtin.debug:
+    msg: >-
+      iSCSI targets ({{ truenas_iscsi_targets_result.json | length }} total):
+      {% for t in truenas_iscsi_targets_result.json %}
+      id={{ t.id }} name={{ t.name }} mode={{ t.mode }}
+      groups={{ t.groups | map(attribute='portal') | list }}
+      {% endfor %}
+  changed_when: false
+
+- name: truenas-iscsi/list | fetch all target-to-extent associations
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/targetextent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_targetextents_result
+  changed_when: false
+
+- name: truenas-iscsi/list | display targetextent summary
+  ansible.builtin.debug:
+    msg: >-
+      iSCSI target-to-extent mappings ({{ truenas_iscsi_targetextents_result.json | length }} total):
+      {% for te in truenas_iscsi_targetextents_result.json %}
+      id={{ te.id }} target_id={{ te.target }} extent_id={{ te.extent }} lunid={{ te.lunid }}
+      {% endfor %}
+  changed_when: false

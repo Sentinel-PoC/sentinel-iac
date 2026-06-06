@@ -1,0 +1,12 @@
+[Unit]
+Description=Sentinel Agent Timer — runs every 5 minutes
+Documentation=https://gitlab.haist.farm/admin1/overwatch/-/tree/main/sentinel-agent
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+AccuracySec=30
+RandomizedDelaySec=15
+
+[Install]
+WantedBy=timers.target

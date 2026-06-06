@@ -1,0 +1,46 @@
+# Ansible managed — seedbox arr stack (bridge services)
+# SEC-73: This override replaces the OPS-180 hand-created docker-compose.override.yml.
+# prowlarr was removed from this override — it now lives in docker-compose.yml.j2
+# behind the gluetun VPN namespace (network_mode: service:gluetun).
+#
+# sonarr and radarr remain on the Docker bridge network because moving them to the
+# gluetun namespace requires updating their internal Prowlarr indexer URL (stored in
+# sqlite databases), which is out of scope for SEC-73.
+#
+# POST-DEPLOYMENT MANUAL STEP: after first Ansible run with this change, update the
+# Prowlarr URL in sonarr AND radarr settings:
+#   sonarr:  Settings → Indexers → Prowlarr → URL: http://prowlarr:9696 → http://gluetun:{{ prowlarr_port }}
+#   radarr:  Settings → Indexers → Prowlarr → URL: http://prowlarr:9696 → http://gluetun:{{ prowlarr_port }}
+# (gluetun exposes port {{ prowlarr_port }} on the bridge after this PR)
+#
+# Origin: OPS-180 — arr stack migrated from OKD media namespace to seedbox-vm (2025).
+# IaC-ified by SEC-73 (2026-05-17).
+
+services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - {{ sonarr_config_dir }}:/config
+      - {{ seedbox_data_dir }}:/data
+    ports:
+      - "{{ sonarr_port }}:{{ sonarr_port }}"
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - {{ radarr_config_dir }}:/config
+      - {{ seedbox_data_dir }}:/data
+    ports:
+      - "{{ radarr_port }}:{{ radarr_port }}"
+    restart: unless-stopped

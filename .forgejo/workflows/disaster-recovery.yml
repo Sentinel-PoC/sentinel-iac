@@ -1,0 +1,84 @@
+---
+name: Disaster Recovery
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Recovery target (minio, vault, forgejo, etcd, full)'
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  recover:
+    runs-on: iac
+    timeout-minutes: 180
+    env:
+      MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+      VAULT_ROOT_TOKEN: ${{ secrets.VAULT_ROOT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run disaster recovery
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          cd infrastructure/recovery
+          chmod +x restore-*.sh
+
+          case "$TARGET" in
+            minio)
+              echo "Restoring MinIO from Backblaze B2..."
+              export VAULT_ADDR=https://vault.208.haist.farm
+              export VAULT_TOKEN="${VAULT_ROOT_TOKEN}"
+              export B2_ACCOUNT_ID="368fe76c3651"
+              export B2_APP_KEY=$(vault kv get -field=application_key secret/backblaze)
+              export B2_BUCKET=$(vault kv get -field=bucket_name secret/backblaze)
+              export RCLONE_CRYPT_PASS=$(vault kv get -field=password secret/minio-config/b2-encryption-keys)
+              export RCLONE_CRYPT_SALT=$(vault kv get -field=password2 secret/minio-config/b2-encryption-keys)
+              ./restore-minio.sh
+              ;;
+            vault)
+              echo "Restoring Vault from MinIO..."
+              ./restore-vault.sh
+              echo "CRITICAL: Vault is SEALED — manual unseal required"
+              ;;
+            forgejo)
+              echo "Restoring Forgejo from MinIO..."
+              ./restore-forgejo.sh
+              ;;
+            etcd)
+              echo "WARNING: Restoring etcd — all cluster changes after backup will be LOST"
+              export KUBECONFIG="$HOME/.kube/config"
+              echo "yes" | ./restore-etcd.sh
+              ;;
+            full)
+              echo "FULL DISASTER RECOVERY SEQUENCE"
+              export VAULT_ADDR=https://vault.208.haist.farm
+              export VAULT_TOKEN="${VAULT_ROOT_TOKEN}"
+              export B2_ACCOUNT_ID="368fe76c3651"
+              export B2_APP_KEY=$(vault kv get -field=application_key secret/backblaze)
+              export B2_BUCKET=$(vault kv get -field=bucket_name secret/backblaze)
+              export RCLONE_CRYPT_PASS=$(vault kv get -field=password secret/minio-config/b2-encryption-keys)
+              export RCLONE_CRYPT_SALT=$(vault kv get -field=password2 secret/minio-config/b2-encryption-keys)
+
+              echo "Step 1/3: Restoring MinIO from B2..."
+              ./restore-minio.sh
+              sleep 30
+
+              echo "Step 2/3: Restoring Vault from MinIO..."
+              ./restore-vault.sh
+
+              echo "Step 3/3: Restoring Forgejo from MinIO..."
+              ./restore-forgejo.sh
+
+              echo "FULL DISASTER RECOVERY COMPLETE"
+              echo "POST-RECOVERY: Unseal Vault manually"
+              ;;
+            *)
+              echo "Unknown target: $TARGET"
+              echo "Valid targets: minio, vault, forgejo, etcd, full"
+              exit 1
+              ;;
+          esac

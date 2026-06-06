@@ -1,0 +1,56 @@
+---
+# truenas-zfs role — task dispatcher (OPS-947)
+#
+# Includes task files based on truenas_zfs_tasks list variable.
+# Default: [list] (read-only, always safe).
+# All API calls use Bearer token auth against truenas_url.
+
+- name: truenas-zfs | list datasets and portal state
+  ansible.builtin.include_tasks: list.yml
+  when: "'list' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-list
+
+- name: truenas-zfs | enforce dataset properties
+  ansible.builtin.include_tasks: dataset_properties.yml
+  when: "'dataset_properties' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-properties
+
+- name: truenas-zfs | create filesystem dataset
+  ansible.builtin.include_tasks: dataset_create.yml
+  when: "'dataset_create' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-create
+
+- name: truenas-zfs | create zvol
+  ansible.builtin.include_tasks: zvol_create.yml
+  when: "'zvol_create' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-create
+
+- name: truenas-zfs | create snapshot
+  ansible.builtin.include_tasks: snapshot_create.yml
+  when: "'snapshot_create' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-snapshot
+
+- name: truenas-zfs | prune old snapshots
+  ansible.builtin.include_tasks: snapshot_prune.yml
+  when: "'snapshot_prune' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-snapshot
+    - truenas-zfs-destroy
+
+- name: truenas-zfs | ensure iSCSI portal binding
+  ansible.builtin.include_tasks: iscsi_portal.yml
+  when: "'iscsi_portal' in truenas_zfs_tasks"
+  tags:
+    - truenas-zfs
+    - truenas-zfs-iscsi

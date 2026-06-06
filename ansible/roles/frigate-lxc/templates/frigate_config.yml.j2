@@ -1,0 +1,100 @@
+# Frigate NVR Configuration — OPS-840 / OPS-956 / OPS-958
+# Deployed by Ansible frigate-lxc role (sentinel-iac)
+# Version: Frigate {{ frigate_image | regex_search('[0-9]+\.[0-9]+\.[0-9]+') | default('0.17.x') }}
+# Hub: Reolink Home Hub at {{ frigate_hub_ip }} (camera VLAN, reachable from LXC {{ frigate_lxc_id }})
+# Storage: iSCSI LUN (TrueNAS) → pve4:{{ frigate_iscsi_mount_point }} → LXC{{ frigate_lxc_id }}:{{ frigate_storage_dir }} → container:{{ frigate_media_dir }}
+#
+# RTSP AUTH NOTE: hub password contains '#'. RTSP URLs use '%23' (percent-encoded)
+# so Go's url.Parse in go2rtc treats it as a literal percent, decodes to '#' for Basic Auth.
+#
+# CHANNEL NUMBERS: Hub API 0-indexed, RTSP 1-indexed (Preview_01 = channel 0, etc.)
+# Battery cameras stream ~3-5 min then sleep; Frigate watchdog reconnects on wake.
+#
+# OPS-958 STREAM STABILITY FIXES (2026-05-27):
+# 1. go2rtc URLs: #input=rtsp/tcp appended — forces TCP transport, prevents RTP bad-cseq
+#    packet-loss drops seen in Hub firmware v3.3.0.352.
+# 2. go2rtc URL path: TrackMix requires h264Preview_NN prefix (not plain Preview_NN).
+#    Atlas cameras work with either; TrackMix ch0 returns no stream without the h264 prefix.
+#    Confirmed via direct ffmpeg test against Hub RTSP (OPS-956 worker-956e RC-1).
+# 3. ffmpeg input_args: per-camera override via cam.ffmpeg_input_args.
+#    TrackMix uses preset-rtsp-generic (RTSP timestamp reordering more robust than restream).
+#    Atlas cameras use preset-rtsp-restream (default, best for go2rtc restreams).
+# 4. Camera identity (OPS-958 description corrected against live API data):
+#    ch0/Preview_01 = Reolink TrackMix (Side door), ch1 = Atlas (Back yard), ch2 = Atlas (Front)
+#    Confirmed via GetChnTypeInfo API by worker-956e (2026-05-26).
+
+mqtt:
+  enabled: true
+  host: {{ frigate_mqtt_host }}
+  port: {{ frigate_mqtt_port }}
+  user: {{ frigate_mqtt_user }}
+  password: '{FRIGATE_MQTT_PASSWORD}'
+  client_id: frigate
+  topic_prefix: frigate
+
+# go2rtc proxy — single connection per camera; detect+record both consume the restream.
+# Bundled inside Frigate container; no separate container needed.
+go2rtc:
+  streams:
+{% for cam in frigate_cameras %}
+    # {{ cam.comment }}
+    {{ cam.name }}:
+      - "rtsp://{{ frigate_hub_user }}:{{ frigate_hub_password | replace('#', '%23') }}@{{ frigate_hub_ip }}:{{ frigate_hub_rtsp_port }}/{{ cam.main_stream }}#backchannel=0#input=rtsp/tcp"
+    {{ cam.name }}_sub:
+      - "rtsp://{{ frigate_hub_user }}:{{ frigate_hub_password | replace('#', '%23') }}@{{ frigate_hub_ip }}:{{ frigate_hub_rtsp_port }}/{{ cam.sub_stream }}#backchannel=0#input=rtsp/tcp"
+{% endfor %}
+
+# CPU detection — adequate for {{ frigate_cameras | length }} cameras at {{ frigate_detect_fps }}fps
+detectors:
+  cpu1:
+    type: cpu
+    num_threads: {{ frigate_cpu_threads }}
+
+# Record configuration (Frigate 0.17 schema: continuous/motion sub-keys)
+# Recordings land on iSCSI-backed {{ frigate_media_dir }} (via {{ frigate_storage_dir }} bind mount)
+record:
+  enabled: true
+  continuous:
+    days: {{ frigate_record_continuous_days }}
+  motion:
+    days: {{ frigate_record_motion_days }}
+
+snapshots:
+  enabled: true
+  retain:
+    default: {{ frigate_snapshot_retain_days }}
+
+objects:
+  track:
+{% for obj in frigate_tracked_objects %}
+    - {{ obj }}
+{% endfor %}
+
+# === CAMERAS ===
+cameras:
+{% for cam in frigate_cameras %}
+  # {{ cam.comment }}
+  {{ cam.name }}:
+    enabled: {{ cam.enabled | lower }}
+    ffmpeg:
+      inputs:
+        - path: "rtsp://127.0.0.1:8554/{{ cam.name }}"
+          input_args: {{ cam.ffmpeg_input_args | default('preset-rtsp-restream') }}
+          roles:
+            - record
+        - path: "rtsp://127.0.0.1:8554/{{ cam.name }}_sub"
+          input_args: {{ cam.ffmpeg_input_args | default('preset-rtsp-restream') }}
+          roles:
+            - detect
+    detect:
+      fps: {{ frigate_detect_fps }}
+    record:
+      enabled: true
+    objects:
+      track:
+{% for obj in frigate_tracked_objects %}
+        - {{ obj }}
+{% endfor %}
+
+{% endfor %}
+version: 0.17-0

@@ -1,0 +1,60 @@
+---
+# spire-agent CLI host-binary install (idempotent; skipped if already present).
+# OPS-545 / OPS-351 Phase 4.5 F6: on iac-control the spire-agent binary is
+# ONLY inside the SPIRE Agent container; the host filesystem doesn't have it.
+# Phase 4.5's agent-vault-auth.sh refactor needs the CLI on the host so that
+# the SO_PEERCRED check on the Workload API socket sees the sentinel-worker
+# UID (not the container's UID).
+#
+# Workstation already has /usr/local/bin/spire-agent via OPS-533 (workstation
+# role) — the stat-guard makes this task a no-op there.
+
+- name: Stat existing {{ spire_agent_cli_bin_path }}
+  ansible.builtin.stat:
+    path: "{{ spire_agent_cli_bin_path }}"
+  register: spire_cli_stat
+
+# Check-mode quirk: get_url + unarchive chain — if the binary is missing in
+# --check, get_url reports "would download" without writing, then unarchive
+# fails because the source file doesn't exist. We gate both on
+# `not ansible_check_mode` so that check-mode is a no-op for the install
+# chain when the binary is absent. Real apply runs both tasks normally.
+- name: Download SPIRE release tarball (sha256-pinned) — only if binary missing
+  ansible.builtin.get_url:
+    url: "{{ spire_agent_cli_release_url }}"
+    dest: "/tmp/spire-{{ spire_agent_cli_version }}-{{ spire_agent_cli_release_arch }}.tar.gz"
+    checksum: "sha256:{{ spire_agent_cli_release_sha256 }}"
+    mode: "0644"
+  register: spire_tarball
+  when:
+    - not spire_cli_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Extract spire-agent binary from tarball — only if binary missing
+  ansible.builtin.unarchive:
+    src: "{{ spire_tarball.dest }}"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts:
+      - "--strip-components=2"
+      - "spire-{{ spire_agent_cli_version }}/bin/spire-agent"
+    owner: root
+    group: root
+    mode: "0755"
+    creates: "{{ spire_agent_cli_bin_path }}"
+  when:
+    - not spire_cli_stat.stat.exists
+    - not ansible_check_mode
+
+# Idempotent version sanity check (runs every apply — confirms a corrupted
+# binary doesn't go unnoticed). 1.14.6 prints version to STDERR, not stdout.
+- name: Verify installed spire-agent reports 1.14.x
+  ansible.builtin.command: "{{ spire_agent_cli_bin_path }} --version"
+  register: spire_cli_version_check
+  changed_when: false
+  failed_when: >-
+    not ansible_check_mode
+    and not (spire_cli_version_check.stderr | default('') | trim) is match(
+      '^' + spire_agent_cli_version | regex_replace('\\.', '\\\\.')
+    )
+  check_mode: false  # read-only version probe

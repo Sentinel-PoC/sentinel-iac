@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+MINIO_ROOT_USER="{{ minio_root_user }}"
+MINIO_ROOT_PASSWORD="{{ minio_root_password }}"
+MINIO_VOLUMES="{{ minio_data_dir }}"
+# SEC-88: --certs-dir enables HTTPS-only on :9000; MINIO_SERVER_URL advertises the FQDN.
+MINIO_OPTS="--console-address :{{ minio_console_port }} --certs-dir {{ minio_certs_dir }}"
+MINIO_SERVER_URL="https://{{ minio_server_url_fqdn }}"
+{% if minio_oidc_enabled %}
+
+# Authentik OIDC — additive SSO; root user auth remains active
+MINIO_IDENTITY_OPENID_CONFIG_URL="{{ minio_oidc_config_url }}"
+MINIO_IDENTITY_OPENID_CLIENT_ID="{{ minio_oidc_client_id }}"
+MINIO_IDENTITY_OPENID_CLIENT_SECRET="{{ minio_oidc_client_secret }}"
+MINIO_IDENTITY_OPENID_SCOPES="{{ minio_oidc_scopes }}"
+MINIO_IDENTITY_OPENID_REDIRECT_URI_DYNAMIC="on"
+MINIO_IDENTITY_OPENID_ROLE_POLICY="{{ minio_oidc_role_policy }}"
+MINIO_IDENTITY_OPENID_DISPLAY_NAME="{{ minio_oidc_display_name }}"
+{% endif %}

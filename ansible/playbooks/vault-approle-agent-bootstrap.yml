@@ -1,0 +1,41 @@
+---
+# vault-approle-agent-bootstrap.yml
+# Creates per-role bootstrap Vault policies and AppRoles for Overwatch agents.
+# Implements Phase A (policies) + Phase B (AppRoles) of OPS-464.
+#
+# Design reference: compliance-vault/docs/security/vault-role-scoped-credentials-design.md
+#
+# Creates:
+#   - 4 Vault policies:   agent-{worker,planner,judge,scribe}-bootstrap
+#   - 4 AppRole roles:    agent-{worker,planner,judge,scribe}-bootstrap
+#   - 4 KV entries:       secret/vault/agent-{role}-bootstrap-role-id
+#
+# Each bootstrap policy grants ONLY the read of that role's Keycloak client
+# credential (secret/data/forgejo-<role>). The bootstrap AppRole token TTL
+# is 5 minutes — long enough to read KC creds and perform the JWT exchange.
+#
+# After this playbook runs, the operator bootstrap script (Phase D) can mint
+# single-use secret_ids for each role without root Vault access in the agent.
+#
+# Runs locally (no SSH dependency) — all work is Vault API calls.
+#
+# Required vars (pass via -e or environment — NOT stored in this file):
+#   vault_token  — Vault token with root or sys/auth + sys/policies/acl + auth/approle write scope
+#
+# Example run:
+#   ansible-playbook ansible/playbooks/vault-approle-agent-bootstrap.yml \
+#     -e vault_token="${VAULT_TOKEN}"
+#
+# Idempotent: safe to re-run. First run creates objects; subsequent runs
+# are no-ops in effect (vault_write response-echo quirk may show changed=true).
+#
+# Tracking: OPS-464
+
+- name: Configure Vault bootstrap AppRoles for Overwatch agents
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - vault-approle-agent-bootstrap

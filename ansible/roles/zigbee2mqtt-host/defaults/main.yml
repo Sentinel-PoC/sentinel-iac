@@ -1,0 +1,54 @@
+---
+# defaults/main.yml — zigbee2mqtt-host role (OPS-585)
+#
+# Installs zigbee2mqtt + mosquitto as systemd services on a host with a
+# ZBT-1 (Nabu Casa Home Assistant Connect) Zigbee USB radio.
+# Target: Ubuntu 24.04 LTS (aarch64 on 208-pi-001).
+#
+# Upstream: https://github.com/Koenkk/zigbee2mqtt
+# Install guide: https://raw.githubusercontent.com/Koenkk/zigbee2mqtt.io/master/docs/guide/installation/01_linux.md
+# Node.js requirement: 20.x or 22.x via NodeSource LTS
+#   "node --version  # Should output V20.x, V22.X" (01_linux.md)
+# systemd: Type=notify, WatchdogSec=10s (01_linux.md service unit)
+
+# ── Service users ─────────────────────────────────────────────────────────────
+zigbee2mqtt_user: zigbee2mqtt
+zigbee2mqtt_group: zigbee2mqtt
+# dialout is the Debian/Ubuntu serial-port group
+zigbee2mqtt_serial_group: dialout
+
+mosquitto_user: mosquitto
+mosquitto_group: mosquitto
+
+# ── USB device path ────────────────────────────────────────────────────────────
+# STABLE by-id path — never /dev/ttyACM*.
+# From issue: AC #3 specifies this exact path.
+zigbee2mqtt_serial_port: "/dev/serial/by-id/usb-Nabu_Casa_Home_Assistant_Connect_ZBT-1_f42334c96a39ef11809559f454516304-if00-port0"
+
+# ── zigbee2mqtt install directory ─────────────────────────────────────────────
+# Upstream: "sudo mkdir /opt/zigbee2mqtt" then git clone there.
+zigbee2mqtt_dir: /opt/zigbee2mqtt
+
+# ── zigbee2mqtt data directory ────────────────────────────────────────────────
+# Data: database.db, configuration.yaml, log/.
+# Using ZIGBEE2MQTT_DATA env var to point to /var/lib/zigbee2mqtt.
+zigbee2mqtt_data_dir: /var/lib/zigbee2mqtt
+
+# ── Network ports ─────────────────────────────────────────────────────────────
+# zigbee2mqtt frontend: 8080
+# MQTT broker (mosquitto): 1883
+zigbee2mqtt_frontend_port: 8080
+mqtt_port: 1883
+
+# ── MQTT credentials ──────────────────────────────────────────────────────────
+mqtt_ha_user: "homeassistant"
+
+# ── Vault path for secrets ────────────────────────────────────────────────────
+mqtt_vault_path: "secret/home-assistant/mqtt-credentials"
+
+# ── Git repository ────────────────────────────────────────────────────────────
+zigbee2mqtt_repo: "https://github.com/Koenkk/zigbee2mqtt.git"
+
+# ── HA LXC IP ─────────────────────────────────────────────────────────────────
+# Used to allow MQTT/frontend ingress from HA LXC in UFW rules.
+ha_lxc_ip: "192.168.12.81"

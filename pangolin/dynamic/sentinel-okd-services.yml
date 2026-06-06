@@ -1,0 +1,261 @@
+http:
+  serversTransports:
+    transport-okd-208:
+      insecureSkipVerify: true
+
+  routers:
+    # --- Meshed services: routed through Istio IngressGateway (mTLS) ---
+    router-home-208:
+      rule: "Host(`home.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls:
+        certResolver: "cloudflare"
+        domains:
+          - main: "208.haist.farm"
+            sans:
+              - "*.208.haist.farm"
+      middlewares:
+        - "rate-limit@file"
+        - "oauth2-forward-auth@file"
+        - "security-headers@file"
+    # --- ArgoCD: routed via OKD Router (handles its own TLS, no insecure mode) ---
+    router-argocd-208:
+      rule: "Host(`argocd.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-grafana-metrics-208:
+      rule: "Host(`grafana.208.haist.farm`) && PathPrefix(`/metrics`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      priority: 200
+      tls: {}
+      middlewares:
+        - "block-metrics-external@file"
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-grafana-208:
+      rule: "Host(`grafana.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    # --- Unmeshed services: routed through OKD Router (no sidecar) ---
+    router-console-208:
+      rule: "Host(`console.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-auth-admin-208:
+      rule: "Host(`auth.208.haist.farm`) && (PathPrefix(`/admin`) || PathPrefix(`/realms/master`))"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 200
+      tls: {}
+      middlewares:
+        - "block-metrics-external@file"
+        - "rate-limit@file"
+        - "security-headers-keycloak@file"
+    router-auth-208:
+      rule: "Host(`auth.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers-keycloak@file"
+    router-kiali-208:
+      rule: "Host(`kiali.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-jaeger-208:
+      rule: "Host(`jaeger.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-netbox-208:
+      rule: "Host(`netbox.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-harbor-208:
+      rule: "Host(`harbor.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-defectdojo-208:
+      rule: "Host(`defectdojo.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-backstage-208:
+      rule: "Host(`backstage.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-console-sec-208:
+      rule: "Host(`console-sec.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-www-208:
+      rule: "Host(`www.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-istio-gateway"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers-public@file"
+    router-plane-208-bypass:
+      rule: "Host(`plane.208.haist.farm`) && PathPrefix(`/api/`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 200
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-plane-208:
+      rule: "Host(`plane.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 100
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "oauth2-forward-auth@file"
+        - "security-headers@file"
+    router-matrix-admin-208:
+      rule: "Host(`matrix.208.haist.farm`) && PathPrefix(`/_synapse/admin`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 200
+      tls: {}
+      middlewares:
+        - "block-metrics-external@file"
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-matrix-208:
+      rule: "Host(`matrix.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      priority: 100
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+    router-ntfy-208:
+      rule: "Host(`ntfy.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    router-langfuse-208:
+      rule: "Host(`langfuse.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    # OPS-1123: Scanopy network topology UI. Internal-only (LAN access for security ops).
+    # No oauth2 forward-auth — scanopy has its own login. internal-only@file restricts
+    # to LAN so the scanner dashboard is not internet-facing.
+    router-scanopy-208:
+      rule: "Host(`scanopy.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "internal-only@file"
+        - "rate-limit@file"
+        - "security-headers@file"
+
+    # OPS-816: VictoriaLogs log-ingestion endpoint. Internal-only (Promtail push +
+    # Grafana datasource from LAN). Not internet-facing — internal-only@file blocks
+    # all non-LAN requests. No oauth2 forward-auth so Promtail can push directly.
+    router-victorialogs-208:
+      rule: "Host(`victorialogs.208.haist.farm`)"
+      entryPoints:
+        - "websecure"
+      service: "service-okd-208"
+      tls: {}
+      middlewares:
+        - "internal-only@file"
+        - "rate-limit@file"
+        - "security-headers@file"
+  middlewares:
+    strip-forwarded-host:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Host: ""
+
+  services:
+    # Istio IngressGateway via HAProxy (meshed services, HTTP)
+    service-istio-gateway:
+      loadBalancer:
+        servers:
+          - url: "http://192.168.12.210:8081"
+    # OKD Router via HAProxy (unmeshed services, HTTPS)
+    service-okd-208:
+      loadBalancer:
+        serversTransport: "transport-okd-208"
+        servers:
+          - url: "https://192.168.12.210:443"

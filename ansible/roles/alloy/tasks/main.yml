@@ -1,0 +1,82 @@
+- name: Create alloy group
+  ansible.builtin.group:
+    name: "{{ alloy_group }}"
+    system: true
+  when: alloy_enabled
+
+- name: Create alloy user
+  ansible.builtin.user:
+    name: "{{ alloy_user }}"
+    group: "{{ alloy_group }}"
+    groups: systemd-journal
+    system: true
+    shell: /sbin/nologin
+    home: "{{ alloy_data_dir }}"
+    create_home: true
+  when: alloy_enabled
+
+- name: Create alloy directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ alloy_user }}"
+    group: "{{ alloy_group }}"
+    mode: "0755"
+  loop:
+    - "{{ alloy_config_dir }}"
+    - "{{ alloy_data_dir }}"
+  when: alloy_enabled
+
+- name: Download Grafana Alloy binary
+  ansible.builtin.get_url:
+    url: "https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/alloy-linux-amd64.zip"
+    dest: "/tmp/alloy-{{ alloy_version }}.zip"
+    mode: "0644"
+  when: alloy_enabled
+  notify: Restart alloy
+
+- name: Extract Alloy binary
+  ansible.builtin.unarchive:
+    src: "/tmp/alloy-{{ alloy_version }}.zip"
+    dest: /tmp/
+    remote_src: true
+  when: alloy_enabled
+
+- name: Install Alloy binary
+  ansible.builtin.copy:
+    src: /tmp/alloy-linux-amd64
+    dest: "{{ alloy_binary_path }}"
+    mode: "0755"
+    owner: root
+    group: root
+    remote_src: true
+  when: alloy_enabled
+  notify: Restart alloy
+
+- name: Deploy Alloy configuration
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: "{{ alloy_config_dir }}/config.alloy"
+    owner: "{{ alloy_user }}"
+    group: "{{ alloy_group }}"
+    mode: "0640"
+  when: alloy_enabled
+  notify: Restart alloy
+
+- name: Deploy Alloy systemd unit
+  ansible.builtin.template:
+    src: alloy.service.j2
+    dest: /etc/systemd/system/alloy.service
+    mode: "0644"
+  when: alloy_enabled
+  notify:
+    - Reload systemd
+    - Restart alloy
+
+- name: Enable and start Alloy
+  ansible.builtin.systemd:
+    name: alloy
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: alloy_enabled

@@ -1,0 +1,157 @@
+---
+# ntp-infrastructure.yml — OPS-288
+# Deploys internal NTP server infrastructure
+#
+# Design: Two internal NTP servers (iac-control + vault-server) upstream to NIST.
+# All clients point at 192.168.12.210 (iac-control) + 192.168.12.206 (vault-server).
+# NOTE: *.208.haist.farm is a wildcard DNS pointing to pangolin (192.168.12.168);
+# do NOT use FQDNs for NTP servers — use IPs.
+#
+# NIST controls: AU-8, AU-8(1), SC-45, AU-12
+#
+# Run order:
+#   1. Configure NTP servers first (they must be ready before clients poll)
+#   2. Configure NTP clients
+
+# -----------------------------------------------------------------------
+# Play 1a: iac-control as NTP server (local connection — iac-control
+#           cannot SSH back to itself via standard auth; runs local)
+# -----------------------------------------------------------------------
+- name: Configure iac-control as NTP server (local connection)
+  hosts: iac_control
+  become: true
+  connection: local
+
+  vars:
+    # Use IP not FQDN — *.208.haist.farm is wildcard DNS to pangolin (192.168.12.168)
+    chrony_peer: "192.168.12.206"
+
+  roles:
+    - role: chrony-server
+      tags: [chrony-server, ntp]
+
+  post_tasks:
+    - name: Force immediate time step on NTP server
+      ansible.builtin.command:
+        cmd: chronyc makestep
+      changed_when: false
+      tags: [chrony-server, ntp]
+
+    - name: Show NTP server source status
+      ansible.builtin.command:
+        cmd: chronyc sources -v
+      register: ntp_sources
+      changed_when: false
+      tags: [chrony-server, ntp]
+
+    - name: Display NTP sources
+      ansible.builtin.debug:
+        var: ntp_sources.stdout_lines
+      tags: [chrony-server, ntp]
+
+# -----------------------------------------------------------------------
+# Play 1b: vault-server as NTP server (SSH via id_sentinel from iac-control)
+# Note: hosts.ini has ansible_user=root for vault but actual access is
+# via koiakoia (verified: root@vault-server rejects id_sentinel, koiakoia accepts).
+# ansible_user in vars overrides inventory ansible_user.
+# -----------------------------------------------------------------------
+- name: Configure vault-server as NTP server
+  hosts: vault
+  become: true
+
+  vars:
+    # Override inventory ansible_user=root — koiakoia is the working SSH user
+    ansible_user: koiakoia
+    # Use IP not FQDN — *.208.haist.farm wildcard DNS points to pangolin
+    chrony_peer: "192.168.12.210"
+
+  roles:
+    - role: chrony-server
+      tags: [chrony-server, ntp]
+
+  post_tasks:
+    - name: Force immediate time step on NTP server
+      ansible.builtin.command:
+        cmd: chronyc makestep
+      changed_when: false
+      tags: [chrony-server, ntp]
+
+    - name: Show NTP server source status
+      ansible.builtin.command:
+        cmd: chronyc sources -v
+      register: ntp_sources
+      changed_when: false
+      tags: [chrony-server, ntp]
+
+    - name: Display NTP sources
+      ansible.builtin.debug:
+        var: ntp_sources.stdout_lines
+      tags: [chrony-server, ntp]
+
+# -----------------------------------------------------------------------
+# Play 2: NTP clients — all managed VMs except the NTP servers themselves
+# Note: some hosts may be temporarily unreachable (config-server on OKD net,
+# pangolin behind NAT, etc.). ignore_unreachable keeps the play moving.
+# -----------------------------------------------------------------------
+- name: Configure NTP clients (managed VMs)
+  hosts: managed_vms:!iac_control:!vault
+  become: true
+  ignore_unreachable: true
+
+  roles:
+    - role: chrony-client
+      tags: [chrony-client, ntp]
+
+  post_tasks:
+    - name: Force immediate time step after config
+      ansible.builtin.command:
+        cmd: chronyc makestep
+      changed_when: false
+      failed_when: false
+      tags: [chrony-client, ntp]
+
+    - name: Show NTP client source status
+      ansible.builtin.command:
+        cmd: chronyc sources
+      register: ntp_sources
+      changed_when: false
+      tags: [chrony-client, ntp]
+
+    - name: Display NTP sources
+      ansible.builtin.debug:
+        var: ntp_sources.stdout_lines
+      tags: [chrony-client, ntp]
+
+# -----------------------------------------------------------------------
+# Play 3: NTP clients — Proxmox hosts (root user, id_ed25519 key)
+# Proxmox hosts managed directly as root — no become needed.
+# ignore_unreachable: some nodes may be in maintenance/powered off.
+# -----------------------------------------------------------------------
+- name: Configure NTP clients (Proxmox hosts)
+  hosts: proxmox
+  become: false
+  ignore_unreachable: true
+
+  roles:
+    - role: chrony-client
+      tags: [chrony-client, ntp, proxmox]
+
+  post_tasks:
+    - name: Force immediate time step after config
+      ansible.builtin.command:
+        cmd: chronyc makestep
+      changed_when: false
+      failed_when: false
+      tags: [chrony-client, ntp]
+
+    - name: Show NTP client source status
+      ansible.builtin.command:
+        cmd: chronyc sources
+      register: ntp_sources
+      changed_when: false
+      tags: [chrony-client, ntp]
+
+    - name: Display NTP sources
+      ansible.builtin.debug:
+        var: ntp_sources.stdout_lines
+      tags: [chrony-client, ntp]

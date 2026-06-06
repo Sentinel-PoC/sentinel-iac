@@ -1,0 +1,36 @@
+---
+# ansible-lint configuration for sentinel-iac/ansible/
+# OPS-456: ansible-lint violation cleanup — Phase 0 skip_list
+#
+# skip_list contains rules that are false-positives for private internal
+# repos. These rules exist to enforce Galaxy-publishing conventions and
+# do not apply to infrastructure code that is never published to Galaxy.
+#
+# Phases of violation cleanup:
+#   Phase 0 (this PR): skip_list for Galaxy false-positives
+#   Phase 1 (this PR): --fix for risky-shell-pipe (auto-fixable)
+#   Phase 2+: manual remediation of name[casing], schema[meta], etc.
+
+skip_list:
+  # role-name: roles use hyphens (e.g. authentik-host, chrony-client).
+  # Hyphens are valid and readable for internal roles; the underscore
+  # requirement only matters for Galaxy publishing.
+  - role-name
+
+  # var-naming[no-role-prefix]: variables inside roles do not need the
+  # role name as a prefix for internal repos. This is a Galaxy convention
+  # to avoid namespace collisions when roles are shared publicly.
+  - var-naming[no-role-prefix]
+
+  # var-naming[pattern]: CANARY_* variables are intentionally uppercase
+  # per the Canarytokens application convention. Renaming them would
+  # require coordinated changes across multiple roles and playbooks.
+  - var-naming[pattern]
+
+  # schema[meta]: galaxy_info.author and galaxy_info.license are required by
+  # Galaxy for public role publishing. The following internal-only roles are
+  # not published to Galaxy and lack these fields (by design — adding fake
+  # metadata would be misleading): authentik-host (no author), powerdns-lxc,
+  # truenas-backup, truenas-jit-ssh (no license).
+  # OPS-456 Phase 2: suppress rather than fabricate required Galaxy fields.
+  - schema[meta]

@@ -1,0 +1,16 @@
+---
+# handlers/main.yml — whisper-piper-host role (OPS-586 Section B)
+
+- name: Restart Docker in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- systemctl restart docker"
+  changed_when: true
+  listen: "Restart Docker in ai-tier1 LXC"
+
+- name: Restart Wyoming services in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "cd {{ wyoming_deploy_dir }} && docker compose restart"
+  changed_when: true
+  listen: "Restart Wyoming services in ai-tier1 LXC"

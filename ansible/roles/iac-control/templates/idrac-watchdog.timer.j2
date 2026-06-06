@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=iDRAC Watchdog every 5 minutes (offset from health check)
+
+[Timer]
+OnCalendar={{ idrac_watchdog_schedule }}
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

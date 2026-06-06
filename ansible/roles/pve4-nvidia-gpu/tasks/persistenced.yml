@@ -1,0 +1,107 @@
+---
+# persistenced.yml — Phase 1b: nvidia-persistenced + boot-time modprobe warmup
+# Relates to OPS-564 / pve4-nvidia-boot-race-fix (2026-05-14)
+#
+# Problem this file solves:
+#   After pve4 reboots, /dev/nvidia* device nodes are NOT present on the PVE host
+#   until something exercises the driver (e.g., first nvidia-smi call). Jellyfin
+#   LXC 100 (onboot:1) auto-starts and races with driver materialisation. If
+#   Jellyfin queries the GPU during the dead window it caches "no GPU available"
+#   and falls back to software transcoding for the session.
+#
+# Two-layer fix:
+#   1. nvidia-persistenced daemon  — keeps the NVIDIA driver resident / device nodes
+#      alive even when no client process holds the device open. This is the
+#      canonical NVIDIA-recommended approach for persistent GPU access.
+#   2. nvidia-modprobe-warmup.service — one-shot systemd unit that runs
+#      Before=pve-guests.service to ensure /dev/nvidia* nodes exist before LXC
+#      autostart. Covers the boot window before nvidia-persistenced is up AND
+#      acts as a hard ordering fence regardless of persistenced timing.
+#
+# Note: nvidia_uvm_major_fact dynamic detection (host_driver.yml) is NOT disturbed.
+# Note: LXC cgroup-passthrough config (lxc_provision.yml) is NOT modified here.
+
+# ── nvidia-persistenced ────────────────────────────────────────────────────────
+# nvidia-persistenced ships as an optional component in NVIDIA's driver suite.
+# On Debian/Proxmox it is a separate apt package. It creates and holds the
+# /dev/nvidia* device nodes open so they remain materialised at all times,
+# eliminating the lazy-initialisation window entirely.
+
+- name: Install nvidia-persistenced package
+  ansible.builtin.apt:
+    name: nvidia-persistenced
+    state: present
+  tags:
+    - nvidia-driver
+    - persistenced
+
+- name: Enable and start nvidia-persistenced service
+  ansible.builtin.systemd:
+    name: nvidia-persistenced
+    enabled: true
+    state: started
+    daemon_reload: false
+  tags:
+    - nvidia-driver
+    - persistenced
+
+# ── Boot-time warmup unit ──────────────────────────────────────────────────────
+# Belt-and-suspenders: even if nvidia-persistenced is delayed or fails, this
+# one-shot unit runs before pve-guests.service and forces /dev/nvidia* creation
+# by calling nvidia-modprobe. RemainAfterExit=yes means systemd considers it
+# active after ExecStart completes, which satisfies any Before= dependents.
+
+- name: Deploy nvidia-modprobe-warmup.service unit file
+  ansible.builtin.copy:
+    src: nvidia-modprobe-warmup.service
+    dest: /etc/systemd/system/nvidia-modprobe-warmup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd daemon
+  tags:
+    - nvidia-driver
+    - persistenced
+    - boot-order
+
+- name: Enable nvidia-modprobe-warmup.service (ordered Before=pve-guests.service)
+  ansible.builtin.systemd:
+    name: nvidia-modprobe-warmup.service
+    enabled: true
+    state: started
+    daemon_reload: false
+  tags:
+    - nvidia-driver
+    - persistenced
+    - boot-order
+
+# ── Verify boot ordering ───────────────────────────────────────────────────────
+# Confirm that systemd has registered the Before= dependency correctly.
+# This is a read-only check — no changes made.
+
+- name: Verify nvidia-modprobe-warmup is ordered before pve-guests.service
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      systemctl list-dependencies pve-guests.service --before |
+        grep -q nvidia-modprobe-warmup.service
+    executable: /bin/bash
+  register: warmup_ordering_check
+  changed_when: false
+  failed_when: warmup_ordering_check.rc != 0
+  tags:
+    - nvidia-driver
+    - persistenced
+    - boot-order
+    - verify
+
+- name: Report boot ordering result
+  ansible.builtin.debug:
+    msg: >-
+      nvidia-modprobe-warmup.service is registered Before=pve-guests.service.
+      /dev/nvidia* nodes will materialise before LXC autostart on next pve4 reboot.
+  tags:
+    - nvidia-driver
+    - persistenced
+    - boot-order
+    - verify

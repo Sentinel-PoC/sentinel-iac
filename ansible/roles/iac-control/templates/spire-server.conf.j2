@@ -1,0 +1,94 @@
+# SPIRE Server configuration
+# Deployed by Ansible — OPS-352
+# Trust domain: {{ spire_trust_domain }}
+# Managed: do not edit manually; changes will be overwritten on next Ansible run.
+
+server {
+    bind_address = "0.0.0.0"
+    bind_port = "{{ spire_server_grpc_port }}"
+    trust_domain = "{{ spire_trust_domain }}"
+    data_dir = "{{ spire_server_data_dir_container }}"
+    log_level = "{{ spire_server_log_level }}"
+    default_x509_svid_ttl = "{{ spire_default_x509_svid_ttl }}"
+    default_jwt_svid_ttl = "{{ spire_default_jwt_svid_ttl }}"
+    ca_ttl = "{{ spire_ca_ttl }}"
+    ca_subject {
+        country = ["US"]
+        organization = ["HAIST"]
+        common_name = ""
+    }
+}
+
+plugins {
+    # SQLite datastore — single instance, no HA (appropriate at this scale)
+    DataStore "sql" {
+        plugin_data {
+            database_type = "sqlite3"
+            connection_string = "{{ spire_server_data_dir_container }}/datastore.sqlite3"
+        }
+    }
+
+    # x509pop node attestor — OPS-553, replaces join_token (reattestable=false).
+    # Each SPIRE Agent presents a Vault PKI-issued client cert at attestation time.
+    # The server verifies the cert against the trusted CA bundle (spire-pki/ chain).
+    # SPIFFE ID derived as: spiffe://agents.haist.farm/spire/agent/x509pop/<fingerprint>
+    # where <fingerprint> = SHA-1 of the SubjectPublicKeyInfo DER — stable across
+    # restarts as long as the cert key file is preserved on disk.
+    # CA bundle is the spire-pki/ intermediate + spire-root/ chain, provisioned by
+    # docker-services.yml --tags spire-node-certs from Vault spire-pki/ca/pem.
+    NodeAttestor "x509pop" {
+        plugin_data {
+            ca_bundle_path = "{{ spire_server_trusted_ca_bundle_container }}"
+        }
+    }
+
+    # join_token attestor kept TRANSITIONALLY during x509pop migration.
+    # Remove this block after all agents have re-attested via x509pop and
+    # workload entries are reparented to x509pop SPIFFE IDs.
+    # Remove tag: [OPS-553-cleanup] — operator-gated after first successful x509pop cycle.
+    NodeAttestor "join_token" {
+        plugin_data {}
+    }
+
+    # Disk key manager — keys persist across SPIRE Server restarts in the data dir
+    KeyManager "disk" {
+        plugin_data {
+            keys_path = "{{ spire_server_data_dir_container }}/keys.json"
+        }
+    }
+
+    # Vault upstream authority — chains SPIRE trust root to Vault PKI
+    # PKI mount: {{ spire_vault_pki_mount }}/
+    # Auth: AppRole (role spire-server-upstream-authority, policy spire-upstream-authority)
+    # role_id + secret_id rendered inline at deploy time (Ansible fetches from Vault KV).
+    # Vault TLS: Let's Encrypt cert on vault.208.haist.farm — system-trusted, no custom CA needed
+    UpstreamAuthority "vault" {
+        plugin_data {
+            vault_addr                = "{{ spire_vault_addr }}"
+            pki_mount_point  = "{{ spire_vault_pki_mount }}"
+            auth_method      = "approle"
+            approle_auth {
+                approle_auth_mount_point = "approle"
+                approle_id        = "{{ spire_vault_approle_id }}"
+                approle_secret_id = "{{ spire_vault_approle_secret_id }}"
+            }
+        }
+    }
+}
+
+health_checks {
+    listener_enabled = true
+    bind_address     = "0.0.0.0"
+    bind_port        = "{{ spire_server_health_port }}"
+    live_path        = "/live"
+    ready_path       = "/ready"
+}
+
+telemetry {
+    # Prometheus metrics on container port {{ spire_telemetry_port }}
+    # Not externally wired to Prometheus in Phase 4.1 — port available for
+    # scrape config wiring in a follow-up issue.
+    Prometheus {
+        port = {{ spire_telemetry_port }}
+    }
+}

@@ -1,0 +1,306 @@
+---
+# OKD sandbox cluster — upgrade pipeline.
+#
+# Trigger model (per OPS-269 PIVOT):
+#   * Push to `infrastructure/okd-sandbox/cluster-version.yaml` on `main`
+#     (the version-bump PR IS the change-approval gate — NIST CM-3, CM-3(4))
+#   * workflow_dispatch with `dry_run` input for manual rehearsal
+#
+# Phases (single job, phase-named steps so kubeconfig + state pass cleanly):
+#   1. preflight  — etcd backup age, no MCP paused, target in graph, cluster healthy
+#   2. upgrade    — `oc adm upgrade --to-image=<digest>` (skipped if dry_run)
+#   3. poll       — ClusterVersion.history → Completed, MCPs Updated=True
+#   4. validate   — full smoke; etcd quorum, all CO healthy, nodes Ready
+#   5. notify     — `if: always()` Plane comment on UPGRADE_TRACKING_ISSUE
+#
+# DESIGN NOTES
+# ============
+#   * Single `runs-on: iac` job — preserves `KUBECONFIG` + `DIAGNOSTICS_DIR`
+#     between phases without re-pulling kubeconfig per job (which would also
+#     need a per-job Vault auth dance).
+#   * All shared logic lives in `.forgejo/workflows/lib/upgrade-functions.sh`
+#     so the prod variant (`okd-upgrade-prod.yaml`) is a 5-line env diff,
+#     not a fork.
+#   * Diagnostics are uploaded as a workflow artefact AND structured as a
+#     paste-ready prompt for a fresh Claude Code session — that's the
+#     "LLM-assist hook" Jim asked for.
+
+name: OKD Upgrade — Sandbox
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/okd-sandbox/cluster-version.yaml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run preflight + validate only; SKIP upgrade phase.'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      allow_not_recommended:
+        description: 'Pass --allow-not-recommended to oc adm upgrade. Required for OKD-SCOS where the graph is sparse.'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# Avoid two concurrent upgrade runs racing each other.
+concurrency:
+  group: okd-upgrade-sandbox
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    runs-on: iac
+    timeout-minutes: 240
+    env:
+      VAULT_ADDR: https://192.168.12.206:8200
+      VAULT_TOKEN: ${{ secrets.VAULT_ROOT_TOKEN }}
+      PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+      PLANE_WORKSPACE: haists-it-consulting
+      PLANE_PROJECT_ID: 223c0b66-4255-406e-932f-3b50c0e93543
+      # Tracking issue for upgrade results.
+      # OPS-269 (this pipeline). When the actual sandbox upgrade rehearsal
+      # tasks (#10, #11) get Plane issues, point this at those.
+      UPGRADE_TRACKING_ISSUE: 46b708cd-7045-4297-b8ce-4a2511448d0b
+      # Cluster-version source-of-truth file (sandbox).
+      CLUSTER_VERSION_FILE: infrastructure/okd-sandbox/cluster-version.yaml
+      # Vault path holding the cluster's kubeconfig (Phase 2 stash).
+      VAULT_KUBECONFIG_PATH: secret/okd-sandbox
+      VAULT_KUBECONFIG_FIELD: kubeconfig
+      # Phase budgets — overridable via workflow_dispatch in a follow-up
+      # if rehearsal data shows the defaults are wrong.
+      ETCD_BACKUP_MAX_AGE_HOURS: '24'
+      MASTER_MCP_BUDGET_MIN: '60'
+      WORKER_MCP_BUDGET_MIN: '90'
+      OPERATOR_STUCK_BUDGET_MIN: '30'
+      ETCD_LATENCY_MAX_MS: '100'
+      # Resolve dry-run from workflow_dispatch input (default true) OR
+      # default to false when triggered by a real version-bump push.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'false' }}
+      ALLOW_NOT_RECOMMENDED: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.allow_not_recommended || 'true' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull kubeconfig from Vault
+        id: kc
+        run: |
+          set -euo pipefail
+          # IMPORTANT: write to a workflow-private path, never to ${HOME}/.kube/config.
+          # On iac-control the forgejo-runner runs as user `ubuntu`, whose
+          # ~/.kube/config is a SYMLINK to the operator's persistent kubeconfig.
+          # A naive `> ${HOME}/.kube/config` follows the symlink and truncates
+          # the operator's working kubeconfig if vault exits 0 with empty output
+          # (which v1.21.3 does on 403 — see prod workflow comment).
+          KCFG="${RUNNER_TEMP:-/tmp}/okd-upgrade-sandbox-kubeconfig-${GITHUB_RUN_ID}"
+          : > "${KCFG}"
+          chmod 0600 "${KCFG}"
+          vault kv get -field="${VAULT_KUBECONFIG_FIELD}" "${VAULT_KUBECONFIG_PATH}" \
+            > "${KCFG}"
+          # Guard: vault v1.21.3 exits 0 on 403 (invalid-token / policy denied);
+          # the redirect writes an empty file. set -euo pipefail does NOT catch
+          # this. Fail here with a clear message rather than propagating an empty
+          # kubeconfig into every subsequent oc call (which also exits 0 silently).
+          if [[ ! -s "${KCFG}" ]]; then
+            echo "::error::Empty kubeconfig after vault kv get — vault step failed silently (likely token policy/expiry). Aborting."
+            echo "## Vault step failed silently (empty kubeconfig)" >> "${GITHUB_STEP_SUMMARY}"
+            exit 1
+          fi
+          echo "KUBECONFIG=${KCFG}" >> "${GITHUB_ENV}"
+          # Stable diagnostics dir for the whole run
+          echo "DIAGNOSTICS_DIR=${RUNNER_TEMP:-/tmp}/okd-upgrade-diag-${GITHUB_RUN_ID}" >> "${GITHUB_ENV}"
+
+      - name: Show cluster + target
+        run: |
+          set -euo pipefail
+          echo "=== current cluster ==="
+          oc whoami
+          oc get clusterversion
+          echo "=== target (from ${CLUSTER_VERSION_FILE}) ==="
+          cat "${CLUSTER_VERSION_FILE}"
+
+      # ---------------- 1. PREFLIGHT ----------------
+      - name: Phase 1 — preflight
+        id: preflight
+        run: |
+          set -euo pipefail
+          source .forgejo/workflows/lib/upgrade-functions.sh
+          upgrade::_init_defaults
+          TARGET_IMAGE=$(upgrade::desired_image)
+          TARGET_VERSION=$(upgrade::desired_version)
+          echo "TARGET_IMAGE=${TARGET_IMAGE}"     >> "${GITHUB_ENV}"
+          echo "TARGET_VERSION=${TARGET_VERSION}" >> "${GITHUB_ENV}"
+
+          # NOOP-detect: if cluster already runs the target digest, exit 0
+          # immediately — no upgrade action needed. Sets NOOP=true in GITHUB_ENV
+          # so phases 2-4 are skipped via their if: conditions. Notify posts PASS.
+          if upgrade::is_noop "${TARGET_IMAGE}"; then
+            exit 0
+          fi
+
+          upgrade::check_etcd_backup_age
+          upgrade::check_no_mcp_paused
+          upgrade::check_cluster_health
+          upgrade::check_target_in_graph "${TARGET_IMAGE}" "${TARGET_VERSION}"
+
+          # Detect already-in-progress for idempotency. Sets ALREADY_IN_PROGRESS=true
+          # so the upgrade step can skip without failing.
+          if upgrade::check_already_in_progress "${TARGET_IMAGE}"; then
+            echo "ALREADY_IN_PROGRESS=true" >> "${GITHUB_ENV}"
+          fi
+
+      # ---------------- 2. UPGRADE ----------------
+      - name: Phase 2 — initiate upgrade
+        if: env.DRY_RUN != 'true' && env.ALREADY_IN_PROGRESS != 'true' && env.NOOP != 'true'
+        id: initiate
+        run: |
+          set -euo pipefail
+          source .forgejo/workflows/lib/upgrade-functions.sh
+          upgrade::_init_defaults
+          upgrade::initiate_upgrade "${TARGET_IMAGE}"
+          echo "## Upgrade initiated" >> "${GITHUB_STEP_SUMMARY}"
+          echo "* target: \`${TARGET_VERSION}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "* image:  \`${TARGET_IMAGE}\`"   >> "${GITHUB_STEP_SUMMARY}"
+          echo "* started: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Phase 2 — DRY RUN (skip)
+        if: env.DRY_RUN == 'true' && env.NOOP != 'true'
+        run: |
+          echo "::notice::DRY_RUN=true — Phase 2 (initiate upgrade) skipped."
+          echo "## DRY RUN" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Phase 2 skipped. Preflight + validate phases still ran." >> "${GITHUB_STEP_SUMMARY}"
+
+      # ---------------- 3. POLL ----------------
+      - name: Phase 3 — poll until complete
+        if: env.DRY_RUN != 'true' && env.NOOP != 'true'
+        id: poll
+        run: |
+          set -euo pipefail
+          source .forgejo/workflows/lib/upgrade-functions.sh
+          upgrade::_init_defaults
+          # Combined ClusterVersion budget = sum of MCP budgets + slack.
+          CV_BUDGET=$(( MASTER_MCP_BUDGET_MIN + WORKER_MCP_BUDGET_MIN + OPERATOR_STUCK_BUDGET_MIN ))
+          if ! upgrade::poll_clusterversion "${TARGET_VERSION}" "${CV_BUDGET}"; then
+            upgrade::dump_diagnostics "clusterversion-poll-budget-exceeded"
+            exit 1
+          fi
+          if ! upgrade::poll_mcps; then
+            upgrade::dump_diagnostics "mcp-poll-budget-exceeded"
+            exit 1
+          fi
+
+      # ---------------- 4. VALIDATE ----------------
+      - name: Phase 4 — validate
+        if: env.NOOP != 'true'
+        id: validate
+        run: |
+          set -euo pipefail
+          source .forgejo/workflows/lib/upgrade-functions.sh
+          upgrade::_init_defaults
+          # In dry-run: validate against CURRENT cluster version.
+          # In real run: validate against TARGET_VERSION.
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            CHECK_VERSION=$(oc get clusterversion version -o jsonpath='{.status.history[0].version}')
+            upgrade::log "DRY_RUN: validating against current ${CHECK_VERSION} (no upgrade was triggered)"
+          else
+            CHECK_VERSION="${TARGET_VERSION}"
+          fi
+          if ! upgrade::validate_post "${CHECK_VERSION}"; then
+            upgrade::dump_diagnostics "validate-failed"
+            exit 1
+          fi
+
+      # ---------------- artefact + notify (always-runs) ----------------
+      - name: Upload diagnostics (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: okd-upgrade-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ env.DIAGNOSTICS_DIR }}/
+
+      - name: Phase 5 — notify Plane
+        if: always()
+        env:
+          OUTCOME: ${{ job.status == 'success' && 'PASS' || 'FAIL' }}
+        run: |
+          set -euo pipefail
+          source .forgejo/workflows/lib/upgrade-functions.sh
+          upgrade::_init_defaults
+          BODY="<p><strong>Job status:</strong> ${{ job.status }}</p>"
+          if [[ "${NOOP:-false}" == "true" ]]; then
+            BODY="${BODY}<p><em>NOOP — target digest already deployed on cluster; no upgrade action taken. All upgrade phases skipped.</em></p>"
+          elif [[ "${DRY_RUN}" == "true" ]]; then
+            BODY="${BODY}<p><em>DRY RUN — preflight + validate ran; upgrade phase skipped.</em></p>"
+          fi
+          if [[ "${OUTCOME}" == "FAIL" ]]; then
+            BODY="${BODY}<p><strong>Diagnostics artefact:</strong> okd-upgrade-diagnostics-${{ github.run_id }} (see workflow run page).</p>"
+          fi
+          upgrade::post_plane_comment "${OUTCOME}" "${BODY}"
+
+      # Telegram is observability, not a gate. Missing secret → warn and continue.
+      - name: Phase 5 — notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OPS_CHAT_ID: ${{ secrets.TELEGRAM_OPS_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OUTCOME: ${{ job.status == 'success' && 'PASS' || 'FAIL' }}
+        run: |
+          set -uo pipefail
+          # Fail gracefully if secrets are absent.
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]] || [[ -z "${TELEGRAM_OPS_CHAT_ID:-}" ]]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_OPS_CHAT_ID not set — skipping Telegram notify."
+            echo "## Telegram notify skipped (secrets not configured)" >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          # HTML-escape a string (handles < > & in version labels / run titles).
+          html_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+          DRY_TAG=""
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            DRY_TAG=" [DRY RUN]"
+          fi
+
+          FROM_VER=$(oc get clusterversion version \
+            -o jsonpath='{.status.history[?(@.state=="Completed")].version}' 2>/dev/null \
+            | awk '{print $NF}' || echo "unknown")
+          FROM_ESC=$(html_escape "${FROM_VER}")
+          TO_ESC=$(html_escape "${TARGET_VERSION:-unknown}")
+          RUN_ESC=$(html_escape "${RUN_URL}")
+
+          if [[ "${OUTCOME}" == "PASS" ]]; then
+            MSG=$(printf '<b>OKD Upgrade PASS%s</b>\nCluster: sandbox\nTransition: <code>%s</code> \xe2\x86\x92 <code>%s</code>\nRun: %s' \
+              "${DRY_TAG}" "${FROM_ESC}" "${TO_ESC}" "${RUN_ESC}")
+          else
+            # Capture the first non-empty error line from GITHUB_STEP_SUMMARY if available.
+            TOP_ERR=$(grep -m1 '::error' "${GITHUB_STEP_SUMMARY:-/dev/null}" 2>/dev/null \
+              | sed 's/::error[^:]*:://' | cut -c1-120 || true)
+            TOP_ESC=$(html_escape "${TOP_ERR:-see diagnostics artefact}")
+            ARTEFACT_ESC=$(html_escape "okd-upgrade-diagnostics-${{ github.run_id }}")
+            MSG=$(printf '<b>OKD Upgrade FAIL%s</b>\nCluster: sandbox\nError: <code>%s</code>\nArtefact: <code>%s</code>\nRun: %s' \
+              "${DRY_TAG}" "${TOP_ESC}" "${ARTEFACT_ESC}" "${RUN_ESC}")
+          fi
+
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --data "{\"chat_id\":\"${TELEGRAM_OPS_CHAT_ID}\",\"parse_mode\":\"HTML\",\"text\":$(printf '%s' "${MSG}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage")
+
+          if [[ "${HTTP_STATUS}" != "200" ]]; then
+            echo "::warning::Telegram notify returned HTTP ${HTTP_STATUS} — message not delivered."
+            echo "## Telegram notify failed (HTTP ${HTTP_STATUS})" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          # Always exit 0 — Telegram failure must never block an upgrade outcome.
+          exit 0

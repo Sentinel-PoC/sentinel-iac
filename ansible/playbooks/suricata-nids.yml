@@ -1,0 +1,30 @@
+---
+# Suricata NIDS deployment playbook — OPS-569
+# Installs Suricata, configures ET Open ruleset via suricata-update,
+# enables PCAP capture with rolling rotation, and sets up Wazuh forwarding.
+#
+# Prerequisites:
+#   - wazuh-agent role must run FIRST (or Wazuh integration task will skip)
+#   - nids hosts must have a port-mirrored interface configured (OPS-567)
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/suricata-nids.yml
+#   ansible-playbook ansible/playbooks/suricata-nids.yml --tags install
+#   ansible-playbook ansible/playbooks/suricata-nids.yml --tags config
+#   ansible-playbook ansible/playbooks/suricata-nids.yml --tags rules
+#   ansible-playbook ansible/playbooks/suricata-nids.yml --tags wazuh
+
+- name: Deploy Suricata NIDS with ET Open ruleset
+  hosts: nids
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+
+    # Wazuh agent must be present for eve.json forwarding to work.
+    # If already deployed, this is idempotent.
+    - role: wazuh-agent
+      tags: [wazuh-agent, wazuh]
+
+    - role: suricata-nids
+      tags: [suricata, nids]

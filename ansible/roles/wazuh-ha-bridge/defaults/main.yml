@@ -1,0 +1,67 @@
+---
+# defaults/main.yml — wazuh-ha-bridge role (OPS-586 Section C)
+#
+# Bridges Wazuh manager alerts to Home Assistant via MQTT (mosquitto).
+# Architecture:
+#   Wazuh manager (192.168.12.100)
+#     └─ custom-ha-mqtt Python script (called by wazuh-integratord)
+#           └─ publishes to mosquitto (192.168.12.197:1883) topic: wazuh/alerts
+#                 └─ HA LXC (192.168.12.81) subscribes via MQTT integration
+#
+# Usage — this role is applied to THREE different hosts:
+#   1. wazuh-manager host: set wazuh_ha_configure_mosquitto=false wazuh_ha_configure_ha=false
+#   2. 208-pi-001 (mosquitto): set wazuh_ha_configure_wazuh=false wazuh_ha_configure_ha=false
+#   3. pve4-alienware (HA): set wazuh_ha_configure_wazuh=false wazuh_ha_configure_mosquitto=false
+#
+# Upstream refs:
+#   Wazuh custom integrations:
+#     https://documentation.wazuh.com/current/user-manual/manager/integration-with-external-apis.html
+#   HA MQTT integration:
+#     https://www.home-assistant.io/integrations/mqtt/
+#   HA Telegram bot integration:
+#     https://www.home-assistant.io/integrations/telegram_bot/
+
+# ── Task-set enable flags (set per-play) ──────────────────────────────────────
+wazuh_ha_configure_wazuh: true
+wazuh_ha_configure_mosquitto: true
+wazuh_ha_configure_ha: true
+
+# ── Wazuh manager ─────────────────────────────────────────────────────────────
+wazuh_manager_ip: "192.168.12.100"
+wazuh_ossec_conf: "/var/ossec/etc/ossec.conf"
+wazuh_integrations_dir: "/var/ossec/integrations"
+wazuh_etc_dir: "/var/ossec/etc"
+
+# Alert level to forward to HA (all alerts level >= this)
+wazuh_ha_alert_level: "3"
+
+# Alert level for critical Telegram notification
+wazuh_ha_critical_level: "10"
+
+# ── MQTT broker (mosquitto on 208-pi-001) ─────────────────────────────────────
+# Use VLAN-routable IP, NOT hostname — feedback_pangolin_dns_wildcard
+mqtt_host_ip: "192.168.12.197"
+mqtt_port: 1883
+
+# Topic hierarchy:
+#   wazuh/alerts           — per-alert JSON payload
+#   wazuh/status           — JSON: {manager_up: true, timestamp: ...}
+mqtt_alert_topic: "wazuh/alerts"
+mqtt_status_topic: "wazuh/status"
+
+# MQTT auto-discovery prefix (HA default)
+mqtt_discovery_prefix: "homeassistant"
+
+# ── Vault paths ───────────────────────────────────────────────────────────────
+# Created in pre-flight: secret/home-assistant/wazuh-mqtt-publisher
+wazuh_mqtt_vault_path: "secret/home-assistant/wazuh-mqtt-publisher"
+
+# Existing Telegram bot token (Section E creates it; Section C reads it)
+telegram_vault_path: "secret/home-assistant/telegram"
+
+# ── HA LXC target ─────────────────────────────────────────────────────────────
+ha_lxc_id: 201
+ha_config_dir: "/config"
+
+# ── Mosquitto user management ─────────────────────────────────────────────────
+mosquitto_passwd_file: "/etc/mosquitto/passwd"

@@ -1,0 +1,8 @@
+[Unit]
+Description=Sentinel Maintenance Mode Auto-Expire Check
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/scripts/sentinel-maintenance.sh status
+User=root

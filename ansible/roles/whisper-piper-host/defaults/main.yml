@@ -1,0 +1,110 @@
+---
+# defaults/main.yml — whisper-piper-host role
+# OPS-586 Section B: Wyoming Whisper + Piper voice services on pve4 GPU LXC
+#
+# ARCHITECTURE:
+#   HA is running as Container mode (Docker on LXC 201, 192.168.12.81) — NOT Supervised.
+#   The HA add-on store is NOT available. Whisper and Piper are deployed as standalone
+#   rhasspy/wyoming-* Docker containers inside the GPU LXC (VMID 200, 192.168.12.80).
+#   HA's Wyoming integration connects cross-host via 192.168.12.80:{10300,10200}.
+#
+# ROLE TARGET: pve4-alienware (192.168.12.60)
+#   All pct exec commands run on the PVE host and operate on VMID 200 (ai-tier1).
+#   ai-tier1 already has NVIDIA RTX 3060 passthrough from OPS-564 (pve4-nvidia-gpu role).
+#   Ollama (native, port 11434) is already running from OPS-564 — this role adds Docker
+#   and deploys Wyoming voice services alongside it.
+#
+# PRIVACY POSTURE:
+#   No audio leaves the LAN. All STT (Whisper) and TTS (Piper) processing runs entirely
+#   on pve4 GPU LXC at 192.168.12.80. The RTX 3060 handles Whisper inference; Piper
+#   runs CPU-only (fast enough without GPU for TTS latency requirements).
+
+# ── LXC reference ──────────────────────────────────────────────────────────────
+# References the ai-tier1 LXC provisioned by pve4-nvidia-gpu (OPS-564).
+# VMID and IP must match pve4-nvidia-gpu/defaults/main.yml values.
+whisper_piper_lxc_id: 200
+whisper_piper_lxc_ip: "192.168.12.80"
+
+# ── Toggle ─────────────────────────────────────────────────────────────────────
+whisper_piper_enabled: true
+
+# ── Deployment directory ───────────────────────────────────────────────────────
+wyoming_deploy_dir: "/opt/wyoming"
+wyoming_whisper_data_dir: "/opt/wyoming/whisper-data"
+wyoming_piper_data_dir: "/opt/wyoming/piper-data"
+
+# ── Wyoming Whisper (STT) ──────────────────────────────────────────────────────
+# Docker image: rhasspy/wyoming-whisper (Wyoming protocol wrapper for faster-whisper)
+# GitHub: https://github.com/rhasspy/wyoming-faster-whisper
+# Docker Hub: https://hub.docker.com/r/rhasspy/wyoming-whisper (3.9M+ pulls)
+# NOTE: GitHub repo name (wyoming-faster-whisper) ≠ Docker Hub image name (wyoming-whisper).
+#   Verified via hub.docker.com/v2/repositories/rhasspy/wyoming-whisper — active, 3.9M pulls.
+#   rhasspy/wyoming-faster-whisper on Docker Hub does not exist (404).
+# GPU: NVIDIA RTX 3060 via nvidia-container-toolkit runtime inside ai-tier1 LXC
+wyoming_whisper_image: "rhasspy/wyoming-whisper:latest"
+wyoming_whisper_port: 10300
+
+# Model selection:
+#   "turbo" — fastest large-v3-equivalent model, ideal for RTX 3060 (12GB VRAM).
+#             1.5GB download on first start. Best accuracy/speed tradeoff for local voice.
+#   "large-v3" — highest accuracy, ~3.1GB; usable but slower than turbo
+#   "small-int8" — much faster, lower accuracy; acceptable for simple HA commands
+#   "base-int8" — minimum viable for HA voice commands (Raspberry Pi baseline)
+# RTX 3060 with 12GB VRAM: "turbo" is the recommended choice.
+wyoming_whisper_model: "turbo"
+wyoming_whisper_language: "en"
+
+# beam_size: 5 is the non-ARM default (per Whisper DOCS.md "beam_size: 0 selects 5
+# for non-ARM"). Setting explicitly for clarity.
+wyoming_whisper_beam_size: 5
+
+# ── Wyoming Piper (TTS) ────────────────────────────────────────────────────────
+# Docker image: rhasspy/wyoming-piper (Wyoming protocol wrapper for Piper TTS)
+# Source: https://github.com/rhasspy/wyoming-piper
+# Voice samples: https://rhasspy.github.io/piper-samples/
+wyoming_piper_image: "rhasspy/wyoming-piper:latest"
+wyoming_piper_port: 10200
+
+# Voice selection (DESIGN CHOICE — see README.md for full rationale):
+#   en_US-ryan-high — warm, professional male voice, 22.05KHz high quality.
+#     "High" quality = slowest generation but best output; acceptable on pve4 hardware.
+#     Matches the Haists IT Consulting tone: grounded, clear, not overly synthetic.
+#
+#   Alternatives considered:
+#     en_US-lessac-medium — the official default; competent but neutral/flat
+#     en_US-joe-medium    — casual/conversational, less professional
+#     en_US-kristin-medium — female, warm; good alternative if preferred
+#     en_GB-cori-high     — British English, very high quality; distinct brand voice
+#
+# To change voice: update this var + re-run role. Piper downloads voices on first use.
+wyoming_piper_voice: "en_US-ryan-high"
+
+# Speaking rate (1.0 = default for the voice; < 1.0 faster, > 1.0 slower)
+wyoming_piper_length_scale: "1.0"
+
+# ── HA connection reference (documentation only — HA Wyoming is UI-configured) ──
+# These values document what the operator enters in HA UI:
+#   Settings > Devices & Services > Add Integration > Wyoming Protocol
+#     Whisper: host=192.168.12.80, port=10300
+#     Piper:   host=192.168.12.80, port=10200
+# See README.md for full step-by-step HA setup instructions.
+ha_wyoming_whisper_host: "{{ whisper_piper_lxc_ip }}"
+ha_wyoming_whisper_port: "{{ wyoming_whisper_port }}"
+ha_wyoming_piper_host: "{{ whisper_piper_lxc_ip }}"
+ha_wyoming_piper_port: "{{ wyoming_piper_port }}"
+
+# ── Ollama (optional — pre-existing from OPS-564) ─────────────────────────────
+# Ollama already runs natively on ai-tier1, port 11434, with llama3.2:3b.
+# HA Ollama conversation agent is UI-configured:
+#   Settings > Devices & Services > Add Integration > Ollama
+#     host: 192.168.12.80, port: 11434, model: llama3.2:3b
+# See README.md for instructions. This role does NOT deploy Ollama.
+ollama_host: "{{ whisper_piper_lxc_ip }}"
+ollama_port: 11434
+ollama_conversation_model: "llama3.2:3b"
+
+# ── Verification ───────────────────────────────────────────────────────────────
+# Timeout (seconds) waiting for Wyoming containers to become responsive
+wyoming_startup_timeout: 120
+wyoming_startup_retries: 12
+wyoming_startup_delay: 10

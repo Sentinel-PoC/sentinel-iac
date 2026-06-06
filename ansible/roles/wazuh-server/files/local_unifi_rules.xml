@@ -1,0 +1,169 @@
+<!--
+  - UniFi UDM Pro CEF rules — namespace 110000-110999
+  -
+  - Paired with /var/ossec/etc/decoders/local_unifi_decoders.xml.
+  - Rule-ID partition (per OPS-544 DESIGN-CALL Decision 1; revised from
+  - 92000-series after wazuh-logtest revealed conflict with stock Sysmon
+  - rules at 92000-92100 and PowerShell at 91801-92000):
+  -   110000-110099  UniFi CEF base / catch-all
+  -   110100-110199  UniFi Network IPS (the dashboard target)
+  -   110200-110299  UniFi Protect (motion, smartDetect, etc.)
+  -   110300-110399  UniFi Network client / asset events
+  -   110900-110999  UniFi OS test / diagnostic events
+  -
+  - Rule namespace separate from Suricata (86600-86699) because UniFi CEF
+  - events are vendor-classification-based, not per-flow IDS alerts. Mixing
+  - them creates rule maintenance friction. 110000+ range is the conventional
+  - place for site-local custom rules (above stock ruleset's 100000 ceiling).
+  -
+  - File path: /var/ossec/etc/rules/local_unifi_rules.xml (upgrade-safe)
+  - Plane: OPS-544
+-->
+
+<group name="unifi,unifi_cef,">
+
+  <!-- ============================================================
+       110000-110099 — Base / catch-all (level 0, used for chaining)
+       ============================================================ -->
+  <!-- 110000 is the decoder anchor. Level 0 = no alert. All Ubiquiti CEF
+       events match here; specific-category rules below chain off it.
+       Note: NO level>0 catch-all here. Document-order + level-tie-break
+       semantics in wazuh-analysisd would let a generic level-2 catch-all
+       win over more-specific same-level rules (verified during OPS-544
+       wazuh-logtest iteration). Cleaner: each meaningful event-class has
+       its own typed rule; unrecognized CEF shapes silently match 110000
+       only and don't alert (which is the desired behavior). -->
+  <rule id="110000" level="0">
+    <decoded_as>ubiquiti-cef</decoded_as>
+    <description>UniFi UDM CEF event (base)</description>
+  </rule>
+
+  <!-- ============================================================
+       110100-110199 — UniFi Network IPS / IDS (Threat Detected events)
+       Severity ladder driven by act + UNIFIrisk
+       ============================================================ -->
+  <rule id="110100" level="7">
+    <if_sid>110000</if_sid>
+    <field name="unifi_policy_type">IDS/IPS</field>
+    <description>UniFi IPS: $(unifi_event_name) — $(unifi_policy_name) — $(srcip) -> $(dstip)</description>
+    <group>unifi_ips,ids,attack,</group>
+  </rule>
+
+  <rule id="110101" level="8">
+    <if_sid>110100</if_sid>
+    <action>blocked</action>
+    <description>UniFi IPS blocked threat: $(unifi_ips_signature) ($(srcip) -> $(dstip))</description>
+    <group>unifi_ips,ids,attack,</group>
+  </rule>
+
+  <rule id="110102" level="12">
+    <if_sid>110100</if_sid>
+    <field name="unifi_risk">high</field>
+    <description>UniFi IPS HIGH-risk threat: $(unifi_ips_signature) ($(srcip) -> $(dstip))</description>
+    <group>unifi_ips,ids,attack,high_risk,</group>
+  </rule>
+
+  <rule id="110103" level="10">
+    <if_sid>110100</if_sid>
+    <action negate="yes">blocked</action>
+    <description>UniFi IPS threat NOT blocked: $(unifi_ips_signature) ($(srcip) -> $(dstip)) action=$(action)</description>
+    <group>unifi_ips,ids,attack,unblocked,</group>
+  </rule>
+
+  <!-- ============================================================
+       110110-110119 — UniFi IPS false-positive overrides
+       These child rules suppress 110101 (level 8 blocked-threat) for
+       known-benign event shapes where the ET signature fires correctly
+       on pattern but the source/destination are expected internal hosts.
+       Child rule wins per Wazuh most-specific-match semantics.
+       ============================================================ -->
+
+  <!-- OPS-672: ET SCAN Potential SSH Scan OUTBOUND from workstation (192.168.12.55)
+       to Tailscale CGNAT peer (100.x.x.x range) is expected operator behavior.
+       The operator workstation SSHing to Tailscale-addressed platform nodes
+       (iac-control, pve3, etc.) is normal daily use. The ET SCAN rule fires on
+       the SSH connection initiation pattern regardless of scan intent — a
+       low-specificity Suricata rule prone to false positives on outbound SSH.
+       Source classification: known host (208pc001 / 192.168.12.55).
+       Single event 2026-05-16; no pattern of genuine scan activity.
+       Level 3 = informational, below Discord threshold (>=7). -->
+  <rule id="110110" level="3">
+    <if_sid>110101</if_sid>
+    <srcip>192.168.12.55</srcip>
+    <field name="unifi_ips_signature">ET SCAN Potential SSH Scan</field>
+    <description>UniFi IPS: ET SCAN SSH FP — workstation SSH to Tailscale peer (OPS-672)</description>
+    <group>unifi_ips,ids,false_positive,</group>
+  </rule>
+
+  <!-- ============================================================
+       110200-110299 — UniFi Protect (camera / physical security)
+       ============================================================ -->
+  <rule id="110200" level="3">
+    <if_sid>110000</if_sid>
+    <field name="unifi_product">UniFi Protect</field>
+    <description>UniFi Protect event: $(unifi_event_name)</description>
+    <group>unifi_protect,physical_security,</group>
+  </rule>
+
+  <rule id="110201" level="3">
+    <if_sid>110200</if_sid>
+    <field name="unifi_event_type">motion</field>
+    <description>UniFi Protect motion detected: $(unifi_msg)</description>
+    <group>unifi_protect,physical_security,motion,</group>
+  </rule>
+
+  <rule id="110202" level="4">
+    <if_sid>110200</if_sid>
+    <field name="unifi_event_type">smartDetectZone</field>
+    <description>UniFi Protect smart-detect: $(unifi_msg)</description>
+    <group>unifi_protect,physical_security,smart_detect,</group>
+  </rule>
+
+  <!-- ============================================================
+       110300-110399 — UniFi Network client / asset events
+       ============================================================ -->
+  <rule id="110300" level="2">
+    <if_sid>110000</if_sid>
+    <field name="unifi_category">Client Devices</field>
+    <description>UniFi client device event: $(unifi_event_name)</description>
+    <group>unifi_client,asset,</group>
+  </rule>
+
+  <!-- Word-boundary anchored: <match>Connected</match> substring-matches
+       BOTH "Connected" and "Disconnected" (verified by wazuh-logtest during
+       OPS-544 iteration). Use pcre2 \b anchors on the unifi_event_name
+       field to discriminate. "\bConnected$" matches "Wired Client Connected"
+       but NOT "Wired Client Disconnected" (no word-boundary before internal
+       "Connected" inside "Disconnected"). -->
+  <rule id="110301" level="2">
+    <if_sid>110300</if_sid>
+    <field name="unifi_event_name" type="pcre2">\bConnected$</field>
+    <description>UniFi client connected: $(unifi_client_hostname) on $(unifi_network_name)</description>
+    <group>unifi_client,asset,connect,</group>
+  </rule>
+
+  <rule id="110302" level="2">
+    <if_sid>110300</if_sid>
+    <field name="unifi_event_name" type="pcre2">\bDisconnected$</field>
+    <description>UniFi client disconnected: $(unifi_client_hostname) from $(unifi_network_name)</description>
+    <group>unifi_client,asset,disconnect,</group>
+  </rule>
+
+  <!-- ============================================================
+       110900-110999 — UniFi OS test / diagnostic
+       ============================================================ -->
+  <rule id="110900" level="1">
+    <if_sid>110000</if_sid>
+    <field name="unifi_product">UniFi OS</field>
+    <description>UniFi OS event: $(unifi_event_name)</description>
+    <group>unifi_os,diagnostic,</group>
+  </rule>
+
+  <rule id="110901" level="1">
+    <if_sid>110900</if_sid>
+    <field name="unifi_event_name">Test Syslog</field>
+    <description>UniFi OS test syslog event (manual verification)</description>
+    <group>unifi_os,diagnostic,test_event,</group>
+  </rule>
+
+</group>

@@ -1,0 +1,25 @@
+---
+# config-server - HAProxy configuration
+# Identical to iac-control HAProxy for HA failover
+
+- name: Deploy HAProxy configuration
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "haproxy -c -f %s"
+  notify: Restart haproxy
+  tags:
+    - config-server
+    - haproxy
+
+- name: Enable and start HAProxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: started
+    enabled: true
+  tags:
+    - config-server
+    - haproxy

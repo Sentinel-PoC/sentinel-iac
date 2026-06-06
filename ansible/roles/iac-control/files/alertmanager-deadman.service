@@ -1,0 +1,18 @@
+# Ansible managed
+[Unit]
+Description=Alertmanager Dead-Man Switch — OPS-915
+Documentation=https://plane.208.haist.farm/haists-it-consulting/ops/issues/915
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/alertmanager-deadman.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alertmanager-deadman
+TimeoutStartSec=120
+# Script sources /etc/sentinel/alertmanager-deadman.env for credentials
+
+[Install]
+WantedBy=multi-user.target

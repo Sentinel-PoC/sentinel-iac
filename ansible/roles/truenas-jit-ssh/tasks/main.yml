@@ -1,0 +1,128 @@
+---
+# OPS-759: TrueNAS SCALE JIT SSH CA persistence.
+#
+# Problem: TrueNAS middleware regenerates /etc/ssh/sshd_config on every SSH
+# service restart, stripping TrustedUserCAKeys and any other non-allowlisted
+# directives. Standard lineinfile approach (used by roles/jit-ssh-trust for
+# Debian hosts) does not survive this regeneration cycle.
+#
+# Fix architecture (verified live 2026-05-20):
+#   1. /data/vault-ssh-ca.pem      — CA key on persistent ZFS dataset
+#   2. /etc/fix-sshd-ca.sh         — patch script (middleware does not touch /etc/)
+#   3. systemd drop-in             — ExecStartPost triggers script on every SSH start
+#   4. TrueNAS POSTINIT script     — covers initial boot before SSH service starts
+#
+# The script is idempotent: it checks whether TrustedUserCAKeys already appears
+# in the global sshd_config context (before any Match block) and exits 0 if so.
+# Uses background delayed HUP to avoid sending SIGHUP within ExecStartPost
+# (which would cause systemd to abort the service start).
+#
+# Verification: sshd -T | grep trustedusercakeys → trustedusercakeys /data/vault-ssh-ca.pem
+
+- name: Deploy Vault SSH CA public key to /data
+  ansible.builtin.copy:
+    src: "{{ truenas_jit_ssh_ca_pubkey_src }}"
+    dest: "{{ truenas_jit_ssh_ca_key_dest }}"
+    owner: root
+    group: wheel
+    mode: "0644"
+  tags:
+    - truenas-jit-ssh
+    - ssh
+    - vault-ssh
+
+- name: Deploy fix-sshd-ca.sh script to /etc
+  ansible.builtin.copy:
+    src: fix-sshd-ca.sh
+    dest: "{{ truenas_jit_ssh_script_dest }}"
+    owner: root
+    group: wheel
+    mode: "0755"
+  tags:
+    - truenas-jit-ssh
+    - ssh
+
+- name: Create systemd drop-in directory for ssh.service
+  ansible.builtin.file:
+    path: "{{ truenas_jit_ssh_dropin_dir }}"
+    state: directory
+    owner: root
+    group: wheel
+    mode: "0755"
+  tags:
+    - truenas-jit-ssh
+    - ssh
+
+- name: Deploy systemd drop-in (ExecStartPost)
+  ansible.builtin.copy:
+    src: fix-trustedca.conf
+    dest: "{{ truenas_jit_ssh_dropin_dir }}/fix-trustedca.conf"
+    owner: root
+    group: wheel
+    mode: "0644"
+  notify: Reload systemd daemon
+  tags:
+    - truenas-jit-ssh
+    - ssh
+
+- name: Reload systemd daemon to pick up drop-in
+  ansible.builtin.systemd:
+    daemon_reload: true
+  tags:
+    - truenas-jit-ssh
+    - ssh
+
+- name: Check if POSTINIT script already exists (deduplicate by comment)
+  ansible.builtin.command:
+    cmd: >
+      midclt call initshutdownscript.query
+      '[["comment","=","{{ truenas_jit_ssh_postinit_comment }}"]]'
+  register: truenas_postinit_check
+  changed_when: false
+  tags:
+    - truenas-jit-ssh
+    - truenas-api
+
+- name: Create TrueNAS POSTINIT script if not already present
+  ansible.builtin.command:
+    cmd: >
+      midclt call initshutdownscript.create
+      '{"type":"COMMAND","command":"bash {{ truenas_jit_ssh_script_dest }}",
+        "when":"POSTINIT","enabled":true,"timeout":30,
+        "comment":"{{ truenas_jit_ssh_postinit_comment }}"}'
+  changed_when: true
+  when: (truenas_postinit_check.stdout | from_json) | length == 0
+  tags:
+    - truenas-jit-ssh
+    - truenas-api
+
+- name: Run fix-sshd-ca.sh immediately to apply patch without reboot
+  ansible.builtin.command:
+    cmd: bash {{ truenas_jit_ssh_script_dest }}
+  changed_when: false
+  tags:
+    - truenas-jit-ssh
+    - ssh
+
+- name: Verify TrustedUserCAKeys is active in sshd runtime config
+  ansible.builtin.command:
+    cmd: sshd -T
+  register: sshd_runtime
+  changed_when: false
+  tags:
+    - truenas-jit-ssh
+    - ssh
+    - verify
+
+- name: Assert TrustedUserCAKeys is set to expected path
+  ansible.builtin.assert:
+    that:
+      - "'trustedusercakeys ' + truenas_jit_ssh_ca_key_dest in sshd_runtime.stdout"
+    fail_msg: >
+      TrustedUserCAKeys not found in sshd runtime config.
+      sshd -T output: {{ sshd_runtime.stdout | regex_findall('trustedusercakeys.*') }}
+    success_msg: "TrustedUserCAKeys correctly set to {{ truenas_jit_ssh_ca_key_dest }}"
+  tags:
+    - truenas-jit-ssh
+    - ssh
+    - verify

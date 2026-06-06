@@ -1,0 +1,64 @@
+# OPS-575: RCF Detector — Per-Canary-Token Activation Rate
+# Detects anomalous activation (trip) rates per canarytoken.
+# Entity-side baseline: each token_id gets its own RCF model.
+#
+# Apply via: POST /_plugins/_anomaly_detection/detectors
+# See compliance-vault/runbooks/rcf-tuning.md for deployment procedure.
+#
+# Input: Canarytokens trip events forwarded to OpenSearch.
+# Canary token events are expected to have near-zero baseline frequency;
+# any activation is high-signal, so the RCF primarily detects repeated
+# activation (scanning pattern) vs. single-event (human access).
+#
+# See: compliance-vault/runbooks/canarytoken-plant-strategy.md for token layout.
+
+detector:
+  name: per-canary-token-activation
+  description: >
+    RCF detector for per-canary-token activation rate. Repeated token trips
+    within a short window (scanning pattern) produce a higher anomaly score
+    than a single access. Entity-side baseline per OPS-575 / Plan G'
+    architecture (OPS-555, OPS-563). Input: Canarytokens trip events.
+  time_field: "@timestamp"
+
+  # Input: Canarytokens trip events index
+  # Adjust to match your Canarytokens/webhook forwarder index pattern
+  indices:
+    - canarytokens-*
+
+  features:
+    - feature_name: activation_count
+      feature_enabled: true
+      aggregation_query:
+        activation_count:
+          value_count:
+            field: token_id    # Canarytokens event field identifying the token
+
+  # Entity config: per token_id
+  category_field:
+    - token_id
+
+  # Detection window: 1-hour buckets
+  # Canary events are low-frequency; hourly window reduces noise
+  detection_interval:
+    period:
+      interval: 60
+      unit: Minutes
+
+  shingle_size: 24    # 24h lookback (1 day of hourly buckets)
+
+  window_delay:
+    period:
+      interval: 5
+      unit: Minutes
+
+  # No filter: all canary activations are noteworthy
+  filter_query:
+    match_all: {}
+
+  # Operational note: canarytokens have near-zero expected activation rate.
+  # A single trip is a point anomaly. Multiple trips in a short window
+  # (e.g., a scanner hitting a directory full of tokens) will produce a
+  # sustained high anomaly score. The RCF should train rapidly (even 1-2
+  # days) since the baseline is flat zero. Review anomaly score for any
+  # token that trips more than twice in a 24h window. See rcf-tuning.md.

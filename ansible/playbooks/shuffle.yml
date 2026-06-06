@@ -1,0 +1,57 @@
+---
+# Shuffle SOAR playbook — OPS-573
+# Deploys Shuffle SOAR platform (Docker Compose) with:
+#   - OpenSearch backend
+#   - Keycloak OIDC SSO (sentinel realm "shuffle" client)
+#   - Telegram confirm gate (standing bot from Vault secret/telegram/bot)
+#   - 5 G'-prime baseline workflows imported
+#
+# Pre-requisites (operator actions before running):
+#   1. Provision shuffle-server VM/LXC (recommend: 4 vCPU / 8 GB RAM / 60 GB disk)
+#      and add to inventory [shuffle] group:
+#        shuffle-server ansible_host=192.168.12.XXX ansible_user=ubuntu firewall_allowed_ports='[22,3001,5001]'
+#   2. Initialize Vault secrets:
+#        vault kv put secret/shuffle \
+#          admin_password="$(openssl rand -base64 24)" \
+#          api_token="" \
+#          oidc_client_secret="<from Keycloak shuffle client>"
+#        vault kv put secret/telegram/bot \
+#          token="<bot-api-token>" \
+#          chat_id="<channel-chat-id>"
+#   3. Create "shuffle" OIDC client in Keycloak sentinel realm:
+#        - standardFlowEnabled: true
+#        - redirectUris: ["https://shuffle.208.haist.farm/*"]
+#        - webOrigins: ["https://shuffle.208.haist.farm"]
+#        - Mappers: add "groups" claim (Group Membership type)
+#   4. Add Pangolin route for shuffle.208.haist.farm:
+#        - Frontend: shuffle-server:3001
+#        - Backend: shuffle-server:5001  (for API access at shuffle.208.haist.farm/api)
+#   5. After first deploy, retrieve the auto-generated api_token:
+#        docker exec shuffle-backend cat /shuffle-files/api_key.txt
+#        vault kv patch secret/shuffle api_token="<token-value>"
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini playbooks/shuffle.yml \
+#     -e vault_token=<scoped-vault-token>
+#
+# Tags available:
+#   shuffle       — all tasks
+#   vault         — Vault secret fetch only
+#   deploy        — Docker Compose stack only
+#   configure     — workflow import only
+#   verify        — verification checks only
+
+- name: Deploy Shuffle SOAR platform
+  hosts: shuffle
+  become: true
+  gather_facts: true
+
+  vars:
+    vault_addr: "https://vault.208.haist.farm"
+
+  roles:
+    - role: docker-host
+      tags: [docker]
+
+    - role: shuffle
+      tags: [shuffle]

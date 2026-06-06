@@ -1,0 +1,10 @@
+---
+# Workstation role entrypoint. Each include_tasks pulls one service-shaped
+# file with its own tag (so `--tags spire-agent` is selective). Today only
+# spire-agent; future workstation services land here as siblings.
+
+- name: Include SPIRE Agent install + bootstrap (OPS-533 / Phase 4.2b)
+  ansible.builtin.include_tasks: spire-agent.yml
+  tags:
+    - spire-agent
+    - workstation

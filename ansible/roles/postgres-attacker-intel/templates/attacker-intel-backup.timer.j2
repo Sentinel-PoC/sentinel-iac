@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# [OPS-566] Attacker Intelligence DB backup — systemd timer unit
+
+[Unit]
+Description=Nightly Attacker Intelligence DB backup timer
+Requires=attacker-intel-backup.service
+
+[Timer]
+{{ attacker_db_backup_schedule }}
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

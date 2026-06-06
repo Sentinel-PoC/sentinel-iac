@@ -1,0 +1,261 @@
+---
+# proxmox-gpu-passthrough tasks
+# OPS-492 Phase 4: IOMMU + VFIO GPU passthrough for PVE hosts
+#
+# All tasks are gated on gpu_passthrough_enabled. Safe to include in any
+# PVE playbook — does nothing when flag is false.
+#
+# Execution order (matters for GRUB + initramfs correctness):
+#   1. Validate inputs
+#   2. Set GRUB IOMMU parameters
+#   3. Configure VFIO kernel modules (modules-load.d)
+#   4. Configure VFIO PCI ID binding (modprobe.d/vfio.conf)
+#   5. Blacklist host GPU drivers (nouveau + nvidia)
+#   6. Flush handlers: update-grub → update-initramfs (in handler order)
+#   7. Reboot (handler, if gpu_passthrough_reboot_on_change)
+#   8. Post-reboot verification
+
+- name: Validate gpu_passthrough_pci_ids is set when enabled
+  ansible.builtin.assert:
+    that:
+      - gpu_passthrough_pci_ids | length > 0
+    fail_msg: >
+      gpu_passthrough_enabled is true but gpu_passthrough_pci_ids is empty.
+      Set it in host_vars (e.g., ["10de:2504", "10de:228e"]).
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - validate
+
+- name: Validate cpu_iommu_arch is amd or intel
+  ansible.builtin.assert:
+    that:
+      - cpu_iommu_arch in ["amd", "intel"]
+    fail_msg: >
+      cpu_iommu_arch must be "amd" or "intel", got: {{ cpu_iommu_arch }}
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - validate
+
+# ── GRUB ──────────────────────────────────────────────────────────────────────
+
+- name: Set IOMMU GRUB kernel parameters
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: >-
+      GRUB_CMDLINE_LINUX_DEFAULT="quiet {% if cpu_iommu_arch == 'intel' %}intel_iommu=on {% endif %}iommu=pt"
+    state: present
+  notify:
+    - Run update-grub
+    - Update initramfs
+    - Reboot for GPU passthrough
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - grub
+    - iommu
+  # NOTE: In kernel 6.x, AMD IOMMU is auto-detected via ACPI IVRS table — no
+  # explicit amd_iommu=on needed (and generates "Unknown option - 'on'" warning).
+  # Intel IOMMU still requires explicit intel_iommu=on (BIOS doesn't auto-enable).
+  # PREREQUISITE: AMD IOMMU must be enabled in BIOS (AMD CBS > NBIO > IOMMU: Enabled)
+  # before kernel parameters take effect. Without BIOS enablement, no IVRS table
+  # exists and the kernel creates no IOMMU groups.
+
+# ── KERNEL MODULES ────────────────────────────────────────────────────────────
+# IMPORTANT: vfio-pci must load from the INITRAMFS (early boot) to claim PCI
+# devices before the PCI subsystem probe runs. Loading from /etc/modules-load.d/
+# is too late — by that point, devices are already probed and left unbound.
+#
+# /etc/initramfs-tools/modules: modules listed here are baked into the initramfs
+# image and load during the initramfs phase (before root filesystem is mounted).
+# When vfio-pci loads this early with options ids=... from /etc/modprobe.d/vfio.conf
+# (also copied into initramfs by update-initramfs), it registers those IDs and
+# the PCI subsystem assigns vfio-pci as the driver for those devices.
+
+- name: Configure VFIO modules in initramfs (early boot, before PCI probe)
+  ansible.builtin.blockinfile:
+    path: /etc/initramfs-tools/modules
+    marker: "# {mark} OPS-492 VFIO GPU PASSTHROUGH — managed by Ansible"
+    block: |
+      vfio
+      vfio_iommu_type1
+      vfio_pci
+      vfio_virqfd
+    state: present
+  notify:
+    - Update initramfs
+    - Reboot for GPU passthrough
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - modules
+    - vfio
+
+- name: Configure VFIO kernel modules to load at boot (runtime fallback)
+  ansible.builtin.copy:
+    content: |
+      # OPS-492 Phase 4: VFIO modules for GPU passthrough (runtime)
+      # Primary loading is via /etc/initramfs-tools/modules (early boot).
+      # This file provides a runtime fallback and is idempotent to have present.
+      # Managed by proxmox-gpu-passthrough Ansible role — do not edit manually
+      vfio
+      vfio_iommu_type1
+      vfio_pci
+      vfio_virqfd
+    dest: /etc/modules-load.d/vfio-passthrough.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Update initramfs
+    - Reboot for GPU passthrough
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - modules
+    - vfio
+
+# ── VFIO PCI BINDING ─────────────────────────────────────────────────────────
+
+- name: Configure vfio-pci to bind GPU PCI IDs
+  ansible.builtin.template:
+    src: vfio.conf.j2
+    dest: /etc/modprobe.d/vfio.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Update initramfs
+    - Reboot for GPU passthrough
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - modprobe
+    - vfio
+
+# ── DRIVER BLACKLIST ─────────────────────────────────────────────────────────
+# Prevent host from loading nouveau or proprietary nvidia drivers, which would
+# claim the GPU before vfio-pci can bind. nvidiafb is already in pve-blacklist.conf
+# but we manage the full set here for explicitness and idempotency.
+
+- name: Blacklist host nvidia/nouveau GPU drivers
+  ansible.builtin.copy:
+    content: |
+      # OPS-492 Phase 4: Blacklist nvidia/nouveau on PVE passthrough host
+      # Managed by proxmox-gpu-passthrough Ansible role — do not edit manually
+      # vfio-pci must claim the GPU before these drivers can load.
+      blacklist nouveau
+      blacklist nvidia
+      blacklist nvidiafb
+      blacklist nvidia_drm
+      blacklist nvidia_modeset
+    dest: /etc/modprobe.d/blacklist-nvidia.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Update initramfs
+    - Reboot for GPU passthrough
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - modprobe
+    - blacklist
+
+# ── FLUSH HANDLERS + POST-REBOOT VERIFICATION ────────────────────────────────
+# meta: flush_handlers forces all pending handlers to run NOW (in handler order):
+#   1. update-grub
+#   2. update-initramfs
+#   3. reboot (ansible.builtin.reboot — waits for SSH reconnect automatically)
+#
+# Without flush_handlers, handlers would run AFTER the verify tasks, making
+# post-reboot checks impossible from within this role.
+
+- name: Flush handlers to apply GRUB/initramfs changes and reboot
+  ansible.builtin.meta: flush_handlers
+  when: gpu_passthrough_enabled | bool
+  tags:
+    - gpu-passthrough
+    - reboot
+
+# ── POST-REBOOT VERIFICATION ─────────────────────────────────────────────────
+# These tasks run after the reboot handler has completed (Ansible reconnects
+# automatically via ansible.builtin.reboot). They confirm GPU passthrough state.
+# Failures here indicate GRUB/initramfs changes didn't take effect.
+
+- name: Wait for IOMMU active in dmesg
+  ansible.builtin.command:
+    cmd: dmesg
+  register: dmesg_output
+  changed_when: false
+  failed_when: >
+    ("AMD-Vi" not in dmesg_output.stdout) and
+    ("DMAR" not in dmesg_output.stdout) and
+    ("iommu" not in dmesg_output.stdout | lower)
+  when:
+    - gpu_passthrough_enabled | bool
+    - gpu_passthrough_reboot_on_change | bool
+  tags:
+    - gpu-passthrough
+    - verify
+    - post-reboot
+
+- name: Confirm vfio-pci is driver in use for GPU PCI device
+  ansible.builtin.command:
+    cmd: lspci -nnk -d {{ gpu_passthrough_pci_ids | first }}
+  register: lspci_gpu
+  changed_when: false
+  failed_when: "'vfio-pci' not in lspci_gpu.stdout"
+  when:
+    - gpu_passthrough_enabled | bool
+    - gpu_passthrough_reboot_on_change | bool
+    - gpu_passthrough_pci_ids | length > 0
+  tags:
+    - gpu-passthrough
+    - verify
+    - post-reboot
+
+- name: Confirm nouveau/nvidia NOT driving GPU (passthrough host isolation)
+  ansible.builtin.command:
+    cmd: lspci -nnk -d {{ gpu_passthrough_pci_ids | first }}
+  register: lspci_gpu_nohost
+  changed_when: false
+  failed_when: >
+    "Kernel driver in use: nouveau" in lspci_gpu_nohost.stdout or
+    "Kernel driver in use: nvidia" in lspci_gpu_nohost.stdout
+  when:
+    - gpu_passthrough_enabled | bool
+    - gpu_passthrough_reboot_on_change | bool
+    - gpu_passthrough_pci_ids | length > 0
+  tags:
+    - gpu-passthrough
+    - verify
+    - post-reboot
+
+- name: Show IOMMU groups for GPU passthrough (informational)
+  ansible.builtin.command:
+    cmd: find /sys/kernel/iommu_groups -type l -name "0a:*"
+  register: iommu_groups
+  changed_when: false
+  ignore_errors: true
+  when:
+    - gpu_passthrough_enabled | bool
+    - gpu_passthrough_reboot_on_change | bool
+  tags:
+    - gpu-passthrough
+    - verify
+    - post-reboot
+
+- name: Display IOMMU group membership
+  ansible.builtin.debug:
+    msg: "IOMMU groups for GPU bus: {{ iommu_groups.stdout_lines }}"
+  when:
+    - gpu_passthrough_enabled | bool
+    - gpu_passthrough_reboot_on_change | bool
+    - iommu_groups is defined
+  tags:
+    - gpu-passthrough
+    - verify
+    - post-reboot

@@ -1,0 +1,38 @@
+---
+# verify.yml — Phase 4: Verify Home Assistant Container is running
+# OPS-585
+
+- name: Wait for HA Container to start (max 120s — image pull takes time)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ha_lxc_id }} --
+      docker ps --filter name=homeassistant --filter status=running --format "{{ '{{' }}.Names{{ '}}' }}"
+  register: ha_container_running
+  until: ha_container_running.stdout == "homeassistant"
+  retries: 24
+  delay: 5
+  changed_when: false
+  tags: [ha-lxc, verify]
+
+- name: Check HA web UI is responding on port 8123 (max 60s)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ha_lxc_id }} --
+      bash -c "curl -sL -o /dev/null -w '%{http_code}' http://127.0.0.1:8123"
+  register: ha_http_check
+  until: ha_http_check.stdout in ["200", "302"]
+  retries: 12
+  delay: 5
+  changed_when: false
+  tags: [ha-lxc, verify]
+
+- name: Display HA Container status
+  ansible.builtin.debug:
+    msg: >-
+      Home Assistant Container is running inside LXC {{ ha_lxc_id }}.
+      Web UI: http://{{ ha_lxc_ip }}:8123
+      HTTP response: {{ ha_http_check.stdout }}
+      Z-Wave JS integration: connect to ws://{{ zwave_host_ip }}:{{ zwave_ws_port }}
+      MQTT integration: connect to mqtt://{{ mqtt_host_ip }}:{{ mqtt_port }}
+      UNVERIFIED — requires operator to complete integration setup via HA UI.
+  tags: [ha-lxc, verify]

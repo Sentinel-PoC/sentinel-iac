@@ -1,0 +1,83 @@
+---
+# mosquitto_user.yml — add wazuh-publisher user to mosquitto on 208-pi-001
+#
+# Runs on: 208-pi-001 (192.168.12.197) — the mosquitto broker host
+# Mosquitto password file: /etc/mosquitto/passwd (managed by zigbee2mqtt-host role)
+# Adding a user with mosquitto_passwd is additive — it does not affect existing users.
+#
+# Ref: mosquitto_passwd(1) — https://mosquitto.org/man/mosquitto_passwd-1.html
+#   "mosquitto_passwd [-c | -D] passwordfile username [password]"
+#   "-b" flag writes password in batch mode (non-interactive)
+
+# ── Phase 1: Fetch credentials from Vault ────────────────────────────────────
+
+- name: Fetch wazuh-publisher MQTT credentials from Vault
+  ansible.builtin.command:
+    cmd: "vault kv get -format=json {{ wazuh_mqtt_vault_path }}"
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: wazuh_mqtt_vault_raw
+  changed_when: false
+  no_log: true
+  tags: [wazuh-ha-bridge, mosquitto, vault]
+
+- name: Parse wazuh-publisher MQTT credentials
+  ansible.builtin.set_fact:
+    wazuh_mqtt_creds: "{{ (wazuh_mqtt_vault_raw.stdout | from_json).data.data }}"
+  no_log: true
+  tags: [wazuh-ha-bridge, mosquitto, vault]
+
+# ── Phase 2: Add wazuh-publisher to mosquitto password file ──────────────────
+# mosquitto_passwd -b adds/updates user in password file.
+# Running this task is idempotent — it overwrites the password for the user.
+
+- name: Add wazuh-publisher user to mosquitto password file
+  ansible.builtin.shell:
+    cmd: >
+      mosquitto_passwd -b {{ mosquitto_passwd_file }}
+      {{ wazuh_mqtt_creds.username }}
+      {{ wazuh_mqtt_creds.password }}
+  no_log: true
+  changed_when: true
+  notify: reload mosquitto
+  tags: [wazuh-ha-bridge, mosquitto]
+
+- name: Ensure mosquitto password file permissions
+  ansible.builtin.file:
+    path: "{{ mosquitto_passwd_file }}"
+    owner: mosquitto
+    group: mosquitto
+    mode: "0640"
+  tags: [wazuh-ha-bridge, mosquitto]
+
+# ── Phase 3: UFW — allow MQTT from Wazuh manager ─────────────────────────────
+# Wazuh manager (192.168.12.100) needs to reach mosquitto (port 1883).
+# feedback_seedbox_docker_dns_not_host_ip: use VLAN-routable IPs.
+
+- name: Allow MQTT from Wazuh manager (UFW)
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ wazuh_manager_ip }}"
+    to_port: "{{ mqtt_port | string }}"
+    proto: tcp
+    comment: "OPS-586 Section C — MQTT from Wazuh manager"
+  tags: [wazuh-ha-bridge, mosquitto, firewall]
+
+# ── Phase 4: Verify ───────────────────────────────────────────────────────────
+
+- name: Wait for mosquitto to reload (2s grace period)
+  ansible.builtin.pause:
+    seconds: 2
+  tags: [wazuh-ha-bridge, mosquitto, verify]
+
+- name: Verify mosquitto is running
+  # noqa command-instead-of-module — read-only status query; systemd module
+  # manages state but cannot report current active status directly.
+  ansible.builtin.command:
+    cmd: systemctl is-active mosquitto
+  register: mosquitto_status
+  changed_when: false
+  failed_when: mosquitto_status.stdout != "active"
+  tags: [wazuh-ha-bridge, mosquitto, verify]

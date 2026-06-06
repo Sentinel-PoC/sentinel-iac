@@ -1,0 +1,146 @@
+---
+- name: Check if Docker CE is already installed
+  check_mode: false
+  ansible.builtin.command:
+    cmd: dpkg-query -W docker-ce
+  register: docker_ce_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - docker
+    - install
+
+- name: Set Docker CE fact
+  ansible.builtin.set_fact:
+    docker_ce_installed: "{{ docker_ce_check.rc == 0 }}"
+  tags:
+    - docker
+    - install
+
+- name: Install docker.io
+  ansible.builtin.apt:
+    name:
+      - docker.io
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: not docker_ce_installed
+  tags:
+    - docker
+    - install
+
+- name: Check if docker-compose-plugin is already installed
+  check_mode: false
+  ansible.builtin.command:
+    cmd: dpkg-query -W docker-compose-plugin
+  register: docker_compose_plugin_check
+  changed_when: false
+  failed_when: false
+  tags:
+    - docker
+    - install
+
+- name: Set docker-compose-plugin fact
+  ansible.builtin.set_fact:
+    docker_compose_plugin_installed: "{{ docker_compose_plugin_check.rc == 0 }}"
+  tags:
+    - docker
+    - install
+
+# OPS-714: docker-compose-v2 (Ubuntu-packaged) conflicts with docker-compose-plugin
+# (Docker CE-packaged) — both provide /usr/libexec/docker/cli-plugins/docker-compose.
+# Skip docker-compose-v2 install when docker-compose-plugin is already present (Docker CE hosts).
+# Hosts using docker.io (no docker-compose-plugin) install docker-compose-v2 as before.
+- name: Install docker-compose-v2
+  ansible.builtin.apt:
+    name:
+      - docker-compose-v2
+    state: present
+    update_cache: false
+  when: not docker_compose_plugin_installed
+  tags:
+    - docker
+    - install
+
+- name: Create Docker config directory
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - docker
+    - config
+
+- name: Deploy Docker daemon configuration
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart docker
+  tags:
+    - docker
+    - config
+
+- name: Add users to docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+  when: docker_users | length > 0
+  tags:
+    - docker
+    - users
+
+- name: Enable and start containerd
+  ansible.builtin.systemd:
+    name: containerd
+    state: started
+    enabled: true
+  tags:
+    - docker
+    - service
+
+- name: Deploy proper runc AppArmor profile for Docker hosts (OPS-14)
+  ansible.builtin.template:
+    src: apparmor-runc.j2
+    dest: /etc/apparmor.d/runc
+    owner: root
+    group: root
+    mode: "0644"
+  register: runc_profile
+  tags:
+    - docker
+    - apparmor
+
+- name: Remove runc from AppArmor disable list if present
+  ansible.builtin.file:
+    path: /etc/apparmor.d/disable/runc
+    state: absent
+  tags:
+    - docker
+    - apparmor
+
+- name: Reload runc AppArmor profile
+  # noqa no-handler — must reload before Docker starts (task below); a handler
+  # fires after all tasks, which is too late for Docker to use the new profile.
+  ansible.builtin.command:
+    cmd: apparmor_parser -r /etc/apparmor.d/runc
+  when: runc_profile.changed
+  changed_when: true
+  tags:
+    - docker
+    - apparmor
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  tags:
+    - docker
+    - service

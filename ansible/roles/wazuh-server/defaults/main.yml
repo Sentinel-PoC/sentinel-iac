@@ -1,0 +1,75 @@
+---
+wazuh_manager_version: "4.x"
+wazuh_indexer_hosts: ["127.0.0.1"]
+wazuh_dashboard_hosts: ["127.0.0.1"]
+wazuh_server_config_path: "/var/ossec/etc/ossec.conf"
+
+# Vulnerability detection (Wazuh 4.8+ native module)
+wazuh_vuln_detection_enabled: true
+wazuh_vuln_feed_interval: "60m"
+
+# Matrix alert integration (via Sentinel Matrix Bot on iac-control)
+wazuh_matrix_integration_enabled: true
+wazuh_matrix_hook_url: "http://192.168.12.210:9095/wazuh"
+wazuh_matrix_alert_level: "10"
+
+# Indexer SSL certificate paths
+wazuh_indexer_ssl_ca: "/etc/filebeat/certs/root-ca.pem"
+wazuh_indexer_ssl_cert: "/etc/filebeat/certs/wazuh-server.pem"
+wazuh_indexer_ssl_key: "/etc/filebeat/certs/wazuh-server-key.pem"
+
+# Dashboard kibanaserver internal password
+# SEC-95: was hardcoded to "kibanaserver" (well-known default). Now wired from Vault.
+# Vault path: secret/wazuh/dashboard (field: kibanaserver_password)
+# Create / rotate with:
+#   vault kv patch secret/wazuh/dashboard kibanaserver_password=<new-value>
+# Also update the opensearch indexer internal_users.yml hash when rotating:
+#   python3 -c "import bcrypt; print(bcrypt.hashpw(b'<new-value>', bcrypt.gensalt(rounds=12)).decode())"
+# Must match the hash in opensearch-security's internal_users.yml for kibanaserver.
+# Override at playbook run time via inventory or -e:
+#   wazuh_dashboard_kibanaserver_password: "{{ lookup('hashi_vault', 'secret=secret/wazuh/dashboard:kibanaserver_password token=<tok>') }}"
+wazuh_dashboard_kibanaserver_password: ""
+
+# HA MQTT bridge integration (OPS-612)
+# Mirrors variable names used by wazuh-ha-bridge role for shared-play compatibility.
+# Set wazuh_ha_mqtt_integration_enabled: true in group_vars/host_vars to activate.
+# The blockinfile approach in wazuh-ha-bridge was removed (OPS-612); this template
+# block is the authoritative source for the <integration> stanza.
+wazuh_ha_mqtt_integration_enabled: false
+wazuh_ha_alert_level: "3"
+mqtt_host_ip: "192.168.12.197"
+mqtt_port: 1883
+
+# OPS-682: Authentik/Pangolin IP for /etc/hosts injection.
+# auth-next.208.haist.farm resolves to the Pangolin reverse-proxy VIP.
+# The wazuh host must resolve this name for OIDC discovery to succeed on fresh
+# provisioning (before dnsmasq propagation). Same pattern as OPS-642 (forgejo_extra_hosts).
+wazuh_authentik_ip: "192.168.12.168"
+
+# OpenID Connect SSO configuration (OPS-631)
+# Enables OIDC button on Wazuh Dashboard login page alongside local basic auth.
+# Both the dashboard frontend (opensearch_dashboards.yml) and the indexer backend
+# (opensearch-security/config.yml) must point to the same OIDC provider.
+#
+# Vault paths (pull at playbook run time via hashi_vault lookup):
+#   client_id:     vault kv get -field=client_id     secret/authentik/clients/wazuh
+#   client_secret: vault kv get -field=client_secret secret/authentik/clients/wazuh
+wazuh_oidc_enabled: true
+wazuh_oidc_provider_name: "Authentik"
+wazuh_oidc_connect_url: "https://auth-next.208.haist.farm/application/o/wazuh/.well-known/openid-configuration"
+wazuh_oidc_client_id: "wazuh-dashboard"
+# Override wazuh_oidc_client_secret in group_vars/host_vars or via Vault lookup:
+#   wazuh_oidc_client_secret: "{{ lookup('hashi_vault', 'secret=secret/authentik/clients/wazuh:client_secret') }}"
+wazuh_oidc_client_secret: ""
+wazuh_oidc_logout_url: "https://auth-next.208.haist.farm/application/o/wazuh/end-session/"
+# wazuh-indexer JVM heap size (OPS-985)
+# OpenSearch circuit breaker fires at 95% of heap. With 1GB (package default),
+# the limit is 972MB. Vulnerability bulk index requests are 115MB each and fire
+# every ~4s, continuously exceeding the circuit breaker and silently dropping
+# all vulnerability state writes.
+#
+# Sizing: host has 15GB RAM; 4GB = 26.7% — within OpenSearch's <=50% guideline.
+# At 4GB the circuit breaker limit is 3.89GB, providing 10x more headroom than
+# the 115MB bulk requests need. Set min == max as OpenSearch requires.
+# Valid range for this host: 2g-7g (50% of 15GB). Default: 4g.
+wazuh_indexer_jvm_heap_size: "4g"

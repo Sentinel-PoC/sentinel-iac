@@ -1,0 +1,9 @@
+---
+# wazuh-sigma-deploy handlers — OPS-574
+
+- name: Restart wazuh-manager
+  # Follows the same handler pattern as roles/wazuh-server/handlers/main.yml
+  # Service restart is triggered only when rules file changes (changed state).
+  ansible.builtin.service:
+    name: "{{ wazuh_manager_service }}"
+    state: restarted

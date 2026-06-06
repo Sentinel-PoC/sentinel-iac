@@ -1,0 +1,67 @@
+# Sentinel security middleware definitions for Traefik
+# Shared by all route files (vm-services, okd-services, external-services)
+http:
+  middlewares:
+    security-headers:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=()"
+    security-headers-keycloak:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        contentSecurityPolicy: "frame-ancestors 'none'"
+        referrerPolicy: "strict-origin-when-cross-origin"
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=()"
+        customResponseHeaders:
+          X-Frame-Options: "DENY"
+    security-headers-public:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        permissionsPolicy: "camera=(), microphone=(), geolocation=(), payment=()"
+        customResponseHeaders:
+          X-Robots-Tag: ""
+    block-metrics-external:
+      ipAllowList:
+        sourceRange:
+          - "192.168.12.0/24"
+          - "10.0.0.0/8"
+          - "127.0.0.1/32"
+    # OPS-802: General-purpose internal-only IP allowlist.
+    # Blocks all requests not originating from the internal LAN or loopback.
+    # Use on any route that must NOT be internet-accessible even if a CF DNS
+    # record is accidentally added.
+    internal-only:
+      ipAllowList:
+        sourceRange:
+          - "192.168.12.0/24"
+          - "10.0.0.0/8"
+          - "127.0.0.1/32"
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 200
+    oauth2-forward-auth:
+      forwardAuth:
+        address: "http://oauth2-proxy:4180/"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - "X-Auth-Request-User"
+          - "X-Auth-Request-Email"
+          - "X-Auth-Request-Groups"

@@ -1,0 +1,432 @@
+---
+# Default variables for iac-control role
+# Override these in inventory or vars/ as needed
+
+# Package versions (use 'present' for latest, or pin specific versions)
+package_state: present
+
+# Service states
+service_enabled: true
+service_state: started
+
+# Network interface defaults (override in inventory)
+primary_interface: eth0
+okd_interface: ens19
+okd_network: 10.0.0.0/24
+okd_gateway_ip: 10.0.0.1
+okd_dhcp_ip: 10.0.0.10
+management_network: 192.168.12.0/24
+
+# Primary interface (eth0) static addresses — OPS-445
+# VIPs are bound directly (no keepalived/VRRP); HAProxy listens on *:6443/*:443/*:80
+# and will answer on these addresses once they are bound.
+eth0_mac: "bc:24:11:1d:53:9f"
+eth0_primary_ip: "192.168.12.210"
+eth0_gateway: "192.168.12.1"
+okd_api_vip: "192.168.12.223"    # cluster API VIP — api.overwatch.haist.farm (renamed from api.okd-sandbox.sandbox.208.haist.farm, OPS-450)
+okd_apps_vip: "192.168.12.224"   # apps ingress VIP — *.apps.overwatch.haist.farm (renamed from *.apps.okd-sandbox.sandbox.208.haist.farm, OPS-450)
+
+# HAProxy defaults
+haproxy_stats_bind: 127.0.0.1:9000
+
+# Squid defaults
+squid_port: 3128
+
+# Logging
+enable_iptables_logging: true
+
+# Sentinel LAN DNS (SC-7(16) - prevent external topology discovery)
+sentinel_dns_listen_ip: 192.168.12.210
+sentinel_dns_domain: 208.haist.farm
+sentinel_dns_target: 192.168.12.168
+
+# Platform-specific host DNS overrides (addn-hosts format)
+# These override the *.208.haist.farm → Pangolin wildcard in sentinel-services.conf.
+# addn-hosts takes precedence over address= directives in dnsmasq.
+# Each entry: ip, fqdn, optional aliases (list), optional comment (string)
+dnsmasq_platform_hosts:
+  - ip: "192.168.12.60"
+    fqdn: "pve4-alienware.208.haist.farm"
+    aliases:
+      - "pve4-alienware"
+    comment: "OPS-492: pve4-alienware standalone Proxmox host (not behind Pangolin)"
+  - ip: "192.168.12.210"
+    fqdn: "spire-oidc.208.haist.farm"
+    comment: "OPS-537 / OPS-351 Phase 4.4a: spire-oidc-discovery-provider on iac-control (LAN, distinct port 8443)"
+  - ip: "192.168.12.70"
+    fqdn: "forgejo.208.haist.farm"
+    comment: "OPS-773: Forgejo server internal IP — bypass Pangolin VIP (.168) for runner long-poll and git checkout. Served to pve4 LXC runners and iac-control itself."
+  - ip: "192.168.30.205"
+    fqdn: "data.208.haist.farm"
+    comment: "OPS-1125 Phase 1: Storage VLAN 30 jumbo path (MTU 9000) — TrueNAS ens19 on 192.168.30.0/24. Overrides *.208.haist.farm Pangolin wildcard."
+
+# OPS-773: Forgejo runner endpoint on iac-control — must use internal HTTP:3000 (not Pangolin HTTPS)
+# The .runner file at /opt/forgejo-runner/.runner must have: "address": "http://forgejo.208.haist.farm:3000"
+# This bypasses the Pangolin reverse proxy whose connection table can sever long-poll → RESULT_CANCELLED wedge.
+# Re-register if needed: forgejo-runner register --instance http://forgejo.208.haist.farm:3000 ...
+# The .runner file is runner-generated (not Ansible-managed); see forgejo-runner.yml for the hosts-entry task.
+forgejo_runner_instance_url: "http://forgejo.208.haist.farm:3000"
+
+# Keepalived VRRP (HA failover)
+# vault_keepalived_vrrp_password must be defined so the keepalived.yml when:
+# condition does not raise AnsibleUndefinedVariable (Ansible 2.16 behaviour).
+# The vault fetch task auto-populates this at run time via vault kv get.
+vault_keepalived_vrrp_password: "CHANGE_ME"
+keepalived_state: MASTER
+keepalived_priority: 100
+keepalived_vrrp_password: "{{ vault_keepalived_vrrp_password | default('CHANGE_ME') }}"
+keepalived_interface: ens19  # Cluster network interface on iac-control
+keepalived_virtual_router_id: 51
+keepalived_vip: "10.0.0.1/24"
+
+# OPS-261 (2026-04-20 Vault outage): the vault-unseal container runs as UID 100
+# in its image (vault user). Directory perms must allow that UID to traverse
+# and read. Previous code declared root:root 0750 which silently denied the
+# container and sealed Vault. These vars codify the correct UID/GID and mode
+# so subsequent convergence runs do not regress.
+vault_unseal_uid: 100
+vault_unseal_gid: 1000
+vault_unseal_dir_mode: "0755"
+
+# Docker users
+docker_users:
+  - ubuntu
+  - forgejo-runner
+
+# Nginx PXE server port (must not conflict with HAProxy on *:80/*:443)
+nginx_pxe_port: 8080
+
+# Proxmox snapshot automation
+# Token: vault kv get -format=json secret/proxmox → .data.data.api_token_id / .api_token_secret
+# OPS-727: Token ID is stored as api_token_id in Vault. The tasks/services.yml block fetches
+# api_token_secret automatically; the token ID is hardcoded here and must match Vault.
+# To verify: VAULT_ADDR=https://vault.208.haist.farm \
+#   vault kv get -field=api_token_id secret/proxmox
+# Current active token: root@pam!Claudette (confirmed 2026-05-18, replaces terraform-prov@pve!api-token
+# which was returning 401 — snapshot script had been failing since ~2026-04-28).
+# vault_proxmox_snapshot_token_secret must be defined so the when: condition in
+# services.yml does not raise AnsibleUndefinedVariable (same pattern as OPS-240).
+vault_proxmox_snapshot_token_secret: "CHANGE_ME"
+proxmox_snapshot_api_url: "https://192.168.12.6:8006/api2/json"
+proxmox_snapshot_token_id: "root@pam!Claudette"
+proxmox_snapshot_token_secret: "{{ vault_proxmox_snapshot_token_secret | default('CHANGE_ME') }}"
+proxmox_snapshot_schedule: "*-*-* 01:00:00"
+proxmox_snapshot_vms:
+  - {vmid: 200, node: pve, retention: 4}                # iac-control
+  # VM 201 (gitlab-server) removed 2026-04-18: service decommissioned during
+  # GitLab→Forgejo migration; VM no longer exists. See OPS-225.
+  # VM 205 (vault-server) removed 2026-04-19: on vast: storage which doesn't
+  # support QEMU block snapshots. DR is covered by Vault's own
+  # `vault operator raft snapshot save` running daily via
+  # vault-backup.timer on vault-server, uploading app-consistent
+  # snapshots to MinIO bucket `vault-backups` (verified: 8 days
+  # retained as of 2026-04-19). Application-level backup is the
+  # correct DR mechanism for stateful databases and supersedes
+  # VM-level snapshots. See OPS-225.
+  - {vmid: 109, node: pve3, retention: 4}               # seedbox
+  - {vmid: 107, node: pve, retention: 4}                # pangolin-proxy
+  - {vmid: 111, node: "208-pve2", retention: 4}          # wazuh-server
+  - {vmid: 110, node: pve3, retention: 4}               # forgejo-server
+
+# iDRAC Redfish — hardware health monitoring and auto-recovery
+idrac_health_check_schedule: "*-*-* *:00/5:00"
+idrac_watchdog_schedule: "*-*-* *:02/5:30"
+idrac_watchdog_fail_threshold: 3
+idrac_watchdog_enabled: true
+idrac_nodes:
+  - name: pve
+    proxmox_ip: 192.168.12.6
+    idrac_ip: 192.168.12.10
+    idrac_user: root
+    idrac_pass: "{{ vault_idrac_pve_pass | default('CHANGE_ME') }}"
+    model: "PowerEdge R440"
+    generation: "14G"
+  - name: 208-pve2
+    proxmox_ip: 192.168.12.56
+    idrac_ip: 192.168.12.50
+    idrac_user: koiakoia
+    idrac_pass: "{{ vault_idrac_pve2_pass | default('CHANGE_ME') }}"
+    model: "Precision 7920 Rack"
+    generation: "14G"
+  - name: pve3
+    proxmox_ip: 192.168.12.57
+    idrac_ip: 192.168.12.202
+    idrac_user: root
+    idrac_pass: "{{ vault_idrac_pve3_pass | default('CHANGE_ME') }}"
+    model: "PowerEdge R720xd"
+    generation: "12G"
+
+# Sentinel Matrix Bot (alert forwarding to Matrix rooms)
+matrix_bot_homeserver: "https://matrix.208.haist.farm"
+matrix_bot_token: "{{ vault_matrix_bot_token | default('CHANGE_ME') }}"
+matrix_room_grafana: "{{ vault_matrix_room_grafana | default('CHANGE_ME') }}"
+matrix_room_wazuh: "{{ vault_matrix_room_wazuh | default('CHANGE_ME') }}"
+matrix_room_gitlab: "{{ vault_matrix_room_gitlab | default('CHANGE_ME') }}"
+# SEC-94: webhook authentication token for X-Webhook-Token header validation.
+# Vault: add vault_matrix_bot_webhook_token to the same secret that holds
+# vault_matrix_bot_token. Operator must provision this before applying.
+# WARNING: once enforced, all senders (Grafana, Wazuh) must add the header.
+matrix_bot_webhook_token: "{{ vault_matrix_bot_webhook_token | default('CHANGE_ME') }}"
+
+# Compliance check environment (override via --extra-vars or Vault lookup)
+# vault_compliance_token must be defined so the when: condition in
+# services.yml does not raise AnsibleUndefinedVariable (same pattern as
+# vault_proxmox_snapshot_token_secret above).
+# The tasks/services.yml compliance block auto-fetches from Vault if VAULT_TOKEN is set.
+# Vault path: secret/compliance  field: vault_token
+# Create with: vault kv put secret/compliance vault_token=<periodic-token>
+vault_compliance_token: "CHANGE_ME"
+compliance_vault_token: "{{ vault_compliance_token | default('CHANGE_ME') }}"
+compliance_wazuh_user: "wazuh-wui"
+# vault_wazuh_api_password: fetched from secret/wazuh field api_password (wazuh-wui user)
+vault_wazuh_api_password: "CHANGE_ME"
+compliance_wazuh_pass: "{{ vault_wazuh_api_password | default('CHANGE_ME') }}"
+compliance_kubeconfig: "/home/ubuntu/overwatch-repo/auth/kubeconfig"
+# vault_minio_access_key / vault_minio_secret_key: fetched from secret/minio fields access_key / secret_key
+vault_minio_access_key: "CHANGE_ME"
+vault_minio_secret_key: "CHANGE_ME"
+compliance_minio_ak: "{{ vault_minio_access_key | default('CHANGE_ME') }}"
+compliance_minio_sk: "{{ vault_minio_secret_key | default('CHANGE_ME') }}"
+# SEC-88: S3 API now TLS-terminated; use FQDNs so wildcard cert validates.
+compliance_minio_endpoint: "https://s3.208.haist.farm:9000"
+# OPS-42: minio-replicate.sh env vars (iac-control systemd timer)
+# vault_minio_access_key / vault_minio_secret_key reused (same credentials)
+minio_replicate_primary_url: "https://s3.208.haist.farm:9000"
+minio_replicate_replica_url: "https://s3-replica.208.haist.farm:9000"
+
+# Sentinel Prometheus (standalone — scrapes UniFi, Traefik, Vault, Wazuh)
+prometheus_version: "2.53.3"
+prometheus_port: 9099
+prometheus_retention: "15d"
+prometheus_data_dir: /opt/prometheus-unifi/data
+unifi_exporter_port: 9120
+prometheus_traefik_target: "192.168.12.168:8082"
+prometheus_vault_target: "192.168.12.206:8200"
+prometheus_vault_enabled: true
+prometheus_vault_token: "{{ vault_prometheus_vault_token | default('CHANGE_ME') }}"
+prometheus_wazuh_target: "172.17.0.1:9101"
+
+# UniFi monitoring stack (collector + exporter)
+# [OPS-169] Credential delivery migrated from static 32-day periodic token to
+# vault-agent AppRole auto-auth.  vault-agent-unifi-collector.service authenticates
+# with role_id + secret_id and writes a short-lived token to
+# /run/sentinel-unifi/.vault-token.  unifi-collector.service reads it at each run.
+#
+# Vault AppRole setup (provisioned by tasks/unifi-collector-approle.yml):
+#   AppRole role:   sentinel-unifi-collector
+#   Policy:         sentinel-unifi-collector (read secret/data/unifi + token self-renew)
+#   Credentials KV: secret/sentinel-unifi/approle-credentials  {role_id, secret_id}
+#   role_id file:   /etc/sentinel-unifi/role-id   (mode 0640, root:ubuntu)
+#   secret_id file: /etc/sentinel-unifi/secret-id (mode 0640, root:ubuntu)
+#   token sink:     /run/sentinel-unifi/.vault-token (mode 0600, ubuntu:ubuntu)
+#
+# Rotation: delete secret/sentinel-unifi/approle-credentials, re-run --tags unifi-approle.
+#
+# OPS-167 legacy note: vault_unifi_vault_token (static periodic token at
+#   secret/sentinel-unifi/runtime-vault-token) is superseded by AppRole.
+#   The old token can be revoked after the AppRole migration is applied.
+
+# AppRole credential facts — populated at apply time from Vault KV by
+# tasks/unifi-collector-approle.yml.  These defaults prevent
+# AnsibleUndefinedVariable on inventory without Vault access.
+vault_unifi_approle_role_id: "CHANGE_ME"
+vault_unifi_approle_secret_id: "CHANGE_ME"
+
+# vault-agent paths and config
+vault_agent_unifi_config_dir: "/etc/vault-agent"
+vault_agent_unifi_config_file: "/etc/vault-agent/unifi-collector.hcl"
+vault_agent_unifi_token_path: "/run/sentinel-unifi/.vault-token"
+
+# Vault connection settings for the unifi-collector env file
+unifi_vault_addr: "https://vault.208.haist.farm"
+unifi_vault_skip_verify: "false"
+
+unifi_repo_dir: /home/ubuntu/sentinel-unifi
+unifi_gitlab_repo: "http://192.168.12.70:3000/sentinel-admin/sentinel-unifi.git"
+
+# NetBox IPAM sync
+netbox_api_endpoint: "https://netbox.208.haist.farm"
+netbox_sync_schedule: "*:0/15"
+netbox_sync_enabled: true
+
+# UniFi → NetBox drift detection (OPS-691, Phase 1)
+# Read-only periodic reconciliation: UniFi state vs NetBox IPAM + plugin objects.
+# Vault paths:
+#   secret/netbox  key: admin_api_token
+#   secret/unifi   keys: api_key, controller_url
+unifi_netbox_drift_enabled: true
+unifi_netbox_drift_schedule: "*:0/15"
+unifi_netbox_drift_report_path: "/var/log/unifi-netbox-drift.json"
+unifi_netbox_drift_log_dir: "/var/log/sentinel/unifi-netbox-drift"
+
+
+# Forgejo Runner binary version management (OPS-319)
+# Binary was installed manually at /usr/local/bin/forgejo-runner before IaC adoption (2026-03-07).
+# get_url downloads and sha256-verifies the pinned binary; handler restarts service only if updated.
+# CAUTION: restarting the runner kills in-flight CI jobs (no graceful drain).
+# Apply with: ansible-playbook ansible/playbooks/iac-control.yml --tags forgejo-runner
+# Only run during a low-CI window (verify no long jobs: journalctl -u forgejo-runner -n 10).
+forgejo_runner_version: "12.10.2"
+forgejo_runner_sha256: "8d8cc22b81dd5ef5852f9cb15965ab85961d4bc91489cb57497ea2507ec2163f"
+forgejo_runner_url_template: "https://code.forgejo.org/forgejo/runner/releases/download/v{{ forgejo_runner_version }}/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+# ── SPIRE Server (OPS-352) ───────────────────────────────────────────────────
+# Single-instance SPIRE Server on iac-control, trust domain agents.haist.farm
+# Upstream authority: Vault spire-pki/ intermediate CA
+
+# Container image — pin to a specific release; verify with cosign before deploy
+spire_server_image: "ghcr.io/spiffe/spire-server"
+spire_server_image_version: "1.14.6"
+
+# Trust domain for all SPIFFE IDs in this deployment
+spire_trust_domain: "agents.haist.farm"
+
+# SPIRE gRPC API: host port 8444 → container port 8081
+# Port 8081 on the host is occupied by the Istio IngressGateway UFW rule.
+# Remapped to 8444 to avoid host-level collision.
+# SPIRE Agents connect to 192.168.12.210:8444.
+spire_server_lan_ip: "192.168.12.210"
+spire_server_host_port: "8444"
+spire_server_grpc_port: "8081"       # port inside the container
+
+# Health check: local only — Ansible health task uses container exec
+# Host 127.0.0.1:8445 → container 8080
+spire_server_health_host_port: "8445"
+spire_server_health_port: "8080"     # port inside the container
+
+# Prometheus telemetry: internal to container only in Phase 4.1
+# Port 9988 exposed for future scrape config (not wired to Prometheus here)
+spire_telemetry_port: 9988
+
+# Host-side directories
+spire_server_data_dir: "/var/lib/spire-server"
+spire_server_config_dir: "/etc/spire-server"
+
+# Paths inside the container
+spire_server_data_dir_container: "/var/lib/spire"
+spire_server_config_dir_container: "/etc/spire"
+
+# SVID / CA TTLs
+spire_default_x509_svid_ttl: "1h"
+spire_default_jwt_svid_ttl: "1h"
+spire_ca_ttl: "24h"
+spire_server_log_level: "INFO"
+
+# Vault upstream authority
+# auth_method=approle; role_id + secret_id read from files mounted into container at runtime
+# AppRole role: spire-server-upstream-authority, policy: spire-upstream-authority
+# Credentials stored at: secret/spire-server/approle-credentials
+# To rotate secret_id: delete that KV path, re-run --tags spire-pki, re-run --tags spire-server
+spire_vault_addr: "https://vault.208.haist.farm"
+spire_vault_pki_mount: "spire-pki"
+# AppRole credential files on host — written by Ansible, mounted into container read-only
+
+# SPIRE Agent hosts allowed to reach SPIRE Server gRPC (port 8444)
+# UFW rules are created per-host (not subnet-wide) to minimise attack surface
+# Phase 4.2 agents: workstation (.55), iac-control self (.210), vault-server (.206)
+spire_agent_hosts:
+  - "192.168.12.55"    # workstation (koiakoia)
+  - "192.168.12.210"   # iac-control (SPIRE Agent sibling to SPIRE Server)
+  - "192.168.12.206"   # vault-server (Phase 4.2 agent)
+
+# Container run identity — dedicated non-root UID/GID (OPS-358)
+# UID/GID 10515 chosen: above sentinel-worker range (1510+), no conflicts with
+# vault-unseal UID 100 or system UIDs. Both server and spire-oidc-discovery-provider
+# (which inherits spire_server_uid/gid via spire_oidc_uid/gid) run as this identity.
+spire_server_uid: 10515
+spire_server_gid: 10515
+spire_server_dir_mode: "0755"
+spire_server_secret_dir_mode: "0700"
+
+# ── SPIRE Agent (OPS-528 / Phase 4.2a) ───────────────────────────────────────
+# Single SPIRE Agent on iac-control, sibling to the SPIRE Server above.
+# join_token NodeAttestor; persistent SVID via disk KeyManager.
+# Network: host (reaches Server at {{ spire_server_lan_ip }}:{{ spire_server_host_port }} via the local NIC).
+# Match agent image major.minor to Server (1.14.6) — re-pin together on Server bumps.
+spire_agent_image: "ghcr.io/spiffe/spire-agent"
+spire_agent_image_version: "1.14.6"
+
+# Logging + telemetry
+spire_agent_log_level: "INFO"
+# Disjoint host ports vs Server (8445/9988) to avoid collisions on iac-control loopback.
+spire_agent_health_port: 8446
+spire_agent_telemetry_port: 9989
+
+# Host-side directories — also serve as the container-side paths (host network mode
+# means a bind mount preserves the identical path inside the container).
+spire_agent_data_dir: "/var/lib/spire-agent"
+spire_agent_config_dir: "/etc/spire-agent"
+spire_agent_socket_dir: "/run/spire-agent"
+spire_agent_trust_bundle_path: "/etc/spire-agent/trust_bundle.pem"
+
+# Paths the agent.conf template renders (must match the bind-mount targets)
+spire_agent_data_dir_container: "/var/lib/spire-agent"
+spire_agent_config_dir_container: "/etc/spire-agent"
+spire_agent_socket_path_container: "/run/spire-agent/agent.sock"
+spire_agent_trust_bundle_path_container: "/etc/spire-agent/trust_bundle.pem"
+
+# SPIFFE ID format for x509pop-attested agents (OPS-553, replaces join_token).
+# SPIRE auto-assigns spiffe://<trust-domain>/spire/agent/x509pop/<hex-fingerprint>
+# where the fingerprint is the SHA-1 hash of the node cert's SubjectPublicKeyInfo DER.
+# This is STABLE as long as the cert private key is preserved on disk.
+# Example: spiffe://agents.haist.farm/spire/agent/x509pop/aabbcc...
+#
+# x509pop node cert paths on the iac-control host:
+#   Key:  spire_node_cert_key  (RSA 2048, mode 0600, owner spire_agent_uid)
+#   Cert: spire_node_cert_file (PEM, mode 0644, signed by spire-pki/ via Ansible)
+#   CA:   spire_server_trusted_ca_bundle (spire-root/ chain for Server to verify agents)
+# These are provisioned by docker-services.yml --tags spire-node-certs.
+spire_node_cert_dir: "/etc/spire-agent"
+spire_node_cert_key: "/etc/spire-agent/node-key.pem"
+spire_node_cert_file: "/etc/spire-agent/node-cert.pem"
+# Container paths (same as host paths because bind-mounted at the same path)
+spire_node_cert_key_container: "/etc/spire-agent/node-key.pem"
+spire_node_cert_file_container: "/etc/spire-agent/node-cert.pem"
+# Vault PKI role for node identity certs (created by vault-server spire-pki.yml --tags spire-node-pki)
+spire_node_vault_pki_role: "spire-node"
+# Vault PKI mount (same as UpstreamAuthority — spire-pki/ isolated chain)
+spire_node_vault_pki_mount: "spire-pki"
+# CA bundle written to spire-server config dir — spire-server reads this to verify x509pop certs
+# This is the spire-pki/ CA chain (intermediate + root) in PEM format
+spire_server_trusted_ca_bundle: "/etc/spire-server/trusted-node-cas.pem"
+spire_server_trusted_ca_bundle_container: "/etc/spire/trusted-node-cas.pem"
+
+# SPIRE Server admin socket path INSIDE the spire-server container — used by
+# the bootstrap tasks that exec into the Server to generate tokens / fetch bundle.
+# Verified empirically against live spire-server 1.14.6.
+spire_server_admin_socket_container: "/tmp/spire-server/private/api.sock"
+
+# OPS-537 / OPS-351 Phase 4.4a — bind-mount the directory containing the API
+# socket from a host-side path into the spire-server container, so the
+# oidc-discovery-provider sidecar can read it via the same path through its
+# own mount of the same host directory. spire-server creates api.sock here
+# on startup; provider reads it.
+spire_server_admin_socket_host_dir: "/var/run/spire-server-api"
+spire_server_admin_socket_container_dir: "/tmp/spire-server/private"
+
+# Container run identity — root for initial deploy (mirrors Server).
+# Tech-debt: harden to non-root UID — tracked as follow-on to OPS-358 (Server hardened).
+spire_agent_uid: 0
+spire_agent_gid: 0
+spire_agent_dir_mode: "0755"
+spire_agent_socket_dir_mode: "0755"
+spire_agent_secret_dir_mode: "0700"
+
+# --- Alertmanager Dead-Man Switch (OPS-915) ---
+# External poller running on iac-control that pages via Telegram if the
+# in-cluster Watchdog heartbeat goes silent (i.e., entire monitoring stack down).
+# Token fetched from Vault at Ansible deploy time; written to env file.
+#
+# Threshold: 12h (2x the Watchdog repeat_interval of 6h).
+# Timer interval: every 30 minutes.
+# Poll mechanism: oc port-forward to alertmanager-operated:9093.
+# Vault path: secret/telegram/alertmanager-bot (field: bot_token)
+alertmanager_deadman_threshold_seconds: 43200
+alertmanager_deadman_telegram_chat_id: 8633660215
+alertmanager_deadman_local_port: 19093
+alertmanager_deadman_kubeconfig: "/home/ubuntu/overwatch-repo/auth/kubeconfig.new"
+alertmanager_deadman_state_dir: "/var/lib/alertmanager-deadman"
+alertmanager_deadman_log: "/var/log/sentinel/alertmanager-deadman.log"
+alertmanager_deadman_oc_binary: "/usr/local/bin/oc"
+# Fetched at Ansible run time from secret/telegram/alertmanager-bot.bot_token
+# Set to CHANGE_ME to trigger Vault fetch; pass -e to override.
+alertmanager_deadman_telegram_token: "CHANGE_ME"

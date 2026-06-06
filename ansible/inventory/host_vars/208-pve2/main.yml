@@ -1,0 +1,4 @@
+---
+# 208-pve2 (192.168.12.56) — uplink eno1 (10GbE to USW Pro 48 port 51)
+# OPS-1125 Phase 2a: VLAN 30 storage bridge
+pve_vlan30_storage_cfg: vlan30-storage-208-pve2.cfg

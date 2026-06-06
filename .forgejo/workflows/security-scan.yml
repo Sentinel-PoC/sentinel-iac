@@ -1,0 +1,879 @@
+---
+name: Security Scan
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"  # OPS-414: nightly full Harbor sweep at 02:00 UTC
+  workflow_dispatch:  # OPS-432: break-glass + empirical verification trigger
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Each scanner job uploads to DefectDojo inline on main-branch pushes.
+# Forgejo 11.0.10 does not fire the workflow_run trigger, so the cross-workflow
+# defectdojo-upload.yml approach never executes. Inline keeps the upload in the
+# same workflow scope so the artifact and the upload live together. Ref: OPS-184.
+
+jobs:
+  trivy-iac:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    # [OPS-829] No per-job checkout path or working-directory here: workspace-root checkout
+    # avoids git index.lock races on the shared iac runner. Same fix as trivy-config/semgrep.
+    steps:
+      # [OPS-742] Skip scan on docs-only PRs to avoid concurrent checkout conflict
+      # (shared runner workspace causes git index.lock failures when jobs run in parallel).
+      # Uses Forgejo PR files API — no checkout needed — so docs-only jobs exit 0
+      # immediately, satisfying the BP required context without triggering a workspace lock.
+      # Push/schedule/dispatch events: this step is skipped, scan runs normally.
+      - name: Skip scan on docs-only PR
+        id: skip_scan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(curl -sk -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://forgejo.208.haist.farm/api/v1/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?limit=300" \
+            | jq -r '.[].filename // empty' 2>/dev/null || echo "")
+          if [ -z "$FILES" ]; then
+            echo "Could not fetch PR file list — running scan"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SCANNABLE=$(echo "$FILES" | { \
+            grep -vE '(\.md$|^AGENT-STATE\.md$|^docs/|^techdocs/|^mkdocs\.yml$|^catalog-info\.yaml$|^\.forgejo/workflows/|^\.gitea/workflows/)' \
+            2>/dev/null || true; } | wc -l)
+          if [ "${SCANNABLE:-1}" -eq "0" ]; then
+            echo "Docs-only PR (files: $(echo "$FILES" | tr '\n' ' ')) — skipping trivy-iac scan"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Scannable files present — running trivy-iac scan"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.skip_scan.outputs.skip != 'true'
+      - name: Restore Trivy DB cache  # [OPS-829c]
+        if: steps.skip_scan.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+      - name: Trivy IaC misconfiguration scan
+        if: steps.skip_scan.outputs.skip != 'true'
+        run: |
+          echo "Running Trivy IaC misconfiguration scan..."
+          # [OPS-829c] Removed --skip-db-update: it forced use of the runner's expired cached
+          # DB, causing deterministic fast-fail. Cache step above restores a recent DB from the
+          # Actions cache (no network pull on cache hit). Cache miss pulls fresh from ghcr.io.
+          trivy fs --scanners misconfig --format json --output trivy-iac-report.json .
+          echo "Summary:"
+          trivy fs --scanners misconfig --severity HIGH,CRITICAL .
+      - uses: actions/upload-artifact@v3
+        if: always() && steps.skip_scan.outputs.skip != 'true' && hashFiles('trivy-iac-report.json') != ''
+        with:
+          name: trivy-iac-report
+          path: trivy-iac-report.json
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('trivy-iac-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Trivy IaC scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Trivy Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — IaC" \
+            -F "test_title=Trivy IaC Misconfig" \
+            -F "auto_create_context=true" \
+            -F "file=@trivy-iac-report.json" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" \
+            -F "minimum_severity=Info" \
+            -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=trivy,iac,misconfig" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  trivy-config:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    needs: [trivy-iac]
+    if: always()
+    # [OPS-829] No per-job checkout path or working-directory here: workspace-root checkout
+    # avoids git index.lock race with semgrep (workspace-root since OPS-828) and trivy-iac.
+    # Per-subdirectory checkout (path: ${{ github.job }}) was causing 5/5 consecutive CI
+    # failures fleet-wide after OPS-828 moved semgrep to workspace-root. Same fix pattern.
+    steps:
+      - name: Skip scan on docs-only PR  # [OPS-742]
+        id: skip_scan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(curl -sk -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://forgejo.208.haist.farm/api/v1/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?limit=300" \
+            | jq -r '.[].filename // empty' 2>/dev/null || echo "")
+          if [ -z "$FILES" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          SCANNABLE=$(echo "$FILES" | { \
+            grep -vE '(\.md$|^AGENT-STATE\.md$|^docs/|^techdocs/|^mkdocs\.yml$|^catalog-info\.yaml$|^\.forgejo/workflows/|^\.gitea/workflows/)' \
+            2>/dev/null || true; } | wc -l)
+          if [ "${SCANNABLE:-1}" -eq "0" ]; then
+            echo "Docs-only PR — skipping trivy-config scan"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.skip_scan.outputs.skip != 'true'
+      - name: Restore Trivy DB cache  # [OPS-829c]
+        if: steps.skip_scan.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+      - name: Trivy configuration scan
+        if: steps.skip_scan.outputs.skip != 'true'
+        run: |
+          echo "Running Trivy configuration scan..."
+          # [OPS-829c] Removed --skip-db-update (expired-DB deterministic fail). Cache step
+          # above handles DB freshness. Also: replaced `trivy config` with `trivy fs
+          # --scanners misconfig` — trivy config uses --skip-check-update (not --skip-db-update)
+          # for its checks bundle, and is the legacy subcommand alias. Using the fs subcommand
+          # is consistent with trivy-iac and avoids any legacy check-bundle behavior.
+          trivy fs --scanners misconfig --format json --output trivy-config-report.json .
+          echo "Summary:"
+          trivy fs --scanners misconfig --severity HIGH,CRITICAL .
+      - uses: actions/upload-artifact@v3
+        if: always() && steps.skip_scan.outputs.skip != 'true' && hashFiles('trivy-config-report.json') != ''
+        with:
+          name: trivy-config-report
+          path: trivy-config-report.json
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('trivy-config-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Trivy config scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Trivy Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — Config" \
+            -F "test_title=Trivy Config Misconfig" \
+            -F "auto_create_context=true" \
+            -F "file=@trivy-config-report.json" \
+            -F "active=true" -F "verified=false" -F "close_old_findings=true" \
+            -F "minimum_severity=Info" -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=trivy,config,misconfig" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  gitleaks:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    steps:
+      - name: Skip scan on docs-only PR  # [OPS-742]
+        id: skip_scan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(curl -sk -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://forgejo.208.haist.farm/api/v1/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?limit=300" \
+            | jq -r '.[].filename // empty' 2>/dev/null || echo "")
+          if [ -z "$FILES" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          SCANNABLE=$(echo "$FILES" | { grep -vE '(\.md$|^AGENT-STATE\.md$|^docs/|^techdocs/|^mkdocs\.yml$|^catalog-info\.yaml$)' 2>/dev/null || true; } | wc -l)
+          if [ "${SCANNABLE:-1}" -eq "0" ]; then
+            echo "Docs-only PR — skipping gitleaks scan"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.skip_scan.outputs.skip != 'true'
+        with:
+          path: ${{ github.job }}
+      - name: Gitleaks secret detection
+        if: steps.skip_scan.outputs.skip != 'true'
+        run: |
+          echo "Running gitleaks secret detection..."
+          gitleaks detect --source . --report-format json --report-path gitleaks-report.json
+          echo "No secrets detected."
+      - uses: actions/upload-artifact@v3
+        if: always() && steps.skip_scan.outputs.skip != 'true' && hashFiles('gitleaks/gitleaks-report.json') != ''
+        with:
+          name: gitleaks-report
+          path: ${{ github.job }}/gitleaks-report.json
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('gitleaks/gitleaks-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Gitleaks scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Gitleaks Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — IaC" \
+            -F "test_title=Gitleaks Secret Detection" \
+            -F "auto_create_context=true" \
+            -F "file=@gitleaks-report.json" \
+            -F "active=true" -F "verified=false" -F "close_old_findings=true" \
+            -F "minimum_severity=Info" -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=gitleaks,secrets" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  checkov:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    steps:
+      - name: Skip scan on docs-only PR  # [OPS-742]
+        id: skip_scan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(curl -sk -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://forgejo.208.haist.farm/api/v1/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?limit=300" \
+            | jq -r '.[].filename // empty' 2>/dev/null || echo "")
+          if [ -z "$FILES" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          SCANNABLE=$(echo "$FILES" | { \
+            grep -vE '(\.md$|^AGENT-STATE\.md$|^docs/|^techdocs/|^mkdocs\.yml$|^catalog-info\.yaml$|^\.forgejo/workflows/|^\.gitea/workflows/)' \
+            2>/dev/null || true; } | wc -l)
+          if [ "${SCANNABLE:-1}" -eq "0" ]; then
+            echo "Docs-only PR — skipping checkov scan"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.skip_scan.outputs.skip != 'true'
+        with:
+          path: ${{ github.job }}
+      - name: Checkov IaC scan
+        if: steps.skip_scan.outputs.skip != 'true'
+        run: |
+          echo "Running Checkov IaC scan (terraform + dockerfile only)..."
+          # [OPS-246] kubernetes+helm removed from --framework: Trivy K8s misconfig is the
+          # authoritative K8s scanner. Checkov K8s produced 302 findings duplicating Trivy
+          # K8s results (seccomp, UID/GID, privilege escalation, capabilities). --framework
+          # is allowlist semantics: omitting kubernetes means K8s manifests are not scanned.
+          checkov --framework terraform dockerfile -d . --output json --output-file-path . --hard-fail-on CRITICAL,HIGH
+          mv results_json.json checkov-report.json 2>/dev/null || echo '{"results":{"failed_checks":[]}}' > checkov-report.json
+          echo "Summary:"
+          checkov --framework terraform dockerfile -d . --compact --quiet || true
+      - uses: actions/upload-artifact@v3
+        if: always() && steps.skip_scan.outputs.skip != 'true' && hashFiles('checkov/checkov-report.json') != ''
+        with:
+          name: checkov-report
+          path: ${{ github.job }}/checkov-report.json
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('checkov/checkov-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Checkov scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Checkov Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — IaC" \
+            -F "test_title=Checkov IaC Analysis" \
+            -F "auto_create_context=true" \
+            -F "file=@checkov-report.json" \
+            -F "active=true" -F "verified=false" -F "close_old_findings=true" \
+            -F "minimum_severity=Info" -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=checkov,iac,packer,docker,terraform" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  shellcheck:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.job }}
+      - name: ShellCheck
+        run: |
+          echo "Running ShellCheck on all shell scripts..."
+          find . -name "*.sh" ! -path "./.git/*" > shell_files.txt
+          if [ -s shell_files.txt ]; then
+            echo "[]" > shellcheck-report.json
+            for file in $(cat shell_files.txt); do
+              echo "Checking $file..."
+              shellcheck -f json "$file" 2>/dev/null | jq -s 'add // []' >> sc_temp.json || true
+            done
+            jq -s 'add // []' sc_temp.json > shellcheck-report.json 2>/dev/null || echo '[]' > shellcheck-report.json
+            echo "ShellCheck found $(jq 'length' shellcheck-report.json 2>/dev/null || echo 0) issues"
+          else
+            echo "No shell scripts found"
+            echo '[]' > shellcheck-report.json
+          fi
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: shellcheck-report
+          path: ${{ github.job }}/shellcheck-report.json
+      - name: Transform ShellCheck JSON to DefectDojo Generic Findings Import schema
+        id: sc_transform
+        if: hashFiles('shellcheck/shellcheck-report.json') != ''
+        run: |
+          # [OPS-186] ShellCheck native JSON (flat array of {file,line,code,message,level})
+          # is NOT accepted by DefectDojo's Generic Findings Import parser.
+          # The parser expects {"findings":[{title,severity,description,file_path,line,...}]}.
+          # Transform in-place with jq.
+          jq --arg date "$(date +%Y-%m-%d)" '
+            {
+              findings: [
+                .[]? | {
+                  title: ("SC" + (.code|tostring) + ": " + (.message // "")),
+                  date: $date,
+                  severity: (
+                    {"error":"High","warning":"Medium","info":"Low","style":"Info"}[.level] // "Info"
+                  ),
+                  description: (.message // ""),
+                  file_path: (.file // ""),
+                  line: (.line // 0),
+                  vuln_id_from_tool: ("SC" + (.code|tostring)),
+                  static_finding: true,
+                  dynamic_finding: false
+                }
+              ]
+            }
+          ' shellcheck-report.json > shellcheck-findings.json
+          COUNT=$(jq '.findings | length' shellcheck-findings.json)
+          echo "Transformed $COUNT ShellCheck findings into Generic Findings Import schema"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('shellcheck/shellcheck-findings.json') != '' && steps.sc_transform.outputs.count != '0'
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading ShellCheck scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Generic Findings Import" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — Shell" \
+            -F "test_title=ShellCheck" \
+            -F "auto_create_context=true" \
+            -F "file=@shellcheck-findings.json" \
+            -F "active=true" -F "verified=false" -F "close_old_findings=true" \
+            -F "minimum_severity=Info" -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=shellcheck,shell,lint" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  trivy-vuln:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    needs: [trivy-iac, trivy-config]
+    if: always()
+    # [OPS-829] No per-job checkout path or working-directory here: workspace-root checkout
+    # avoids git index.lock races on the shared iac runner. Same fix as trivy-iac/trivy-config.
+    steps:
+      - name: Skip scan on docs-only PR  # [OPS-742]
+        id: skip_scan
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(curl -sk -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://forgejo.208.haist.farm/api/v1/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?limit=300" \
+            | jq -r '.[].filename // empty' 2>/dev/null || echo "")
+          if [ -z "$FILES" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          SCANNABLE=$(echo "$FILES" | { \
+            grep -vE '(\.md$|^AGENT-STATE\.md$|^docs/|^techdocs/|^mkdocs\.yml$|^catalog-info\.yaml$|^\.forgejo/workflows/|^\.gitea/workflows/)' \
+            2>/dev/null || true; } | wc -l)
+          if [ "${SCANNABLE:-1}" -eq "0" ]; then
+            echo "Docs-only PR — skipping trivy-vuln scan"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.skip_scan.outputs.skip != 'true'
+      - name: Restore Trivy DB cache  # [OPS-829c]
+        if: steps.skip_scan.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+      - name: Trivy FS vulnerability and secret scan
+        if: steps.skip_scan.outputs.skip != 'true'
+        run: |
+          echo "Running Trivy FS vuln+secret scan..."
+          # [OPS-829c] Removed --skip-db-update: it forced use of the runner's expired cached
+          # DB, causing deterministic fast-fail. Cache step above restores a recent DB from the
+          # Actions cache (no network pull on cache hit). Cache miss pulls fresh from ghcr.io.
+          trivy fs --scanners vuln,secret --format json --output trivy-vuln-report.json --ignore-unfixed .
+          echo "Summary:"
+          trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed .
+      - uses: actions/upload-artifact@v3
+        if: always() && steps.skip_scan.outputs.skip != 'true' && hashFiles('trivy-vuln-report.json') != ''
+        with:
+          name: trivy-vuln-report
+          path: trivy-vuln-report.json
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('trivy-vuln-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Trivy FS vuln+secret scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Trivy Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — IaC" \
+            -F "test_title=Trivy FS Vuln+Secret" \
+            -F "auto_create_context=true" \
+            -F "file=@trivy-vuln-report.json" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" \
+            -F "minimum_severity=Low" \
+            -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=trivy,vuln,secret,fs" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  # ---------------------------------------------------------------
+  # OPS-414: trivy-image-pr — diff-scoped container scan (PR only)
+  # Runs only on pull_request. Extracts Harbor image refs from YAML
+  # files changed in the PR diff, scans each with Trivy (5m timeout,
+  # HIGH+CRITICAL only). Skips if no Harbor refs found in diff.
+  # No DefectDojo upload — trivy-image-nightly is the authoritative run.
+  # Target: <30s on typical 1-3 image PR diff.
+  # ---------------------------------------------------------------
+  trivy-image-pr:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    steps:
+      - name: Skip scan on docs-only PR  # [OPS-742]
+        id: skip_scan
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          FILES=$(curl -sk -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://forgejo.208.haist.farm/api/v1/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?limit=300" \
+            | jq -r '.[].filename // empty' 2>/dev/null || echo "")
+          if [ -z "$FILES" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          SCANNABLE=$(echo "$FILES" | { \
+            grep -vE '(\.md$|^AGENT-STATE\.md$|^docs/|^techdocs/|^mkdocs\.yml$|^catalog-info\.yaml$|^\.forgejo/workflows/|^\.gitea/workflows/)' \
+            2>/dev/null || true; } | wc -l)
+          if [ "${SCANNABLE:-1}" -eq "0" ]; then
+            echo "Docs-only PR — skipping trivy-image-pr scan"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.skip_scan.outputs.skip != 'true'
+        with:
+          fetch-depth: 0
+          path: ${{ github.job }}
+      - name: Extract changed Harbor image refs from PR diff
+        id: extract_images
+        if: steps.skip_scan.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          echo "Diffing ${BASE_SHA}...${HEAD_SHA}"
+          CHANGED_YAMLS=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}" | \
+            grep -E '\.(yaml|yml)$' | \
+            grep -E '^(apps|ansible|deployments|charts|manifests)/' || true)
+          if [ -z "$CHANGED_YAMLS" ]; then
+            echo "No changed YAML in scoped dirs (apps/ansible/deployments/charts/manifests/) — skip"
+            echo "images=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IMAGES=$(echo "$CHANGED_YAMLS" | \
+            xargs grep -hE 'image:.*harbor\.208\.haist\.farm/' 2>/dev/null | \
+            grep -oE 'harbor\.208\.haist\.farm/[^[:space:]"]+' | sort -u || true)
+          if [ -z "$IMAGES" ]; then
+            echo "No Harbor image refs in changed YAML files — skip"
+            echo "images=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Found images to scan:"
+          echo "$IMAGES"
+          # Pipe-separated for GITHUB_OUTPUT (no multiline value needed)
+          IMAGES_ENC=$(echo "$IMAGES" | tr '\n' '|')
+          echo "images=${IMAGES_ENC}" >> "$GITHUB_OUTPUT"
+      - name: Restore Trivy DB cache
+        if: steps.extract_images.outputs.images != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+      - name: Trivy scan — changed images
+        if: steps.extract_images.outputs.images != ''
+        env:
+          HARBOR_ROBOT_USER: ${{ secrets.HARBOR_ROBOT_USER }}
+          HARBOR_ROBOT_TOKEN: ${{ secrets.HARBOR_ROBOT_TOKEN }}
+          IMAGES_LIST: ${{ steps.extract_images.outputs.images }}
+          TRIVY_CACHE_DIR: ${{ github.workspace }}/.trivy-cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$TRIVY_CACHE_DIR"
+          echo "$HARBOR_ROBOT_TOKEN" | \
+            trivy registry login harbor.208.haist.farm \
+              --username "$HARBOR_ROBOT_USER" --password-stdin 2>/dev/null || true
+          echo '{"SchemaVersion":2,"Results":[]}' > trivy-image-pr-report.json
+          IFS='|' read -ra IMGS <<< "$IMAGES_LIST"
+          for IMAGE in "${IMGS[@]}"; do
+            [ -z "$IMAGE" ] && continue
+            echo "=== Scanning: $IMAGE ==="
+            trivy image \
+              --format json \
+              --output trivy-image-pr-single.json \
+              --timeout 5m \
+              --cache-dir "$TRIVY_CACHE_DIR" \
+              --severity HIGH,CRITICAL \
+              "$IMAGE" 2>&1 || true
+            if [ -f trivy-image-pr-single.json ]; then
+              jq -s '.[0].Results += (.[1].Results // []) | .[0]' \
+                trivy-image-pr-report.json trivy-image-pr-single.json \
+                > trivy-image-pr-merged.json \
+                && mv trivy-image-pr-merged.json trivy-image-pr-report.json
+            fi
+          done
+          RESULT_COUNT=$(jq '.Results | length' trivy-image-pr-report.json 2>/dev/null || echo 0)
+          echo "PR image scan complete — Results: ${RESULT_COUNT}"
+      - uses: actions/upload-artifact@v3
+        if: always() && hashFiles('trivy-image-pr/trivy-image-pr-report.json') != ''
+        with:
+          name: trivy-image-pr-report-${{ github.run_id }}
+          path: ${{ github.job }}/trivy-image-pr-report.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------
+  # OPS-414: trivy-image-nightly — full Harbor sweep (schedule-only)
+  # Uses ci/harbor-image-scan.sh to enumerate every artifact in the
+  # sentinel Harbor project, scan all with Trivy (10m timeout), and
+  # upload results to DefectDojo. Fires once daily at 02:00 UTC via
+  # schedule trigger. OPS-432: push:main trigger removed — nightly is
+  # schedule-only. DefectDojo upload now fires on schedule event.
+  # OPS-414: renamed from trivy-image → trivy-image-nightly.
+  # ---------------------------------------------------------------
+  trivy-image-nightly:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive Harbor sweep, no iac-control local deps
+    # OPS-432: schedule + workflow_dispatch only. Full Harbor sweep runs nightly
+    # at 02:00 UTC via schedule, or on-demand via workflow_dispatch (break-glass +
+    # empirical verification). push:main trigger removed.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.job }}
+      - name: Restore Trivy DB cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: |
+            trivy-db-
+      - name: Harbor registry sweep + Trivy scan
+        id: trivy_image_scan
+        # [OPS-187] Replaces the static grep-based discovery (clusters/ and
+        # manifests/ do not exist in this repo layout, so the prior approach
+        # found zero images). ci/harbor-image-scan.sh queries the Harbor API
+        # directly, enumerates every artifact in project 'sentinel', dedupes
+        # by digest, scans with Trivy using a least-privilege robot account,
+        # and merges per-image output into one Trivy-schema report.
+        #
+        # Robot credentials come from Forgejo Actions secrets, mirrored from
+        # Vault secret/data/harbor/ci-trivy-scan. 180-day TTL; rotate via
+        # Harbor admin API before expiry.
+        env:
+          HARBOR_ROBOT_USER: ${{ secrets.HARBOR_ROBOT_USER }}
+          HARBOR_ROBOT_TOKEN: ${{ secrets.HARBOR_ROBOT_TOKEN }}
+          TRIVY_CACHE_DIR: ${{ github.workspace }}/.trivy-cache
+          OUTPUT: trivy-image-report.json
+          # [OPS-311] Bumped from 5m → 10m: reduces timeout failures on slow
+          # Trivy DB fetches / Harbor pulls. Script retries 3× with 30s backoff.
+          TRIVY_TIMEOUT: 10m
+        run: |
+          set -euo pipefail
+          mkdir -p "$TRIVY_CACHE_DIR"
+          chmod +x ci/harbor-image-scan.sh
+          ./ci/harbor-image-scan.sh
+          # has_report=true only if Trivy produced at least one Result.
+          # Empty Results[] means sweep ran cleanly but found zero findings
+          # at the configured severity floor — still a valid snapshot, but
+          # DefectDojo rejects empty payloads (OPS-185 regression guard).
+          RESULT_COUNT=$(jq '.Results | length' trivy-image-report.json 2>/dev/null || echo 0)
+          if [ "$RESULT_COUNT" = "0" ]; then
+            echo "Trivy produced no Results — skipping DefectDojo upload"
+            echo "has_report=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_report=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v3
+        if: always() && hashFiles('trivy-image-nightly/trivy-image-report.json') != ''
+        with:
+          name: trivy-image-report
+          path: ${{ github.job }}/trivy-image-report.json
+      - name: Upload to DefectDojo
+        # OPS-432: fire on schedule or workflow_dispatch. Job-level if already gates
+        # this step to those two events. Previously gated on push:main (always false
+        # under schedule/dispatch) — findings were scanned but never uploaded.
+        # Upload is non-blocking (warn on 4xx/5xx): CI gate should not depend on
+        # DefectDojo uptime. Report artifact is the authoritative record. Matches
+        # the semgrep action's soft-fail pattern (OPS-432 empirical run discovered
+        # reimport-scan returning 5xx while other endpoints healthy — tracked OPS-433).
+        if: >-
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+          steps.trivy_image_scan.outputs.has_report == 'true' &&
+          hashFiles('trivy-image-nightly/trivy-image-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Trivy container image scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Trivy Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — Image" \
+            -F "test_title=Trivy Container Image" \
+            -F "auto_create_context=true" \
+            -F "file=@trivy-image-report.json" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" \
+            -F "minimum_severity=High" \
+            -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=trivy,image,container" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "DefectDojo upload HTTP status: ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "::warning::DefectDojo upload failed (HTTP ${HTTP_CODE}): ${BODY}"
+            echo "::warning::Trivy image findings available as workflow artifact (OPS-433 tracks reimport-scan endpoint)"
+          else
+            echo "Trivy image findings uploaded to DefectDojo (product: Sentinel IaC)"
+          fi
+
+  # ---------------------------------------------------------------
+  # SEC-60/61/62 — Supply-chain matrix generator (OPS-202)
+  # Reads ci/sentinel-images.txt and emits a JSON matrix for the
+  # supply-chain-scan job. Runs only on main-branch pushes.
+  # ---------------------------------------------------------------
+  supply-chain-matrix:
+    runs-on: iac
+    continue-on-error: true
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.job }}
+      - name: Generate image scan matrix from ci/sentinel-images.txt
+        id: gen
+        run: |
+          MATRIX=$(python3 - <<'PYEOF'
+          import json
+          includes = []
+          with open('ci/sentinel-images.txt') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith('#'):
+                      continue
+                  parts = line.split()
+                  if len(parts) >= 2:
+                      includes.append({'image': parts[0], 'language': parts[1]})
+          print(json.dumps({'include': includes}))
+          PYEOF
+          )
+          echo "Supply-chain scan matrix: ${MATRIX}"
+          echo "matrix=${MATRIX}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------
+  # SEC-60/61/62 — Supply-chain security scan (SBOM + OSV + SLSA)
+  # Activated by OPS-202: driven by ci/sentinel-images.txt (digest-
+  # pinned curated list of Sentinel CI-built images). Runs the
+  # composite action at .forgejo/actions/security-scan/action.yml
+  # for each image in the matrix.
+  #
+  # Cosign key: loaded from /etc/cosign/cosign.key on the iac runner
+  # (same key used by overwatch-console/haists-website build.yml).
+  # COSIGN_KEY Forgejo secret is not required for this wiring.
+  #
+  # hard-fail-on-critical: false for v0.1 — tighten after baseline
+  # DefectDojo triage (file a follow-up issue to set to true).
+  #
+  # The composite action at .forgejo/actions/security-scan/action.yml
+  # is the canonical implementation — do not modify it here.
+  # ---------------------------------------------------------------
+  supply-chain-scan:
+    needs: [supply-chain-matrix]
+    runs-on: iac
+    continue-on-error: true
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      matrix: ${{ fromJson(needs.supply-chain-matrix.outputs.matrix || '[]') }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load cosign key from runner filesystem
+        id: cosign_key
+        run: |
+          # cosign key is provisioned on iac-control at /etc/cosign/cosign.key
+          # Same key used by overwatch-console and haists-website build.yml workflows.
+          # Vault source: secret/cosign private_key field.
+          if [ -f /etc/cosign/cosign.key ]; then
+            {
+              echo "key<<COSIGN_EOF"
+              cat /etc/cosign/cosign.key
+              echo "COSIGN_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "Cosign key loaded ($(wc -l < /etc/cosign/cosign.key) lines)"
+          else
+            echo "::error::cosign key not found at /etc/cosign/cosign.key"
+            echo "::error::Ensure the iac-control role provisions /etc/cosign/ from Vault secret/cosign"
+            exit 1
+          fi
+
+      - name: Supply-chain security scan (SEC-60/61/62) — ${{ matrix.image }}
+        uses: ./.forgejo/actions/security-scan
+        with:
+          image-ref: ${{ matrix.image }}
+          language: ${{ matrix.language }}
+          source-dir: .
+          defectdojo-product-name: "Sentinel Platform"
+          defectdojo-token: ${{ secrets.DEFECTDOJO_API_KEY }}
+          cosign-key: ${{ steps.cosign_key.outputs.key }}
+          cosign-password: ""
+          upload-sbom: "true"
+          hard-fail-on-critical: "false"
+
+  # ---------------------------------------------------------------
+  # Wiring pattern for container-build workflows (buildah):
+  # After buildah push, call the composite directly in the build job:
+  #
+  #   - name: Supply-chain security scan (SEC-60/61/62)
+  #     uses: sentinel-iac/.forgejo/actions/security-scan@main
+  #     with:
+  #       image-ref: ${{ steps.build.outputs.image-ref }}
+  #       language: node   # or python, go, rust, none
+  #       source-dir: .
+  #       defectdojo-product-name: "Sentinel Platform"
+  #       defectdojo-token: ${{ secrets.DEFECTDOJO_API_KEY }}
+  #       cosign-key: ${{ steps.cosign_key.outputs.key }}
+  #       cosign-password: ""
+  #
+  # Also update ci/sentinel-images.txt with the new image+digest
+  # so the weekly supply-chain-scan picks it up on main.
+  # ---------------------------------------------------------------
+
+  # ---------------------------------------------------------------
+  # OPS-204: SAST via semgrep
+  # Scans sentinel-iac source (packer HCL, shell, tofu, ansible YAML)
+  # for logic-level security issues (SA-11, SA-15).
+  # continue-on-error: true — first-iteration soft deployment.
+  # Tighten fail-on-findings to "true" after operator DefectDojo triage.
+  # ---------------------------------------------------------------
+  semgrep:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive SAST scan, no iac-control local deps
+    continue-on-error: true
+    # [OPS-828] No per-job checkout path here: `uses: ./.forgejo/actions/sast-semgrep`
+    # is a local composite action resolved from workspace root. Checking out to a
+    # subdirectory (path: ${{ github.job }}) would put the action at
+    # ./semgrep/.forgejo/actions/sast-semgrep but the runner looks at workspace root
+    # → action not found, semgrep silently skipped (continue-on-error masks it).
+    # Workspace-root checkout is safe: semgrep starts before supply-chain-scan
+    # (which also uses workspace root but needs: supply-chain-matrix delay).
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAST scan (semgrep)
+        uses: ./.forgejo/actions/sast-semgrep
+        with:
+          source-dir: .
+          semgrep-config: "p/security-audit p/secrets"
+          fail-on-findings: "false"
+          severity-threshold: "ERROR"
+          defectdojo-token: ${{ github.ref == 'refs/heads/main' && secrets.DEFECTDOJO_API_KEY || '' }}
+          product-name: "Sentinel IaC"
+          engagement-name: "Main Branch CI/CD — SAST"
+
+  check-defectdojo-health:
+    runs-on: iac
+    needs: [trivy-iac, trivy-config, gitleaks, checkov, shellcheck, trivy-vuln, trivy-image-nightly, supply-chain-matrix, supply-chain-scan, semgrep]
+    # OPS-432: also runs after schedule + workflow_dispatch triggers.
+    if: always() && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    env:
+      DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+      DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+    steps:
+      - name: Verify DefectDojo received recent data
+        run: |
+          LATEST=$(curl -sfk -H "Authorization: Token $DEFECTDOJO_API_KEY" \
+            "$DEFECTDOJO_URL/api/v2/tests/?o=-updated&limit=1" | jq -r '.results[0].updated')
+          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            echo "::error::DefectDojo returned no tests. Uploads may have all failed or DefectDojo is down."
+            exit 1
+          fi
+          AGE=$(( $(date -u +%s) - $(date -d "$LATEST" -u +%s) ))
+          echo "DefectDojo latest test updated: $LATEST (age: ${AGE}s)"
+          if [ "$AGE" -gt 172800 ]; then
+            echo "::error::DefectDojo latest test is ${AGE}s old (> 48h). Uploads broken."
+            exit 1
+          fi
+          echo "DefectDojo health check passed. Latest test age: ${AGE}s"

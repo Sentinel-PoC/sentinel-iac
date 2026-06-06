@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew id_sentinel SSH cert every 3 hours (cert TTL is 4h)
+Documentation=file:///etc/systemd/system/jit-ssh-cert-renew.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=3h
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

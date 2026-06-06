@@ -1,0 +1,74 @@
+---
+# vault-jwt-spire — defaults
+# Tracking: OPS-536 / OPS-351 Phase 4.4b
+#
+# Non-sensitive configuration only.
+# Sensitive vars (vault_token) MUST be supplied via -e — never stored here.
+#
+# Phase boundary: this role authors the Vault JWT auth mount that trusts
+# SPIRE-issued JWT-SVIDs. NO workload consumes this mount until Phase 4.5
+# (OPS-NNN) migrates agent-vault-auth.sh away from the Keycloak SA path.
+
+# SPIFFE workload roles registered on spire-server (OPS-535).
+# Mirror OPS-345's list — the four canonical Overwatch agent roles.
+agent_roles:
+  - worker
+  - planner
+  - judge
+  - scribe
+
+# Mirror OPS-345 default. The FQDN works for token-bearing API calls against
+# Vault — Pangolin only enforces Keycloak SSO on browser flows, not on the
+# /v1/* API surface this role uses. The previously-claimed direct-IP override
+# (https://192.168.12.206:8200) is actively broken: the direct-IP cert has no
+# IP SANs, so TLS validation fails. Do NOT override at apply time.
+vault_addr: "https://vault.208.haist.farm"
+
+# JWT auth method mount path. Distinct from OPS-345's auth/jwt/ mount
+# (which trusts Keycloak sentinel realm with bound_issuer set). Separate
+# mount is mandatory because SPIRE 1.14.6 JWT-SVIDs emit no `iss` claim
+# (empirical: mint-and-decode in OPS-536 DESIGN-CALL comment 387be538) and
+# Vault's bound_issuer is mount-level — can't share a mount with Keycloak.
+vault_jwt_spire_mount_path: "jwt-spire"
+
+# OIDC discovery URL = spire-oidc-discovery-provider on iac-control.
+# Issuer field in the discovery doc matches this URL exactly (Phase 4.4a
+# operator-author contract lock; see roles/spire-oidc-discovery-provider
+# defaults `spire_oidc_jwt_issuer`).
+vault_jwt_spire_oidc_discovery_url: "https://spire-oidc.208.haist.farm:8443"
+
+# Vault PKI mount + endpoint that publishes the chain used to sign the
+# spire-oidc-discovery-provider serving cert. The role reads this at apply
+# time and inlines the PEM into oidc_discovery_ca_pem — no CA file on disk
+# to maintain; Vault PKI is its own source of truth.
+vault_jwt_spire_pki_mount: "pki_int"
+vault_jwt_spire_pki_ca_chain_path: "{{ vault_jwt_spire_pki_mount }}/cert/ca_chain"
+
+# bound_issuer left UNSET (empty string).
+# SPIRE 1.14.6 JWT-SVID emits no `iss` claim — mint-and-decode evidence in
+# OPS-536 DESIGN-CALL. Any non-empty value would make Vault reject every
+# login with "missing iss claim". The OIDC discovery doc's own `issuer`
+# field is still validated against vault_jwt_spire_oidc_discovery_url by
+# Vault's discovery logic — that chain-of-trust check is preserved.
+vault_jwt_spire_bound_issuer: ""
+
+# Bound audience locked to vault.208.haist.farm by operator-author contract.
+# Phase 4.5 requests this audience via `spire-agent api fetch jwt -audience`.
+vault_jwt_spire_bound_audience: "vault.208.haist.farm"
+
+# SPIFFE trust-domain prefix. Per-role subject = {prefix}/sentinel/{role}.
+# Matches OPS-535's workload entry SPIFFE IDs.
+spire_trust_domain: "agents.haist.farm"
+
+# Token TTL — hard cap at 1h. Mirrors OPS-345 contract.
+# token_explicit_max_ttl closes the renewal-stacking loophole flagged in
+# OPS-345's audit (a 1h-TTL token cannot exceed 1h even if periodic
+# renewal is attempted).
+vault_jwt_spire_token_ttl: "1h"
+vault_jwt_spire_token_max_ttl: "1h"
+vault_jwt_spire_token_explicit_max_ttl: "1h"
+
+# Strip the Vault default policy — per-role agent-* policies grant only
+# what each agent needs (including auth/token/lookup-self for TTL
+# inspection, granted explicitly in agent-worker.hcl line 19-21 etc).
+vault_jwt_spire_token_no_default_policy: true

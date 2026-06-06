@@ -1,0 +1,17 @@
+---
+# host_vars/jellyfin-lxc/main.yml — Jellyfin LXC 100 (OPS-1030)
+#
+# Jellyfin media server — pve4-alienware (192.168.12.60), LXC 100
+# IP: 192.168.12.61, LAN-only per operator decision 2026-05-28 (OPS-1032 cancelled)
+#
+# OPS-1030: stale PublishedServerUriBySubnet entries were removed 2026-05-28.
+# The entries ([192.168.12.0/24]https://192.168.12.168 and
+# [192.168.50.0/24]https://192.168.12.168) pointed to the Pangolin VIP
+# decommissioned by OPS-974 on 2026-05-26, causing HTTP 404 for LAN clients.
+#
+# Fix: jellyfin_published_server_uri_by_subnet: [] (default, never override)
+#       jellyfin_enable_published_server_uri_by_request: false
+# This ensures Jellyfin advertises its own LAN IP for auto-discovery.
+
+# All remaining config uses role defaults — no overrides needed for LAN-only.
+# See ansible/roles/jellyfin-lxc/defaults/main.yml for full variable list.

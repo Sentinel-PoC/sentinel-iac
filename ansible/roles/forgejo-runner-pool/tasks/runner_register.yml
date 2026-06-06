@@ -1,0 +1,236 @@
+---
+# runner_register.yml — Phase 4: Register each runner with Forgejo
+# OPS-582
+#
+# Registration uses forgejo-runner register (interactive mode, stdin-driven) which:
+#   1. Takes a one-time registration token from Forgejo admin UI
+#   2. Contacts the Forgejo instance, registers the runner
+#   3. Writes /opt/forgejo-runner/.runner with UUID + long-lived token
+#
+# The .runner file is idempotent: if it already exists, registration is skipped.
+#
+# SEC-75: Token is delivered via stdin, NOT via --token CLI arg. The prior approach
+# (--token {{ item.stdout }}) exposed the token in /proc/PID/cmdline (pgrep-visible).
+# The fix uses interactive register with piped stdin; the token travels as pipe data
+# and is never present in any process argv. Verified against upstream source at
+# code.forgejo.org/forgejo/runner tag v12.10.0 (internal/app/cmd/register.go):
+#   - registerInteractive() reads from bufio.NewReader(os.Stdin) via ReadString('\n')
+#   - Prompt sequence (no existing .runner): instance URL → token → runner name
+#   - With DefaultLabels set in config.yaml, labels prompt is skipped automatically
+#   - os.Exit(0) on success; log.Fatal on failure (non-zero exit captured by bash)
+#
+# Upstream registration docs: https://forgejo.org/docs/next/admin/actions/registration/
+#
+# OPERATOR PRE-REQUISITE — Token creation (post-merge step):
+# ─────────────────────────────────────────────────────────────
+#   1. Go to https://forgejo.208.haist.farm/admin/actions/runners
+#   2. Click "Create new runner" for each of the 3 runners
+#   3. Note the registration token displayed (single-use, expires after 24h by default)
+#   4. Store in Vault:
+#        VAULT_ADDR=https://vault.208.haist.farm \
+#          vault kv put secret/forgejo-runner/pve4-1 token=<TOKEN>
+#        vault kv put secret/forgejo-runner/pve4-2 token=<TOKEN>
+#        vault kv put secret/forgejo-runner/pve4-3 token=<TOKEN>
+#   5. Re-run playbook with --tags runner-register
+# ─────────────────────────────────────────────────────────────
+
+# ── Check if runner is already registered ─────────────────────────────────────
+
+- name: Check if runner .runner file exists (already registered)
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- test -f {{ forgejo_runner_workdir }}/.runner"
+  register: runner_registered
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-register]
+
+# ── Fetch registration tokens from Vault ─────────────────────────────────────
+# Only attempt if runner is NOT already registered.
+
+- name: Fetch registration token from Vault for unregistered runners
+  # Bug fix [OPS-740]: task previously ran on pve4-alienware which has no vault
+  # binary. Fix: delegate_to localhost (iac-control, where vault CLI is installed).
+  # Also: lookup('env', 'VAULT_TOKEN') returned empty because iac-control stores
+  # the token in ~/.vault-token not in the env. Fix: read file first, env fallback.
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -field=token {{ item.item.vault_token_path }}
+  register: vault_token_result
+  failed_when: false
+  changed_when: false
+  no_log: true
+  delegate_to: localhost
+  when: item.rc != 0   # runner not yet registered
+  loop: "{{ runner_registered.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  environment:
+    VAULT_ADDR: "{{ vault_addr }}"
+    VAULT_TOKEN: "{{ lookup('file', '~/.vault-token', errors='ignore') | default(lookup('env', 'VAULT_TOKEN'), true) }}"
+  tags: [forgejo-runner-pool, runner-register]
+
+# ── Warn if token not in Vault ────────────────────────────────────────────────
+
+- name: Warn if registration token not available
+  ansible.builtin.debug:
+    msg: >
+      NOTICE: Runner {{ item.item.item.name }} (VMID {{ item.item.item.vmid }})
+      is not registered and no token found at {{ item.item.item.vault_token_path }}.
+      Post-merge operator step required — see runner_register.yml header for instructions.
+  when:
+    - item.item.rc is defined and item.item.rc != 0   # not yet registered
+    - item.rc is defined and item.rc != 0              # Vault fetch failed
+  loop: "{{ vault_token_result.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.item.name | default('unknown') }}"
+  tags: [forgejo-runner-pool, runner-register]
+
+# ── SEC-75: Stage and deliver registration token without CLI arg exposure ──────
+# The token must reach forgejo-runner register without appearing in /proc/PID/cmdline.
+# Approach: write token to a 0600 temp file on PVE host, push into LXC, then pipe
+# via stdin to the interactive register command. Token is never in any process argv.
+#
+# block/always ensures the PVE-host staging file is removed even if the register
+# task exits non-zero (e.g. Forgejo unreachable, token expired). Without always:
+# a failed register would leave /tmp/.runner_reg_token_<vmid> on the hypervisor.
+# This mirrors the already-correct in-LXC cleanup: EC=$?; rm -f; exit $EC.
+
+- name: SEC-75 — stage, deliver, register, and clean up token (block/always)
+  block:
+
+    - name: Stage registration token on PVE host (SEC-75 — mode 0600, no_log)
+      # ansible.builtin.copy with content: writes the token using Python's file API,
+      # not shell. The token is never passed through any shell argv.
+      ansible.builtin.copy:
+        content: "{{ item.item.stdout }}"
+        dest: "/tmp/.runner_reg_token_{{ item.item.item.vmid }}"
+        mode: "0600"
+      no_log: true
+      when:
+        - item.item.rc is defined and item.item.rc != 0   # not yet registered
+        - item.rc is defined and item.rc == 0              # Vault token available
+      loop: "{{ vault_token_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item.name | default('unknown') }}"
+      tags: [forgejo-runner-pool, runner-register]
+
+    - name: Push registration token into LXC (SEC-75 — pct push, mode 0600, no_log)
+      # pct push copies the file into the LXC. The file path is in argv, not the content.
+      # --perms 0600 ensures the token file is readable only by root inside the LXC.
+      ansible.builtin.command:
+        cmd: >-
+          pct push {{ item.item.item.vmid }}
+          /tmp/.runner_reg_token_{{ item.item.item.vmid }}
+          /tmp/.runner_reg_token
+          --perms 0600
+      no_log: true
+      when:
+        - item.item.rc is defined and item.item.rc != 0   # not yet registered
+        - item.rc is defined and item.rc == 0              # Vault token available
+      changed_when: false
+      loop: "{{ vault_token_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item.name | default('unknown') }}"
+      tags: [forgejo-runner-pool, runner-register]
+
+    # ── Register runners where token is available ─────────────────────────────
+    # SEC-75: Uses interactive register (no --no-interactive) with stdin piping.
+    # The bash -c script feeds inputs via a compound command piped to forgejo-runner:
+    #   { printf instance_url; cat /tmp/.runner_reg_token; printf newline+name; }
+    #   | forgejo-runner register --config config.yaml
+    #
+    # Token path in argv:
+    #   printf argv: URL literal and name literal — NOT the token value
+    #   cat argv:    file path /tmp/.runner_reg_token — NOT the token content
+    #   forgejo-runner argv: --config only — NO --token flag
+    # Token travels as pipe data (stdin) to forgejo-runner — never in /proc/PID/cmdline.
+    #
+    # Interactive prompt sequence (v12.10.0, no existing .runner, DefaultLabels set):
+    #   StageInputInstance  → reads line 1: instance URL
+    #   StageInputToken     → reads line 2: token (from cat, newline added by printf '\n')
+    #   StageInputRunnerName→ reads line 3: runner name
+    #   (StageInputLabels skipped because config.yaml has DefaultLabels configured)
+    #   StageWaitingForRegistration → doRegister() → os.Exit(0) on success
+    #
+    # Cleanup: rm -f inside LXC runs on all paths via EC=$?; rm -f; exit $EC.
+    # PVE host staging file is removed by the always: section below — runs even
+    # if this task exits non-zero, preventing token leakage on the hypervisor.
+
+    - name: Register runner with Forgejo instance (SEC-75 — token via stdin, not argv)
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ item.item.item.vmid }} -- bash -c
+          "cd {{ forgejo_runner_workdir }} &&
+          { printf '%s\n' '{{ forgejo_runner_instance_url }}';
+            cat /tmp/.runner_reg_token;
+            printf '\n%s\n' '{{ item.item.item.name }}';
+          } | /usr/local/bin/forgejo-runner register
+          --config {{ forgejo_runner_workdir }}/config.yaml 2>&1;
+          EC=$?; rm -f /tmp/.runner_reg_token; exit $EC"
+      when:
+        - item.item.rc is defined and item.item.rc != 0   # not yet registered
+        - item.rc is defined and item.rc == 0              # Vault token available
+      changed_when: true
+      no_log: true
+      loop: "{{ vault_token_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item.name | default('unknown') }}"
+      tags: [forgejo-runner-pool, runner-register]
+
+  always:
+
+    - name: Remove staging token from PVE host (SEC-75 — cleanup, always runs)
+      # always: ensures this runs even when the register task fails, so the
+      # hypervisor staging file is never left behind. when: guards items where
+      # no file was staged (runner already registered, or Vault fetch failed).
+      ansible.builtin.file:
+        path: "/tmp/.runner_reg_token_{{ item.item.item.vmid }}"
+        state: absent
+      no_log: true
+      when:
+        - item.item.rc is defined and item.item.rc != 0   # not yet registered
+        - item.rc is defined and item.rc == 0              # Vault token available
+      loop: "{{ vault_token_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.item.name | default('unknown') }}"
+      tags: [forgejo-runner-pool, runner-register]
+
+# ── Start the runner service ──────────────────────────────────────────────────
+# Only start if .runner file now exists (either pre-existing or just registered).
+
+- name: Check .runner file exists before starting service
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- test -f {{ forgejo_runner_workdir }}/.runner"
+  register: runner_ready
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-register]
+
+- name: Start forgejo-runner service inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item.vmid }} -- systemctl start forgejo-runner"
+  when: item.rc == 0
+  changed_when: item.rc == 0
+  loop: "{{ runner_ready.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, runner-register]
+
+- name: Show pending registration notice for unregistered runners
+  ansible.builtin.debug:
+    msg: >
+      Runner {{ item.item.name }} (VMID {{ item.item.vmid }}) is NOT yet registered.
+      Service will not start until registration token is added to Vault and
+      playbook is re-run with --tags runner-register.
+      Vault path: {{ item.item.vault_token_path }}
+  when: item.rc != 0
+  loop: "{{ runner_ready.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, runner-register]

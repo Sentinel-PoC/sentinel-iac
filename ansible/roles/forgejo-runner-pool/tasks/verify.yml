@@ -1,0 +1,139 @@
+---
+# verify.yml — Phase 5: Acceptance-criteria verification
+# OPS-582
+#
+# Checks performed (non-destructive):
+#   1. LXC containers exist and are running
+#   2. Docker daemon is up inside each LXC
+#   3. Node.js >=20 present inside each LXC (OPS-763)
+#   4. forgejo-runner binary is present and version matches
+#   5. config.yaml exists in workdir
+#   6. (Conditional) .runner file exists (only if registration was completed)
+
+# ── LXC containers ────────────────────────────────────────────────────────────
+
+- name: Verify runner LXC containers are running
+  ansible.builtin.command:
+    cmd: "pct status {{ item.vmid }}"
+  register: verify_lxc_status
+  changed_when: false
+  failed_when: "'running' not in verify_lxc_status.stdout"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, verify]
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+
+- name: Verify Docker is running inside each LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- docker info"
+  register: verify_docker
+  changed_when: false
+  failed_when: verify_docker.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, verify]
+
+- name: Display Docker status
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} Docker: OK (docker info rc={{ item.rc }})"
+  loop: "{{ verify_docker.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, verify]
+
+# ── Node.js version ───────────────────────────────────────────────────────────
+
+- name: Verify Node.js >=20 is installed inside each LXC
+  # actions/checkout@v4 requires node >=20; Ubuntu 24.04 apt ships 18 (OPS-763)
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- node --version"
+  register: verify_nodejs
+  changed_when: false
+  failed_when: >
+    verify_nodejs.rc != 0 or
+    not (verify_nodejs.stdout is match('^v(2[0-9]|[3-9][0-9])'))
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, verify]
+
+- name: Display Node.js version per runner
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} node: {{ item.stdout }}"
+  loop: "{{ verify_nodejs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, verify]
+
+# ── forgejo-runner binary ─────────────────────────────────────────────────────
+
+- name: Verify forgejo-runner binary version inside each LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- /usr/local/bin/forgejo-runner --version"
+  register: verify_runner_version
+  changed_when: false
+  failed_when: verify_runner_version.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, verify]
+
+- name: Display forgejo-runner versions
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} runner version: {{ item.stdout }}"
+  loop: "{{ verify_runner_version.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, verify]
+
+# ── Config file ───────────────────────────────────────────────────────────────
+
+- name: Verify config.yaml exists in workdir inside each LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- test -f {{ forgejo_runner_workdir }}/config.yaml"
+  register: verify_config
+  changed_when: false
+  failed_when: verify_config.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, verify]
+
+# ── Registration status ───────────────────────────────────────────────────────
+
+- name: Check registration status (non-failing — may not be registered yet)
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- test -f {{ forgejo_runner_workdir }}/.runner"
+  register: verify_registration
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, verify]
+
+- name: Display registration status per runner
+  ansible.builtin.debug:
+    msg: >
+      {{ item.item.name }} (VMID {{ item.item.vmid }}):
+      {% if item.rc == 0 %}REGISTERED (.runner file present){% else %}NOT YET REGISTERED — see operator steps in README.md{% endif %}
+  loop: "{{ verify_registration.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, verify]
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+- name: Verification summary
+  ansible.builtin.debug:
+    msg:
+      - "=== OPS-582 forgejo-runner-pool verification ==="
+      - "LXC containers running: {{ verify_lxc_status.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+      - "Docker running: {{ verify_docker.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+      - "Node.js >=20: {{ verify_nodejs.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+      - "Runner binary present: {{ verify_runner_version.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+      - "Runners registered: {{ verify_registration.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+  tags: [forgejo-runner-pool, verify]

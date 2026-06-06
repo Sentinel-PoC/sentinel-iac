@@ -1,0 +1,47 @@
+---
+# vault-k8s-existing-roles defaults
+# Tracking: OPS-1206
+#
+# Codifies the 3 pre-existing Vault Kubernetes auth roles that were provisioned
+# out-of-band (no IaC) before OPS-1202 established the vault-k8s-* IaC pattern.
+
+# Vault address — override with direct IP if FQDN routes through SSO
+vault_addr: "https://vault.208.haist.farm"
+
+# Vault Kubernetes auth mount path
+vault_k8s_mount_path: "kubernetes"
+
+# K8s auth role definitions — sourced from live Vault 2026-06-05
+# Each entry: role_name, policy_name, sa_names (list), namespaces (list), ttl
+vault_k8s_existing_roles:
+  - role_name: "etcd-backup"
+    policy_name: "etcd-backup-policy"
+    sa_names:
+      - "etcd-backup-sa"
+    namespaces:
+      - "sentinel-ops"
+    ttl: "1h"
+
+  - role_name: "external-secrets"
+    policy_name: "eso-read-secrets"
+    sa_names:
+      - "external-secrets"
+      - "external-secrets-operator"
+      - "vault-auth"
+      - "default"
+    namespaces:
+      - "external-secrets"
+      - "openshift-gitops"
+      - "monitoring"
+      - "openshift-config"
+      - "netbox"
+      - "backstage"
+    ttl: "1h"
+
+  - role_name: "sentinel-ops"
+    policy_name: "sentinel-ops-policy"
+    sa_names:
+      - "sentinel-ops-sa"
+    namespaces:
+      - "sentinel-ops"
+    ttl: "24h"

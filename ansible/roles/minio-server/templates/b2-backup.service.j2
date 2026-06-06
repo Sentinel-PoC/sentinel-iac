@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sync MinIO buckets to Backblaze B2
+After=network-online.target minio.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup-to-b2.sh
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,5 @@
+---
+wazuh_manager_ip: "192.168.12.100"
+wazuh_agent_config_path: "/var/ossec/etc/ossec.conf"
+# This ensures we don't try to run auditd on LXC where it's not supported
+is_lxc: "{{ ansible_virtualization_type == 'lxc' }}"

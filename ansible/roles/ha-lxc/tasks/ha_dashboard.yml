@@ -1,0 +1,64 @@
+---
+# ha_dashboard.yml — Phase 6: Deploy primary Lovelace dashboard
+# OPS-586 Section F
+#
+# Deploys:
+#   - files/dashboards/main.yaml → {{ ha_config_dir }}/dashboards/main.yaml
+#     (registered via lovelace.dashboards.lovelace-main in configuration.yaml)
+#
+# Five-view dashboard (Home / Media / Security / Infrastructure / Today) using
+# the modern "sections" view type for mobile-responsive layout.
+# Ref: https://www.home-assistant.io/dashboards/views/
+#      "Sections (default): Arranges cards in a grid system and lets you
+#       group them in sections."
+#
+# Deployment pattern: pct push (PVE host → LXC).
+# Pattern mirrors ha_theme.yml (OPS-586 Section A).
+#
+# Entity status in cards:
+#   live              — Section A (merged main)
+#   materializes-on-B — PR #208 Wyoming Whisper/Piper
+#   materializes-on-C — PR #210 Wazuh→HA bridge
+#   materializes-on-D — Section D Frigate (deferred)
+#   materializes-on-E — PR #209 media+comms
+#   operator-setup    — UI integration setup required
+#   placeholder       — device not yet paired/configured
+#
+# HA renders "Entity not found" for missing entities — the dashboard is
+# functional at deploy time; entities fill in as sections merge/configure.
+
+# ── Ensure dashboards/ directory exists inside LXC ──────────────────────────
+
+- name: Create HA dashboards directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/dashboards"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, ha-dashboard]
+
+# ── Copy dashboard file to PVE host temp location ───────────────────────────
+
+- name: Copy main.yaml dashboard to PVE host temp location
+  ansible.builtin.copy:
+    src: dashboards/main.yaml
+    dest: /tmp/ha-main-dashboard.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-dashboard]
+
+# ── Push dashboard file into LXC ─────────────────────────────────────────────
+
+- name: Push main.yaml dashboard into LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-main-dashboard.yaml {{ ha_config_dir }}/dashboards/main.yaml"
+  changed_when: true
+  notify: Restart home-assistant container
+  tags: [ha-lxc, homeassistant, ha-dashboard]
+
+# ── Cleanup temp file ────────────────────────────────────────────────────────
+
+- name: Remove dashboard temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-main-dashboard.yaml
+    state: absent
+  tags: [ha-lxc, homeassistant, ha-dashboard]

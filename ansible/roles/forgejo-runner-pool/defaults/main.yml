@@ -1,0 +1,274 @@
+---
+# forgejo-runner-pool role defaults
+# OPS-582/OPS-762: pve4 CI runner pool — 6 runner LXCs on pve4-alienware
+#
+# Upstream references:
+#   Forgejo Actions admin guide:  https://forgejo.org/docs/next/admin/actions/
+#   Runner registration docs:     https://forgejo.org/docs/next/admin/actions/registration/
+#   forgejo-runner source + README: https://code.forgejo.org/forgejo/runner
+#
+# DO NOT auto-apply — PVE bedrock change per CLAUDE.md §8.
+# Operator runs: ansible-playbook ansible/playbooks/forgejo-runner-pool.yml
+# after reviewing dry-run output and adding registration tokens to Vault.
+
+# ── Toggle ─────────────────────────────────────────────────────────────────────
+# Set to false in host_vars to skip this role entirely.
+forgejo_runner_pool_enabled: true
+
+# ── forgejo-runner binary ─────────────────────────────────────────────────────
+# Pin to same version as iac-control runner for consistency.
+# Upstream: https://code.forgejo.org/forgejo/runner/releases/download/v12.10.0/
+# SHA256 from: https://code.forgejo.org/forgejo/runner/releases/download/v12.10.0/forgejo-runner-12.10.0-linux-amd64.sha256
+forgejo_runner_version: "12.10.0"
+forgejo_runner_sha256: "ec9e4119f908835ceeac54e598d12e59b21d88ec3ec948b3c6f17a9021aac2f8"
+forgejo_runner_download_url: >-
+  https://code.forgejo.org/forgejo/runner/releases/download/v{{ forgejo_runner_version }}/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64
+
+# Forgejo instance the runners connect to.
+# OPS-773/OPS-774: Use internal HTTP :3000 (not Pangolin HTTPS :443).
+# 192.168.12.70 is the Forgejo server; port 3000 is directly accessible from pve4 LXC.
+# Pangolin VIP (.168) long-poll path can sever runner task-poll → RESULT_CANCELLED wedge.
+forgejo_runner_instance_url: "http://forgejo.208.haist.farm:3000"
+
+# OPS-774: /etc/hosts pins for Pangolin-bypass inside each runner LXC.
+# forgejo.208.haist.farm → 192.168.12.70 (Forgejo server, bypasses Pangolin VIP)
+# harbor.208.haist.farm  → 192.168.12.168 (Pangolin, correct for Harbor HTTPS on :443)
+# These override the *.208.haist.farm → Pangolin wildcard that PowerDNS would otherwise serve.
+# Managed by tasks/etc_hosts.yml (called from tasks/main.yml after LXC provisioning).
+forgejo_runner_etc_hosts_pins:
+  - ip: "192.168.12.70"
+    host: "forgejo.208.haist.farm"
+    comment: "internal route (OPS-773/OPS-774: bypass Pangolin VIP, direct to Forgejo :3000)"
+  - ip: "192.168.12.168"
+    host: "harbor.208.haist.farm"
+    comment: "internal route (OPS-774: Pangolin correct for Harbor HTTPS)"
+
+# ── Runner working directory (inside each LXC) ────────────────────────────────
+forgejo_runner_workdir: "/opt/forgejo-runner"
+forgejo_runner_user: "ubuntu"
+forgejo_runner_uid: "1000"
+
+# ── LXC template ─────────────────────────────────────────────────────────────
+# Ubuntu 24.04 LTS — same template used by ha-lxc and ai-tier1 roles.
+forgejo_runner_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+forgejo_runner_lxc_template_storage: "local"
+
+# ── Network ───────────────────────────────────────────────────────────────────
+forgejo_runner_lxc_bridge: "vmbr0"
+forgejo_runner_lxc_cidr: "24"
+forgejo_runner_lxc_gateway: "192.168.12.1"
+forgejo_runner_lxc_nameserver: "192.168.12.210"   # iac-control dnsmasq (resolves *.208.haist.farm)
+forgejo_runner_lxc_searchdomain: "208.haist.farm"
+
+# OPS-697: Docker daemon DNS — containers must resolve *.208.haist.farm via dnsmasq.
+# Docker containers spawned by CI jobs do NOT inherit the LXC's /etc/resolv.conf;
+# Docker uses its own embedded resolver unless daemon.json specifies dns servers explicitly.
+forgejo_runner_docker_dns:
+  - "192.168.12.210"   # iac-control dnsmasq (resolves *.208.haist.farm)
+  - "1.1.1.1"          # Cloudflare fallback for public names
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+forgejo_runner_lxc_rootfs_storage: "local-lvm"
+forgejo_runner_lxc_rootfs_size: "20"               # 20 GB — Docker images + action caches
+
+# ── Resource limits ───────────────────────────────────────────────────────────
+# 2 CPU + 4 GB RAM per runner (per OPS-582 budget: ~36% of pve4's 12 CPU / 32 GB RAM)
+forgejo_runner_lxc_cores: 2
+forgejo_runner_lxc_memory: 4096    # MB
+forgejo_runner_lxc_swap: 1024      # MB
+
+# ── Security: unprivileged LXC with Docker-supporting features ────────────────
+# Unprivileged = 1 is the security default on Proxmox.
+# Docker-in-LXC on Proxmox 9.1.1 (kernel 6.17+) requires:
+#   nesting=1  — Linux namespace nesting for container runtimes
+#   keyctl=1   — keyctl() syscall for Docker credential helpers
+# If Docker fails with permission errors at runtime (e.g., overlay2 EPERM),
+# the operator may need to flip to unprivileged=0 (privileged LXC) + add
+#   lxc.apparmor.profile: unconfined  to /etc/pve/lxc/<vmid>.conf
+# See README.md: Docker-in-LXC cgroup requirements.
+forgejo_runner_lxc_unprivileged: 1
+forgejo_runner_lxc_features: "nesting=1,keyctl=1"
+
+# ── Runner instances ──────────────────────────────────────────────────────────
+# Each entry defines one LXC runner.  Adjust IPs/VMIDs in host_vars/pve4-alienware/main.yml.
+# Per pct list on 2026-05-13: VMIDs 100 (jellyfin-lxc) + 201 (home-assistant) in use.
+# VMIDs 210/211/212 confirmed free.  IPs .82/.83/.84 confirmed free (80=ai-tier1 reserved).
+#
+# Labels follow the Forgejo Runner label format:
+#   <label-name>:<type>://<image>   for docker type
+#   <label-name>:<type>              for host type
+# Docs: https://forgejo.org/docs/next/admin/actions/configuration/#choosing-labels
+#
+# Each runner includes:
+#   iac:host          — matches existing runs-on: iac in all sentinel-iac workflows
+#   self-hosted:host  — standard self-hosted label
+#   ubuntu-latest:host — GitHub Actions compatibility
+#   linux:host         — generic linux label
+#   runner-pve4-N:host — unique per-runner label for targeted dispatch
+#   docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04 — Docker-type for containerised jobs
+#   cpu-heavy:host    — matches cpu-heavy runs-on target in OPS-582 acceptance criteria
+#
+# OPS-1027 — buildah was EXCLUDED from pve4 runner labels (OPS-1026 root cause:
+# unprivileged LXC could not create UDP sockets for DNS resolution).
+#
+# OPS-1136 — root cause FIXED 2026-06-02. Two-layer fix:
+#   1. AppArmor local override: /etc/apparmor.d/local/buildah adds "network inet,"
+#      Ubuntu 24.04 AppArmor 4.0 enforce-mode profile blocked AF_INET SOCK_DGRAM
+#      socket creation for buildah even though the profile declares flags=(unconfined).
+#      Confirmed via kernel audit: apparmor="DENIED" operation="create" class="net"
+#      family="inet" sock_type="dgram" profile="buildah"
+#   2. containers storage.conf: ignore_chown_errors = "true"
+#      newuidmap cannot write sub-namespace UID maps outside the LXC's allowed range
+#      (subuid 100000-165535 maps to host UIDs 200000-265535, outside LXC allocation).
+#      Buildah falls back to single-UID mapping and cannot lchown files to GID 42+.
+#      ignore_chown_errors is the standard fix for rootless buildah in unprivileged LXC.
+#
+# Both fixes are deployed by tasks/buildah_fix.yml (Phase 4.6 of main.yml).
+# buildah:host is now included in all runner labels.
+forgejo_runner_pool_instances:
+  - name: "runner-pve4-1"
+    vmid: 210
+    ip: "192.168.12.82"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-1:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"        # OPS-1136: re-enabled after AppArmor+storage fix
+    vault_token_path: "secret/forgejo-runner/pve4-1"
+
+  - name: "runner-pve4-2"
+    vmid: 211
+    ip: "192.168.12.85"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-2:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"        # OPS-1136: re-enabled after AppArmor+storage fix
+    vault_token_path: "secret/forgejo-runner/pve4-2"
+
+  - name: "runner-pve4-3"
+    vmid: 212
+    ip: "192.168.12.84"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-3:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"        # OPS-1136: re-enabled after AppArmor+storage fix
+    vault_token_path: "secret/forgejo-runner/pve4-3"
+
+  # OPS-762: expand pool from 3 to 6 runners
+  - name: "runner-pve4-4"
+    vmid: 213
+    ip: "192.168.12.86"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-4:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"        # OPS-1136: re-enabled after AppArmor+storage fix
+    vault_token_path: "secret/forgejo-runner/pve4-4"
+
+  - name: "runner-pve4-5"
+    vmid: 214
+    ip: "192.168.12.87"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-5:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"        # OPS-1136: re-enabled after AppArmor+storage fix
+    vault_token_path: "secret/forgejo-runner/pve4-5"
+
+  - name: "runner-pve4-6"
+    vmid: 215
+    ip: "192.168.12.88"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-6:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"        # OPS-1136: re-enabled after AppArmor+storage fix
+    vault_token_path: "secret/forgejo-runner/pve4-6"
+
+# ── Registration token source ─────────────────────────────────────────────────
+# Vault path prefix for runner registration tokens.
+# Each runner expects: <vault_runner_token_prefix>/pve4-N.token
+# Per OPS-582 Vault audit: secret/forgejo-runner/ path does not exist yet.
+# Operator post-merge steps:
+#   1. Go to https://forgejo.208.haist.farm/admin/actions/runners
+#   2. Click "Create new runner" for each runner, note the UUID + token
+#   3. Store: vault kv put secret/forgejo-runner/pve4-N token=<TOKEN>
+#   4. Run playbook: ansible-playbook ansible/playbooks/forgejo-runner-pool.yml --tags runner-register
+# If vault_runner_token_prefix secrets are absent, this role skips registration
+# and prints instructions (idempotent — won't overwrite an existing .runner file).
+vault_addr: "https://vault.208.haist.farm"
+vault_runner_token_prefix: "secret/forgejo-runner"
+
+# ── CI tooling versions (OPS-780, OPS-801) ────────────────────────────────────
+# Keep in sync with roles/iac-control/tasks/supply-chain-tooling.yml.
+# These tools are required by .forgejo/workflows/security-scan.yml.
+ci_tooling_semgrep_version: "1.161.0"
+ci_tooling_checkov_version: "3.2.502"
+ci_tooling_bandit_version: "1.9.4"
+ci_tooling_gitleaks_version: "8.30.0"
+ci_tooling_ansible_lint_version: "6.17.2"
+# OPS-780 gap: jq and tflint were missing (judge CI run exit 127 ×9 and ×1)
+# jq: apt install (noble-updates/main) — matches iac-control jq 1.7.1
+# tflint: binary download from GitHub — matches iac-control tflint 0.61.0
+# OPS-441: shellcheck was missing (exit 127 on shellcheck lint job); apt install from noble/universe
+ci_tooling_jq_version: "1.7"          # jq --version output prefix (pkg: 1.7.1)
+ci_tooling_shellcheck_version: "0.9.0" # shellcheck --version output (Ubuntu 24.04 noble/universe)
+ci_tooling_tflint_version: "0.61.0"
+ci_tooling_tflint_download_url: >-
+  https://github.com/terraform-linters/tflint/releases/download/v{{ ci_tooling_tflint_version }}/tflint_linux_amd64.zip
+# OPS-801: osv-scanner (google/osv-scanner) — binary download from GitHub releases.
+# SHA256 from: https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_amd64.sha256
+# Matches iac-control supply-chain-tooling version (roles/iac-control/vars/main.yml osv_scanner_version).
+ci_tooling_osv_scanner_version: "1.9.2"
+ci_tooling_osv_scanner_sha256: "d6af4b67fa5de658598bd2d445efb99e90d1734b3146962418719c4350ecb74b"
+ci_tooling_osv_scanner_download_url: >-
+  https://github.com/google/osv-scanner/releases/download/v{{ ci_tooling_osv_scanner_version }}/osv-scanner_linux_amd64
+# OPS-833: trivy (aquasecurity/trivy) — binary download from GitHub releases.
+# Installed via tarball + SHA256 verification; same pattern as osv-scanner/tflint.
+# SHA256 from: https://github.com/aquasecurity/trivy/releases/download/v0.69.3/trivy_0.69.3_checksums.txt
+# Matches pve4-1/2/3 installed version (0.69.3). Previously check-only (OPS-801);
+# converted to active-install to cover pve4-4/5/6 (OPS-833 runner pool drift).
+ci_tooling_trivy_version: "0.69.3"
+ci_tooling_trivy_sha256: "1816b632dfe529869c740c0913e36bd1629cb7688bd5634f4a858c1d57c88b75"
+ci_tooling_trivy_download_url: >-
+  https://github.com/aquasecurity/trivy/releases/download/v{{ ci_tooling_trivy_version }}/trivy_{{ ci_tooling_trivy_version }}_Linux-64bit.tar.gz
+# OPS-1139: syft + cosign — required by security-scan composite action (SEC-87 sign-everything)
+# Pinned to match iac-control versions (verified 2026-06-02):
+#   syft   1.21.0 — SHA256 from https://github.com/anchore/syft/releases/download/v1.21.0/syft_1.21.0_checksums.txt
+#   cosign 2.4.3  — SHA256 from https://github.com/sigstore/cosign/releases/download/v2.4.3/cosign_checksums.txt
+# cosign key material: passed via ${{ secrets.COSIGN_KEY }} Forgejo secret at job time;
+# NOT stored on the runner filesystem. Binaries only.
+ci_tooling_syft_version: "1.21.0"
+ci_tooling_syft_sha256: "0ee8161dfa4f79487e46e734305a414e1e7fbcdc114d69809d069e89483c4898"
+ci_tooling_syft_download_url: >-
+  https://github.com/anchore/syft/releases/download/v{{ ci_tooling_syft_version }}/syft_{{ ci_tooling_syft_version }}_linux_amd64.tar.gz
+ci_tooling_cosign_version: "2.4.3"
+ci_tooling_cosign_sha256: "caaad125acef1cb81d58dcdc454a1e429d09a750d1e9e2b3ed1aed8964454708"
+ci_tooling_cosign_download_url: >-
+  https://github.com/sigstore/cosign/releases/download/v{{ ci_tooling_cosign_version }}/cosign-linux-amd64

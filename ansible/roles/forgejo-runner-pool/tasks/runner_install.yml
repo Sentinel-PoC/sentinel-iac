@@ -1,0 +1,181 @@
+---
+# runner_install.yml — Phase 3: Install forgejo-runner binary inside each LXC
+# OPS-582
+#
+# Binary management mirrors iac-control role (OPS-319): stat→download→install→cleanup.
+# Binary download happens on the PVE host, then copied into the LXC via pct push.
+# SHA256 verified before installing.
+#
+# Upstream: https://code.forgejo.org/forgejo/runner
+
+# ── Download binary to PVE host temp dir ─────────────────────────────────────
+
+- name: Stat forgejo-runner binary on PVE host (temp location)
+  ansible.builtin.stat:
+    path: "/tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: runner_binary_stat
+  tags: [forgejo-runner-pool, runner-install]
+
+- name: Download forgejo-runner to PVE host v{{ forgejo_runner_version }}
+  ansible.builtin.get_url:
+    url: "{{ forgejo_runner_download_url }}"
+    dest: "/tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+    checksum: "sha256:{{ forgejo_runner_sha256 }}"
+    mode: "0755"
+  when: >
+    not runner_binary_stat.stat.exists or
+    (runner_binary_stat.stat.checksum | default('')) != forgejo_runner_sha256
+  tags: [forgejo-runner-pool, runner-install]
+
+# ── Push binary into each LXC and install ────────────────────────────────────
+
+- name: Check if forgejo-runner binary exists inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- test -f /usr/local/bin/forgejo-runner"
+  register: runner_binary_in_lxc
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install]
+
+- name: Check binary version inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item.vmid }} -- /usr/local/bin/forgejo-runner --version"
+  register: runner_version_in_lxc
+  failed_when: false
+  changed_when: false
+  when: item.rc == 0
+  loop: "{{ runner_binary_in_lxc.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install]
+
+- name: Push forgejo-runner binary into LXC
+  # pct push <vmid> <local-src> <lxc-dest>
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.item.vmid }}
+      /tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64
+      /usr/local/bin/forgejo-runner
+      --perms 0755
+  when: >
+    item.rc != 0 or
+    (forgejo_runner_version not in (runner_version_in_lxc.results | selectattr('item.item.vmid', 'equalto', item.item.vmid) | map(attribute='stdout') | list | first | default('')))
+  changed_when: true
+  notify: restart forgejo-runner
+  loop: "{{ runner_binary_in_lxc.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install]
+
+# ── Deploy systemd service unit inside each LXC ──────────────────────────────
+
+- name: Write forgejo-runner systemd service inside LXC
+  # We write the service file directly to the LXC rootfs from the PVE host.
+  # Proxmox LXC rootfs is at /var/lib/lxc/<vmid>/rootfs/ (privileged) or
+  # /var/lib/lxc/<vmid>/rootfs/ (unprivileged — with uid/gid remapping).
+  # Using pct push is more reliable than direct rootfs write for unprivileged LXC.
+  ansible.builtin.template:
+    src: forgejo-runner.service.j2
+    dest: "/tmp/forgejo-runner-{{ item.vmid }}.service"
+    mode: "0644"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install, service]
+
+- name: Push systemd service unit into LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/forgejo-runner-{{ item.vmid }}.service
+      /etc/systemd/system/forgejo-runner.service
+      --perms 0644
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  notify:
+    - daemon-reload
+  tags: [forgejo-runner-pool, runner-install, service]
+
+- name: Reload systemd and enable forgejo-runner service inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} -- bash -c
+      "systemctl daemon-reload && systemctl enable forgejo-runner"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install, service]
+
+# ── Deploy config.yaml ─────────────────────────────────────────────────────────
+# config.yaml defines labels and runner capacity.
+# It must exist BEFORE the daemon starts (even if .runner has no connection yet).
+
+- name: Render config.yaml for each runner
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "/tmp/forgejo-runner-config-{{ item.vmid }}.yaml"
+    mode: "0640"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install, config]
+
+- name: Push config.yaml into LXC working directory
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/forgejo-runner-config-{{ item.vmid }}.yaml
+      {{ forgejo_runner_workdir }}/config.yaml
+      --perms 0640
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  notify: restart forgejo-runner
+  tags: [forgejo-runner-pool, runner-install, config]
+
+- name: Fix config.yaml ownership inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} --
+      chown {{ forgejo_runner_user }}:{{ forgejo_runner_user }}
+      {{ forgejo_runner_workdir }}/config.yaml
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-install, config]
+
+# ── Clean up temp files on PVE host ──────────────────────────────────────────
+
+- name: Clean up runner temp service files on PVE host
+  ansible.builtin.file:
+    path: "/tmp/forgejo-runner-{{ item.vmid }}.service"
+    state: absent
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "VMID {{ item.vmid }}"
+  tags: [forgejo-runner-pool, runner-install, cleanup]
+
+- name: Clean up runner temp config files on PVE host
+  ansible.builtin.file:
+    path: "/tmp/forgejo-runner-config-{{ item.vmid }}.yaml"
+    state: absent
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "VMID {{ item.vmid }}"
+  tags: [forgejo-runner-pool, runner-install, cleanup]
+
+- name: Clean up runner binary temp file on PVE host
+  ansible.builtin.file:
+    path: "/tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+    state: absent
+  tags: [forgejo-runner-pool, runner-install, cleanup]

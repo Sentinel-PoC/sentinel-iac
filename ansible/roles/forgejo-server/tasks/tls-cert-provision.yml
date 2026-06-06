@@ -1,0 +1,82 @@
+---
+# tls-cert-provision.yml — OPS-779
+#
+# Extract the *.208.haist.farm wildcard TLS certificate from Pangolin's
+# Traefik acme.json and deploy it to forgejo-server's /opt/forgejo/tls/.
+#
+# Run pattern:
+#   1. Slurp acme.json from Pangolin (delegate_to: pangolin-proxy)
+#   2. Extract base64-encoded cert and key fields via Python
+#   3. Write cert + key to {{ forgejo_tls_dir }}/ on forgejo-server
+#
+# The cert is used by the nginx sidecar service (see docker-compose.yml.j2)
+# to TLS-terminate HTTPS connections on :443 and proxy to forgejo:3000.
+#
+# Renewal:  Let's Encrypt wildcard cert from Cloudflare DNS-01 auto-renews on
+# Pangolin (Traefik ACME).  Re-run this task (tag: forgejo-tls) after renewal
+# to push the refreshed cert/key to this host.  Cert expiry: ~90 days.
+#
+# Prerequisite:  Pangolin must be in the Ansible inventory as
+# {{ forgejo_tls_pangolin_host }} (default: pangolin-proxy) and the control
+# node must be able to SSH there.
+
+- name: Create forgejo TLS directory
+  ansible.builtin.file:
+    path: "{{ forgejo_tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [forgejo, forgejo-tls, tls]
+
+- name: Slurp Traefik acme.json from Pangolin
+  ansible.builtin.slurp:
+    src: "{{ forgejo_tls_acme_json_path }}"
+  delegate_to: "{{ forgejo_tls_pangolin_host }}"
+  become: true
+  register: acme_json_raw
+  no_log: true
+  tags: [forgejo, forgejo-tls, tls]
+
+- name: Extract wildcard cert and key from acme.json
+  ansible.builtin.set_fact:
+    forgejo_tls_cert_pem: >-
+      {{ (acme_json_raw['content'] | b64decode | from_json).values()
+         | map(attribute='Certificates')
+         | flatten
+         | selectattr('domain.main', 'equalto', forgejo_tls_cert_domain)
+         | map(attribute='certificate')
+         | first
+         | b64decode }}
+    forgejo_tls_key_pem: >-
+      {{ (acme_json_raw['content'] | b64decode | from_json).values()
+         | map(attribute='Certificates')
+         | flatten
+         | selectattr('domain.main', 'equalto', forgejo_tls_cert_domain)
+         | map(attribute='key')
+         | first
+         | b64decode }}
+  no_log: true
+  tags: [forgejo, forgejo-tls, tls]
+
+- name: Deploy TLS certificate (fullchain) to forgejo-server
+  ansible.builtin.copy:
+    content: "{{ forgejo_tls_cert_pem }}"
+    dest: "{{ forgejo_tls_dir }}/forgejo.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  no_log: true
+  notify: Restart forgejo-nginx
+  tags: [forgejo, forgejo-tls, tls]
+
+- name: Deploy TLS private key to forgejo-server
+  ansible.builtin.copy:
+    content: "{{ forgejo_tls_key_pem }}"
+    dest: "{{ forgejo_tls_dir }}/forgejo.key"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart forgejo-nginx
+  tags: [forgejo, forgejo-tls, tls]

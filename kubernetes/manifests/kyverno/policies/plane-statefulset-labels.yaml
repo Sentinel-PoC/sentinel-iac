@@ -1,0 +1,150 @@
+# PLANNING ONLY — operator approves before applying
+# See docs/runbooks/40-plane-statefulset-ssa-fix.md (OPS-858) for full context,
+# prerequisites (OPS-878), ignoreDifferences updates required, and testing plan.
+#
+# This manifest is NOT wired into any ArgoCD Application.
+# To activate: remove this header comment block and add to the kyverno-policies
+# ArgoCD Application in overwatch-gitops (apps/kyverno-policies/ + kustomization).
+#
+# Why this approach (vs SSA patches):
+#   K8s 1.34 SSA cannot modify StatefulSet spec.template.* fields for existing
+#   StatefulSets — the API requires spec.selector (immutable) in any SSA payload
+#   that includes spec.template fields. Kyverno mutateExisting uses the Update API
+#   (not SSA), bypassing this limitation.
+#
+# Kyverno version: v1.13.2 (confirmed in cluster 2026-05-23).
+# mutateExistingOnPolicyUpdate: true — Kyverno applies mutations retroactively to
+# existing StatefulSets when this policy is created or updated.
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: plane-statefulset-hygiene-mutate
+  annotations:
+    policies.kyverno.io/title: plane StatefulSet Hygiene — Labels + Resource Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Adds app.kubernetes.io/name label and resource limits to the three plane-ce
+      sub-chart StatefulSets (minio, rabbitmq, redis-wl). The plane-ce 1.4.1 Helm
+      chart does not set these fields. K8s 1.34 SSA cannot patch them for existing
+      StatefulSets (OPS-785). This policy uses mutateExisting (Update API) as the
+      correct alternative mechanism (OPS-858).
+    nist-controls: CM-8, SC-6
+    # Related issues
+    ops-858: "Design + inert manifests PR"
+    ops-878: "Prerequisite: fix kustomization.yaml dangling refs"
+spec:
+  # Audit initially. Switch to Enforce only after verifying mutations are applied
+  # and no unexpected side effects are observed (see testing plan in runbook §10).
+  validationFailureAction: Audit
+  background: true
+  mutateExistingOnPolicyUpdate: true
+  rules:
+    # ──────────────────────────────────────────────────────────
+    # plane-minio-wl: label + 1Gi memory limit
+    # ──────────────────────────────────────────────────────────
+    - name: mutate-plane-minio-labels-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+              names:
+                - plane-minio-wl
+              namespaces:
+                - plane
+      mutate:
+        targets:
+          - apiVersion: apps/v1
+            kind: StatefulSet
+            name: plane-minio-wl
+            namespace: plane
+        patchStrategicMerge:
+          metadata:
+            labels:
+              app.kubernetes.io/name: plane-minio
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: plane-minio
+                    resources:
+                      limits:
+                        memory: 1Gi
+                        cpu: 500m
+                      requests:
+                        memory: 256Mi
+                        cpu: 50m
+
+    # ──────────────────────────────────────────────────────────
+    # plane-rabbitmq-wl: label + 512Mi memory limit
+    # ──────────────────────────────────────────────────────────
+    - name: mutate-plane-rabbitmq-labels-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+              names:
+                - plane-rabbitmq-wl
+              namespaces:
+                - plane
+      mutate:
+        targets:
+          - apiVersion: apps/v1
+            kind: StatefulSet
+            name: plane-rabbitmq-wl
+            namespace: plane
+        patchStrategicMerge:
+          metadata:
+            labels:
+              app.kubernetes.io/name: plane-rabbitmq
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: plane-rabbitmq
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 500m
+                      requests:
+                        memory: 128Mi
+                        cpu: 50m
+
+    # ──────────────────────────────────────────────────────────
+    # plane-redis-wl: label + 512Mi memory limit
+    # ──────────────────────────────────────────────────────────
+    - name: mutate-plane-redis-labels-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet
+              names:
+                - plane-redis-wl
+              namespaces:
+                - plane
+      mutate:
+        targets:
+          - apiVersion: apps/v1
+            kind: StatefulSet
+            name: plane-redis-wl
+            namespace: plane
+        patchStrategicMerge:
+          metadata:
+            labels:
+              app.kubernetes.io/name: plane-redis
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: plane-redis
+                    resources:
+                      limits:
+                        memory: 512Mi
+                        cpu: 500m
+                      requests:
+                        memory: 128Mi
+                        cpu: 50m

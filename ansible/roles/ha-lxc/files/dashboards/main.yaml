@@ -1,0 +1,545 @@
+---
+# Haists IT — Primary Home Assistant Dashboard
+# ansible/roles/ha-lxc/files/dashboards/main.yaml
+# OPS-586 Section F
+#
+# Deployed to: /config/dashboards/main.yaml (inside HA LXC)
+# Registered in: configuration.yaml via lovelace.dashboards.lovelace-main
+# Deploy task: ansible/roles/ha-lxc/tasks/ha_dashboard.yml
+#
+# ── View type ────────────────────────────────────────────────────────────────
+# Uses "sections" view type (HA 2024.2+ modern layout):
+# Ref: https://www.home-assistant.io/dashboards/views/
+#   "Sections (default): Arranges cards in a grid system and lets you
+#    group them in sections."
+# Mobile-responsive by default; max_columns: 4 on desktop, scales down
+# automatically for tablet/phone via HA companion app.
+#
+# ── Theme ────────────────────────────────────────────────────────────────────
+# theme: haists applied at each view (light+dark modes — see haists.yaml)
+# Palette: green #2D6B4A / rust #A0522D / cream #F5F0E8 / bark #3D3425
+# Ref: ansible/roles/ha-lxc/files/themes/haists.yaml (OPS-586 Section A)
+#
+# ── Entity status key ────────────────────────────────────────────────────────
+# live                = entity exists on main branch (Section A merged)
+# materializes-on-B   = exists after PR #208 (Whisper/Piper) merges
+# materializes-on-C   = exists after PR #210 (Wazuh→HA) merges
+# materializes-on-D   = exists after Section D (Frigate — deferred)
+# materializes-on-E   = exists after PR #209 (media+comms) merges
+# operator-setup      = entity created by operator via UI integration setup
+# placeholder         = skeleton / "Entity not found" until device added
+#
+# ── Card catalog citations ────────────────────────────────────────────────────
+# Ref: https://www.home-assistant.io/dashboards/cards/
+#   glance, entities, vertical-stack, horizontal-stack, markdown,
+#   media-control, weather-forecast, calendar, conditional, tile, button
+
+title: Haists IT
+
+views:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # VIEW 1 — HOME
+  # ════════════════════════════════════════════════════════════════════════════
+  - title: Home
+    path: home
+    icon: mdi:home
+    type: sections
+    theme: haists
+    max_columns: 4
+
+    sections:
+
+      # ── Haists IT Splash Header ─────────────────────────────────────────────
+      - type: grid
+        cards:
+          - type: markdown
+            content: >-
+              <div style="display:flex;align-items:center;gap:12px;padding:4px 0">
+                <img src="/local/favicon-32.svg" alt="Haists IT" width="40" height="40"
+                     style="border-radius:6px;background:#2D6B4A;padding:4px"/>
+                <div>
+                  <span style="font-size:1.4em;font-weight:700;color:var(--primary-text-color)">
+                    Haists IT</span>
+                  <span style="font-size:0.85em;color:var(--secondary-text-color);margin-left:8px">
+                    Home Dashboard</span>
+                </div>
+              </div>
+
+      # ── Lights ──────────────────────────────────────────────────────────────
+      # Entities: placeholder — Z-Wave / Zigbee devices not yet added
+      # Status: placeholder
+      # Card type: glance (compact state view for multiple entities)
+      # Ref: https://www.home-assistant.io/dashboards/cards/#glance-card
+      - type: grid
+        title: Lights
+        cards:
+          - type: glance
+            title: Lights
+            show_state: true
+            entities:
+              # OPERATOR: replace with actual light.* entities after Z-Wave/Zigbee setup
+              # Example: light.living_room, light.kitchen, light.bedroom_primary
+              - entity: light.living_room
+                name: Living Room
+                icon: mdi:ceiling-light
+              - entity: light.kitchen
+                name: Kitchen
+                icon: mdi:ceiling-light-outline
+              - entity: light.bedroom_primary
+                name: Bedroom
+                icon: mdi:bed
+              - entity: light.office
+                name: Office
+                icon: mdi:desk-lamp
+
+      # ── Locks (conditional) ─────────────────────────────────────────────────
+      # Entities: placeholder — Z-Wave lock devices not yet added
+      # Status: placeholder
+      # Shows locked/unlocked badge; conditional card hides if no lock entities
+      # Card type: conditional (hides if entity unavailable)
+      # Ref: https://www.home-assistant.io/dashboards/cards/#conditional-card
+      - type: grid
+        title: Locks & Security Doors
+        cards:
+          - type: entities
+            title: Door Locks
+            icon: mdi:lock
+            entities:
+              # OPERATOR: replace with actual lock.* entities after Z-Wave setup
+              - entity: lock.front_door
+                name: Front Door
+                icon: mdi:door-closed-lock
+              - entity: lock.garage_door
+                name: Garage
+                icon: mdi:garage-lock
+              - entity: binary_sensor.front_door_contact
+                name: Front Door Contact
+                icon: mdi:door
+
+      # ── Presence / Network Devices ──────────────────────────────────────────
+      # Entities: device_tracker.* from UniFi Network integration
+      # Status: operator-setup (UniFi integration via UI — Section E)
+      # Ref: https://www.home-assistant.io/integrations/unifi/ — Presence detection
+      - type: grid
+        title: Presence
+        cards:
+          - type: glance
+            title: Tracked Devices (UniFi UDM)
+            show_state: true
+            entities:
+              # OPERATOR: replace with actual device_tracker.* after UniFi integration setup
+              # Settings → Devices & Services → UniFi Network → 192.168.12.1
+              # Check Developer Tools → States → filter "device_tracker"
+              - entity: device_tracker.operator_phone
+                name: Operator
+                icon: mdi:cellphone
+              - entity: device_tracker.operator_laptop
+                name: Laptop
+                icon: mdi:laptop
+
+      # ── Current Temperature / Climate ───────────────────────────────────────
+      # Entity: weather.home (NWS National Weather Service — Section E)
+      # Status: materializes-on-E
+      # climate.* entities: placeholder until HVAC devices added
+      # Ref: https://www.home-assistant.io/integrations/nws/
+      - type: grid
+        title: Climate & Weather
+        cards:
+          - type: weather-forecast
+            entity: weather.home
+            forecast_type: hourly
+            show_forecast: false
+            name: Current Conditions (NWS)
+          - type: entities
+            title: Indoor Climate
+            entities:
+              # OPERATOR: add climate.* entities after Z-Wave thermostat setup
+              - entity: climate.living_room
+                name: Living Room
+                icon: mdi:thermostat
+              - entity: sensor.living_room_temperature
+                name: Living Room Temp
+                icon: mdi:thermometer
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # VIEW 2 — MEDIA
+  # ════════════════════════════════════════════════════════════════════════════
+  - title: Media
+    path: media
+    icon: mdi:play-circle
+    type: sections
+    theme: haists
+    max_columns: 4
+
+    sections:
+
+      # ── Jellyfin Now-Playing ─────────────────────────────────────────────────
+      # Entity: media_player.jellyfin (placeholder)
+      # Actual entity ID after Jellyfin integration: media_player.jellyfin_<session>
+      # Status: materializes-on-E (operator setup: Settings → D&S → Jellyfin)
+      # Ref: https://www.home-assistant.io/integrations/jellyfin/
+      # Server: http://192.168.12.61:8096 (direct IP — Pangolin-routed URL breaks integration)
+      - type: grid
+        title: Jellyfin — Now Playing
+        cards:
+          - type: markdown
+            content: >-
+              **Server:** `http://192.168.12.61:8096`
+
+              *Setup: Settings → Devices & Services → Add Integration → Jellyfin*
+
+              *Check actual entity: Developer Tools → States → filter `media_player.jellyfin`*
+          - type: media-control
+            entity: media_player.jellyfin
+            # OPERATOR: replace with actual session entity if multiple sessions exist
+            # e.g., media_player.jellyfin_living_room_tv
+
+      # ── Frigate Cameras ─────────────────────────────────────────────────────
+      # Entities: camera.* (placeholder — Section D deferred)
+      # Status: materializes-on-D (Frigate integration — awaiting RTSPS + Reolink creds)
+      # Ref: https://www.home-assistant.io/integrations/frigate/
+      - type: grid
+        title: Cameras (Frigate)
+        cards:
+          - type: markdown
+            content: >-
+              ## 📷 Frigate NVR — Camera Feeds
+
+              **Status:** Section D deferred (operator prerequisites pending)
+
+              Required:
+              - RTSPS stream URLs from Reolink cameras
+              - Reolink credentials in Vault
+
+              *Camera cards will appear here once Frigate integration is active.*
+
+              *(Entity not found until Section D completes)*
+          - type: picture-glance
+            title: Front Door
+            entities:
+              - entity: binary_sensor.front_door_person_occupancy
+            camera_image: camera.front_door
+            camera_view: auto
+          - type: picture-glance
+            title: Backyard
+            entities:
+              - entity: binary_sensor.backyard_person_occupancy
+            camera_image: camera.backyard
+            camera_view: auto
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # VIEW 3 — SECURITY
+  # ════════════════════════════════════════════════════════════════════════════
+  - title: Security
+    path: security
+    icon: mdi:shield
+    type: sections
+    theme: haists
+    max_columns: 4
+
+    sections:
+
+      # ── Wazuh Security Posture ───────────────────────────────────────────────
+      # Entity: sensor.wazuh_security_posture (template sensor — Section C)
+      # Status: materializes-on-C (PR #210 — wazuh-ha-bridge role)
+      # States: GREEN / YELLOW / AMBER / RED based on alert counters
+      # Ref: ansible/roles/wazuh-ha-bridge/templates/ha-wazuh-package.yaml.j2
+      - type: grid
+        title: Security Posture
+        cards:
+          - type: button
+            entity: sensor.wazuh_security_posture
+            name: Security Posture
+            show_state: true
+            icon: mdi:shield
+            tap_action:
+              action: navigate
+              navigation_path: /lovelace/security
+
+          # Alert counter row
+          # counter.wazuh_critical_alerts — materializes-on-C
+          # counter.wazuh_high_alerts     — materializes-on-C
+          # counter.wazuh_medium_alerts   — materializes-on-C
+          - type: glance
+            title: Alert Counts (Today)
+            show_state: true
+            entities:
+              - entity: counter.wazuh_critical_alerts
+                name: Critical
+                icon: mdi:shield-alert
+              - entity: counter.wazuh_high_alerts
+                name: High
+                icon: mdi:shield-half-full
+              - entity: counter.wazuh_medium_alerts
+                name: Medium
+                icon: mdi:shield-outline
+
+      # ── Wazuh Last Alert Details ─────────────────────────────────────────────
+      # MQTT auto-discovered sensors from wazuh-ha-bridge role (Section C)
+      # sensor.wazuh_last_alert_level  — materializes-on-C
+      # sensor.wazuh_last_alert_host   — materializes-on-C
+      # sensor.wazuh_last_alert_desc   — materializes-on-C
+      # sensor.wazuh_last_alert_time   — materializes-on-C
+      # binary_sensor.wazuh_manager_online — materializes-on-C
+      - type: grid
+        title: Last Wazuh Alert
+        cards:
+          - type: entities
+            title: Last Alert Details
+            entities:
+              - entity: binary_sensor.wazuh_manager_online
+                name: Manager Online
+                icon: mdi:shield-check
+              - entity: sensor.wazuh_last_alert_level
+                name: Alert Level
+                icon: mdi:alert-circle-outline
+              - entity: sensor.wazuh_last_alert_host
+                name: Source Host
+                icon: mdi:server-security
+              - entity: sensor.wazuh_last_alert_desc
+                name: Description
+                icon: mdi:text-box-outline
+              - entity: sensor.wazuh_last_alert_time
+                name: Timestamp
+                icon: mdi:clock-alert-outline
+
+      # ── Frigate Detection Events ─────────────────────────────────────────────
+      # Status: materializes-on-D (Frigate integration — deferred)
+      - type: grid
+        title: Motion / Detection Events (Frigate)
+        cards:
+          - type: markdown
+            content: >-
+              ## 🎥 Frigate Detection Events
+
+              *Deferred — Section D (Frigate) awaiting operator prerequisites.*
+
+              Detection entities that will appear here:
+              - `binary_sensor.frigate_front_door_person_occupancy`
+              - `binary_sensor.frigate_backyard_motion`
+              - Event log from `sensor.frigate_detection_fps`
+
+      # ── Door / Window Contacts ───────────────────────────────────────────────
+      # Status: placeholder (no Z-Wave/Zigbee door sensors added yet)
+      - type: grid
+        title: Door & Window Contacts
+        cards:
+          - type: entities
+            title: Contact Sensors
+            entities:
+              # OPERATOR: add binary_sensor.* entities after door/window sensors paired
+              - entity: binary_sensor.front_door_contact
+                name: Front Door
+                icon: mdi:door
+              - entity: binary_sensor.back_door_contact
+                name: Back Door
+                icon: mdi:door-open
+              - entity: binary_sensor.garage_door_contact
+                name: Garage Door
+                icon: mdi:garage-variant
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # VIEW 4 — INFRASTRUCTURE
+  # ════════════════════════════════════════════════════════════════════════════
+  - title: Infrastructure
+    path: infrastructure
+    icon: mdi:server
+    type: sections
+    theme: haists
+    max_columns: 4
+
+    sections:
+
+      # ── TrueNAS Storage Health ───────────────────────────────────────────────
+      # Entities: sensor.truenas_* via HACS tomaae/homeassistant-truenas
+      # Status: operator-setup (HACS install + integration setup required)
+      # Ref: https://github.com/tomaae/homeassistant-truenas
+      - type: grid
+        title: TrueNAS Storage
+        cards:
+          - type: markdown
+            content: >-
+              **Host:** `192.168.12.1` *(operator must update to actual TrueNAS IP)*
+
+              **Setup:** HACS → Integrations → `tomaae/homeassistant-truenas` → Restart → Add Integration
+
+              *Entities appear after HACS + TrueNAS integration setup.*
+          - type: entities
+            title: Storage Pools
+            entities:
+              # OPERATOR: update after TrueNAS HACS install
+              # Example entity IDs: sensor.truenas_pool_data_status
+              #                     sensor.truenas_pool_tank_status
+              - entity: sensor.truenas_pool_data_status
+                name: Pool data — Status
+                icon: mdi:harddisk
+              - entity: sensor.truenas_pool_tank_status
+                name: Pool tank — Status
+                icon: mdi:database
+              - entity: sensor.truenas_disk_temperature_max
+                name: Max Disk Temp
+                icon: mdi:thermometer
+
+      # ── UniFi Network Stats ─────────────────────────────────────────────────
+      # Entities: sensor.* from UniFi Network integration (UDM)
+      # Status: operator-setup (UniFi integration via UI — Section E)
+      # Ref: https://www.home-assistant.io/integrations/unifi/
+      - type: grid
+        title: Network (UniFi UDM)
+        cards:
+          - type: entities
+            title: UDM Pro Stats
+            entities:
+              # OPERATOR: verify entity IDs after UniFi integration setup
+              # Developer Tools → States → filter "sensor.unifi"
+              - entity: sensor.udm_pro_uptime
+                name: Uptime
+                icon: mdi:timer-outline
+              - entity: sensor.udm_pro_wan_ip
+                name: WAN IP
+                icon: mdi:wan
+              - entity: sensor.udm_pro_clients_connected
+                name: Clients Connected
+                icon: mdi:devices
+              - entity: sensor.udm_pro_cpu_utilization
+                name: CPU
+                icon: mdi:cpu-64-bit
+              - entity: sensor.udm_pro_memory_utilization
+                name: Memory
+                icon: mdi:memory
+
+      # ── UPS / Power ─────────────────────────────────────────────────────────
+      # Status: placeholder (no UPS integration configured)
+      - type: grid
+        title: UPS / Power
+        cards:
+          - type: markdown
+            content: >-
+              ## 🔋 UPS Power
+
+              *No UPS integration configured.*
+
+              **Setup options:**
+              - NUT (Network UPS Tools): Settings → D&S → NUT
+              - APC UPS: Settings → D&S → APC UPS Daemon (apcupsd)
+
+              Add integration, then update these entities:
+          - type: entities
+            title: UPS Status
+            entities:
+              # OPERATOR: update after UPS integration setup
+              # NUT example: sensor.ups_battery_charge, sensor.ups_load
+              - entity: sensor.ups_battery_charge
+                name: Battery Charge
+                icon: mdi:battery
+              - entity: sensor.ups_load
+                name: Load
+                icon: mdi:sine-wave
+              - entity: sensor.ups_runtime
+                name: Runtime
+                icon: mdi:timer
+              - entity: sensor.ups_status
+                name: Status
+                icon: mdi:power-plug
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # VIEW 5 — TODAY
+  # ════════════════════════════════════════════════════════════════════════════
+  - title: Today
+    path: today
+    icon: mdi:calendar-today
+    type: sections
+    theme: haists
+    max_columns: 4
+
+    sections:
+
+      # ── Calendar — Today's Events ────────────────────────────────────────────
+      # Entity: calendar.primary (Google Calendar — Section E)
+      # Status: operator-setup (Google Calendar OAuth via Settings → D&S)
+      # Ref: https://www.home-assistant.io/integrations/google/
+      # OAuth redirect URI: https://my.home-assistant.io/redirect/oauth
+      - type: grid
+        title: Calendar
+        cards:
+          - type: calendar
+            title: Today's Events
+            entities:
+              # OPERATOR: update after Google Calendar OAuth setup
+              # Developer Tools → States → filter "calendar"
+              # Additional calendars: calendar.work, calendar.family, etc.
+              - calendar.primary
+            initial_view: dayGridDay
+
+      # ── NWS Weather Forecast ─────────────────────────────────────────────────
+      # Entity: weather.home (National Weather Service — Section E)
+      # Status: materializes-on-E
+      # Location: Wabash County IN (39.4053°N, 85.8217°W)
+      # Ref: https://www.home-assistant.io/integrations/nws/
+      - type: grid
+        title: Weather Forecast (NWS)
+        cards:
+          - type: weather-forecast
+            entity: weather.home
+            name: Wabash County Forecast (NWS)
+            forecast_type: twice_daily
+            show_forecast: true
+
+      # ── Wazuh Alert Ticker ───────────────────────────────────────────────────
+      # Template sensor: sensor.wazuh_security_posture — materializes-on-C
+      # Counter sensors: counter.wazuh_* — materializes-on-C
+      # Ref: wazuh-ha-bridge role ha-wazuh-package.yaml.j2
+      - type: grid
+        title: Security Alerts
+        cards:
+          - type: markdown
+            title: Recent Wazuh Alerts
+            content: >-
+              **Posture:** {{ states('sensor.wazuh_security_posture') }}
+
+              **Today's Alerts:**
+              - 🔴 Critical: {{ states('counter.wazuh_critical_alerts') }}
+              - 🟠 High: {{ states('counter.wazuh_high_alerts') }}
+              - 🟡 Medium: {{ states('counter.wazuh_medium_alerts') }}
+
+              **Last Alert:**
+              - Level: {{ states('sensor.wazuh_last_alert_level') }}
+              - Host: {{ states('sensor.wazuh_last_alert_host') }}
+              - {{ states('sensor.wazuh_last_alert_desc') | truncate(120) }}
+
+              *Updates live — entities materialize when PR #210 merges*
+
+      # ── Voice Assistant (conditional) ───────────────────────────────────────
+      # Entity: assist_satellite.* (Whisper/Piper voice pipeline — Section B)
+      # Status: materializes-on-B (PR #208 — Wyoming Whisper/Piper containers)
+      # Conditional: only shown when voice pipeline is available
+      # Ref: https://www.home-assistant.io/integrations/wyoming/
+      - type: grid
+        title: Voice Assistant
+        cards:
+          - type: conditional
+            conditions:
+              - entity: binary_sensor.assist_pipeline_running
+                state_not: unavailable
+            card:
+              type: entities
+              title: Whisper / Piper Voice (Wyoming)
+              entities:
+                - entity: binary_sensor.assist_pipeline_running
+                  name: Pipeline Active
+                  icon: mdi:microphone
+                  # OPERATOR: add assist_satellite entity after Wyoming setup
+                  # Developer Tools → States → filter "assist_satellite" or "wyoming"
+          - type: markdown
+            content: >-
+              ## 🎙️ Voice Assistant
+
+              **Status:** Wyoming Whisper + Piper (Section B — PR #208)
+
+              - Whisper (STT): RTX 3060 on pve4-alienware
+              - Piper (TTS): pve4-alienware (CPU)
+              - Pipeline: Assist → Whisper → Piper
+
+              *Voice card activates when binary_sensor.assist_pipeline_running
+              is available after Section B merges.*

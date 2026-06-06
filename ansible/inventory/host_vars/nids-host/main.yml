@@ -1,0 +1,58 @@
+---
+# OPS-567: NIDS host (nids-sensor-01) host-level Ansible variables
+# Role: Network Intrusion Detection Sensor (Zeek + Suricata — OPS-568, OPS-569)
+#
+# Network topology:
+#   Management interface (eth0): VLAN 99 (NIDS-Mirror), 192.168.99.10/24
+#   Capture interface (eth1): USW Pro 48 PoE port 48 (NIDS-Capture)
+#     — receives mirrored copy of all traffic from port 49 (10G uplink to UCG-Fiber)
+#     — promiscuous mode, no IP address assigned
+#
+# Provisioning: LXC on PVE or dedicated host to be determined.
+# Status: host_vars defined; physical provisioning pending OPS-568 + OPS-569.
+#
+# Switch/VLAN reference:
+#   VLAN 99 name: NIDS-Mirror
+#   VLAN 99 gateway: 192.168.99.1 (UCG-Fiber)
+#   VLAN 99 DHCP range: 192.168.99.100-200 (nids-host uses static .10)
+#   Mirror source port: USW Pro 48 PoE port 49 (R720xd - DAC, 10G uplink)
+#   Mirror destination port: USW Pro 48 PoE port 48 (NIDS-Capture)
+
+# --- Network ---
+ansible_host: "192.168.99.10"
+
+# --- SSH access ---
+sshd_allow_groups: "sudo"
+
+# --- Firewall ---
+firewall_enabled: true
+firewall_allowed_ports:
+  - 22
+
+firewall_extra_rules:
+  - port: "9200"
+    proto: tcp
+    from_ip: "192.168.12.100"
+    comment: "Wazuh OpenSearch (OPS-567)"
+
+# --- Wazuh ---
+wazuh_manager_ip: "192.168.12.100"
+
+# --- AIDE ---
+aide_enabled: true
+
+# --- Auditd ---
+auditd_enabled: true
+
+# --- NTP ---
+ntp_servers:
+  - "192.168.12.210"
+  - "192.168.12.206"
+
+# --- NIDS capture interface ---
+# This interface must be promiscuous; no IP; receives mirrored frames from switch port 48.
+nids_capture_interface: "eth1"
+nids_mgmt_interface: "eth0"
+nids_mgmt_vlan: 99
+nids_mgmt_ip: "192.168.99.10"
+nids_mgmt_gateway: "192.168.99.1"

@@ -1,0 +1,18 @@
+[Unit]
+Description=forgejo-runner watchdog — every 5 minutes (OPS-775)
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac
+
+[Timer]
+# Run every 5 minutes.
+# WEDGE_WINDOW_SECONDS defaults to 300 (5 min), matching this interval so
+# a wedge that starts between ticks is detected on the very next check.
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+# Persistent: run missed checks on next boot (e.g., LXC was stopped).
+Persistent=true
+
+Unit=forgejo-runner-watchdog.service
+
+[Install]
+WantedBy=timers.target

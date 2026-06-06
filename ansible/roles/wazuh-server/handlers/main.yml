@@ -1,0 +1,21 @@
+---
+- name: Restart wazuh-manager
+  ansible.builtin.service:
+    name: wazuh-manager
+    state: restarted
+
+- name: Restart wazuh-indexer
+  ansible.builtin.service:
+    name: wazuh-indexer
+    state: restarted
+
+- name: Restart wazuh-dashboard
+  ansible.builtin.service:
+    name: wazuh-dashboard
+    state: restarted
+
+- name: Restart wazuh-vuln-exporter
+  ansible.builtin.systemd:
+    name: wazuh-vuln-exporter
+    state: restarted
+    daemon_reload: true

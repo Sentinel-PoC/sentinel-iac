@@ -1,0 +1,22 @@
+# zeekctl.cfg — deployed by ansible/roles/zeek-nids (OPS-568)
+# zeekctl management configuration
+
+[zeekctl]
+# Log files rotation interval in seconds (default: 3600)
+LogRotationInterval = {{ zeekctl_log_rotation_interval }}
+
+# Log files expiration interval (zeekctl-managed archives)
+LogExpireInterval = {{ zeekctl_log_expire_interval }}
+
+# Statistics logging
+StatsLogEnable = {{ zeekctl_stats_log_enable }}
+StatsLogPeriod = {{ zeekctl_stats_log_period }}
+
+# Email (empty = disabled)
+MailTo = {{ zeekctl_mail_to }}
+MailConnectionSummary = 0
+MailAlarmsTo = {{ zeekctl_mail_to }}
+
+# Paths
+LogDir = {{ zeek_log_dir }}
+SpoolDir = {{ zeek_spool_dir }}

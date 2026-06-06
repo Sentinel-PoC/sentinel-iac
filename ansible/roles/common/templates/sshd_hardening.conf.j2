@@ -1,0 +1,44 @@
+# Sentinel SSH hardening - deployed by Ansible
+# Drop-in config for /etc/ssh/sshd_config.d/
+# NIST SC-8, SC-13: Enforce strong cryptographic algorithms for SSH transport
+
+# CIS-approved MACs only (OPS-220): ETM variants preferred, non-ETM SHA-2 retained for
+# compatibility. umac-128-etm@openssh.com removed — not in CIS Ubuntu 24.04 approved list.
+MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+
+# Strong key exchange algorithms only — no SHA-1, no DH group1/14
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512
+
+# Strong ciphers only — AES-GCM and ChaCha20 (no CBC mode)
+Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr
+
+# Host key algorithms — prefer Ed25519, allow RSA with SHA-2
+HostKeyAlgorithms ssh-ed25519,ssh-ed25519-cert-v01@openssh.com,rsa-sha2-512,rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256,rsa-sha2-256-cert-v01@openssh.com
+
+MaxAuthTries {{ sshd_max_auth_tries }}
+PermitRootLogin {{ sshd_permit_root_login }}
+DisableForwarding yes
+X11Forwarding no
+MaxStartups 10:30:60
+MaxSessions {{ sshd_max_sessions }}
+LoginGraceTime 60
+Banner /etc/issue.net
+ClientAliveInterval {{ sshd_client_alive_interval }}
+ClientAliveCountMax {{ sshd_client_alive_count_max }}
+
+# Disable password and keyboard-interactive authentication (SEC-41)
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+
+# OPS-125: Break-glass authorized-keys path (Vault-independent fallback).
+# Primary path is still Vault-signed certs via TrustedUserCAKeys.
+# The break-glass file is root-owned and deployed by Ansible; it is NOT
+# the default ~/.ssh/authorized_keys (which is still suppressed via the
+# explicit path below). Empty file = no break-glass key on that host.
+AuthorizedKeysFile /etc/ssh/break-glass-authorized-keys/%u
+
+# Restrict certificate principals to per-user allowlists (NIST IA-2, IA-5)
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+
+# Restrict SSH access to specified groups
+AllowGroups {{ sshd_allow_groups }}

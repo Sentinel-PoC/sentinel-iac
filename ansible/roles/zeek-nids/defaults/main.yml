@@ -1,0 +1,59 @@
+---
+# zeek-nids role defaults — OPS-568
+# All values overridable via host_vars or group_vars/nids.yml
+
+# --- Package install ---
+zeek_version: "7.0"
+zeek_package_name: "zeek"
+zeek_install_prefix: "/opt/zeek"
+zeek_config_dir: "{{ zeek_install_prefix }}/etc"
+zeek_site_dir: "{{ zeek_install_prefix }}/share/zeek/site"
+zeek_log_dir: "{{ zeek_install_prefix }}/logs"
+zeek_spool_dir: "{{ zeek_install_prefix }}/spool"
+
+# --- Network capture ---
+# Interface on which Zeek listens. Typically a mirror/SPAN port VLAN.
+# Override per host (e.g. via host_vars/<host>/zeek.yml).
+zeek_capture_interface: "eth0"
+
+# --- Log output ---
+# Use JSON for all log writers — required for Wazuh ingestion
+zeek_json_logs: true
+
+# Minimum set of scripts to enable (protocol visibility for OPS-568 AC)
+zeek_load_scripts:
+  - protocols/http/main
+  - protocols/dns/main
+  - protocols/ssl/main
+  - protocols/ssl/validate-certs
+  - protocols/ssl/log-hostcerts-only
+  - protocols/conn/main
+  - protocols/files/main
+  - frameworks/files/extract-all-files
+  - base/frameworks/notice/main
+
+# --- JA3/JA4 TLS fingerprinting ---
+zeek_enable_ja3: true
+# ja3 is bundled with Zeek >=5.x. For older builds, set to false and provide
+# zeek_ja3_script_url below.
+zeek_ja3_bundled: true
+# JA4 script (community package; installed via zkg if available)
+zeek_enable_ja4: true
+zeek_ja4_pkg: "zeek/ja4"
+
+# --- Wazuh integration ---
+wazuh_manager_ip: "192.168.12.100"
+wazuh_agent_config_path: "/var/ossec/etc/ossec.conf"
+# Wazuh ossec.conf localfile entry for Zeek logs
+zeek_wazuh_log_glob: "{{ zeek_log_dir }}/current/*.log"
+
+# --- Log retention ---
+# Local Zeek log retention (days). Wazuh/OpenSearch is canonical store.
+zeek_log_retention_days: 7
+
+# --- zeekctl ---
+zeekctl_mail_to: ""
+zeekctl_log_rotation_interval: 3600
+zeekctl_log_expire_interval: "{{ zeek_log_retention_days }}days"
+zeekctl_stats_log_enable: "1"
+zeekctl_stats_log_period: 300

@@ -1,0 +1,137 @@
+---
+# defaults/main.yml — frigate-lxc role (OPS-840 / OPS-956)
+#
+# Manages Frigate NVR LXC 203 on pve4-alienware (192.168.12.60).
+# Architecture:
+#   - Unprivileged LXC 203 running Frigate 0.17.x + Docker
+#   - iSCSI LUN (TrueNAS 192.168.12.205) mounted on pve4 HOST at /mnt/pve/frigate-recordings
+#   - Bind-mounted into LXC 203 via mp0 directive → container sees /media/frigate
+#   - go2rtc proxy (bundled in Frigate) connects to Reolink Home Hub (192.168.100.150)
+#
+# Host-side tasks (play: pve4-alienware):
+#   - iSCSI initiator discovery + persistent fstab entry
+#   - LXC 203 conf mp0 bind mount directive
+#
+# Container-side tasks (pct push to LXC 203):
+#   - Frigate config.yml (go2rtc + camera definitions)
+#   - docker-compose.yml (shm_size, volume mounts)
+#
+# Vault paths (read at play time):
+#   - secret/reolink: hub_user, hub_password (for RTSP URL in config)
+#   - secret/home-assistant: mqtt_password (for FRIGATE_MQTT_PASSWORD env)
+#
+# OPS-840: Initial Frigate LXC deployment
+# OPS-956: Camera config (2x Reolink via Hub) + iSCSI recordings storage
+
+# ── LXC identity ──────────────────────────────────────────────────────────────
+frigate_lxc_id: 203
+frigate_lxc_name: "frigate"
+frigate_lxc_ip: "192.168.12.91"
+
+# ── LXC rootfs storage ────────────────────────────────────────────────────────
+# OPS-933 (2026-05-27): live-resized rootfs 20G → 40G via pct resize 203 rootfs +20G
+# OPS-1006: sync IaC to match live state
+frigate_lxc_rootfs_storage: "local-lvm"
+frigate_lxc_rootfs_size: "40"  # GB
+# OPS-1010: discard (TRIM/UNMAP) mount option for local-lvm thinpool reclamation.
+# Mirrors OPS-1009/OPS-1010 pattern. CT 203 was provisioned manually (OPS-840);
+# idempotent pct set task in main.yml applies this to the existing container.
+frigate_lxc_rootfs_mountoptions: "discard"
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+frigate_config_dir: "/opt/frigate/config"
+frigate_storage_dir: "/opt/frigate/storage"
+frigate_compose_dir: "/opt/frigate"
+frigate_media_dir: "/media/frigate"
+
+# ── iSCSI (pve4 host side) ────────────────────────────────────────────────────
+# TrueNAS SCALE at 192.168.12.205, portal port 3260
+# LUN provisioned: DATA/iscsi-bootstrap/frigate-recordings (300GiB sparse)
+# OPS-956 Phase 2 (2026-05-26): manually applied; role codifies for re-apply
+frigate_iscsi_portal: "192.168.12.205"
+frigate_iscsi_port: 3260
+frigate_iscsi_iqn: "iqn.2026-03.farm.haist:frigate-recordings"
+frigate_iscsi_mount_point: "/mnt/pve/frigate-recordings"
+frigate_iscsi_fstype: "xfs"
+
+# ── Frigate image ─────────────────────────────────────────────────────────────
+frigate_image: "ghcr.io/blakeblackshear/frigate:0.17.1"
+
+# ── Docker compose resources ──────────────────────────────────────────────────
+# shm_size: 256MB required for 2+ cameras (128MB → OOM during decode)
+# Increased from 128MB to 256MB during OPS-956 Phase 2 (2026-05-26)
+frigate_shm_size: "256mb"
+
+# ── Detector ─────────────────────────────────────────────────────────────────
+# CPU detection — adequate for 2 cameras at 5-7fps (no GPU in LXC 203)
+frigate_cpu_threads: 3
+
+# ── MQTT ─────────────────────────────────────────────────────────────────────
+frigate_mqtt_host: "192.168.12.89"
+frigate_mqtt_port: 1883
+frigate_mqtt_user: "homeassistant"
+# Password injected via FRIGATE_MQTT_PASSWORD env var in docker-compose.yml
+# Source: secret/home-assistant:mqtt_password in Vault
+
+# ── Camera VLAN ───────────────────────────────────────────────────────────────
+# Reolink Home Hub at 192.168.100.150 (camera VLAN, reachable from LXC 203)
+frigate_hub_ip: "192.168.100.150"
+frigate_hub_rtsp_port: 554
+
+# ── Recording retention ───────────────────────────────────────────────────────
+frigate_record_continuous_days: 0
+frigate_record_motion_days: 7
+
+# ── Snapshot retention ───────────────────────────────────────────────────────
+frigate_snapshot_retain_days: 14
+
+# ── Detection FPS ─────────────────────────────────────────────────────────────
+frigate_detect_fps: 7
+
+# ── Object tracking ──────────────────────────────────────────────────────────
+frigate_tracked_objects:
+  - person
+  - car
+  - cat
+  - dog
+
+# ── Cameras ───────────────────────────────────────────────────────────────────
+# Reolink Home Hub channels (API 0-indexed → RTSP 1-indexed):
+#   reolink_01: Hub ch00 → TrackMix battery camera (Side door)
+#   reolink_02: Hub ch01 → Atlas 1 battery camera (Back yard)
+#   reolink_03: Hub ch02 → Atlas 2 battery camera (Front)
+#
+# OPS-958 (2026-05-27): Camera identity confirmed via GetChnTypeInfo Hub API (worker-956e).
+#   ch0/Preview_01 = Reolink TrackMix (Side door), NOT Atlas as OPS-958 description suggested.
+#   ch1/Preview_02 = Reolink Atlas (Back yard)
+#   ch2/Preview_03 = Reolink Atlas (Front)
+#
+# TrackMix RTSP URL: requires h264Preview_NN prefix (Hub firmware requirement).
+#   Plain Preview_NN_main fails for TrackMix ch0 (connection refused / no stream data).
+#   Atlas cameras (ch1, ch2) accept both Preview_NN and h264Preview_NN formats.
+#   Fixed in OPS-958: reolink_01 now uses h264Preview_01 path.
+#
+# TrackMix ffmpeg: preset-rtsp-generic (not preset-rtsp-restream).
+#   preset-rtsp-restream analyzeduration/probesize args cause TrackMix HEVC decode issues.
+#   Atlas cameras remain on preset-rtsp-restream (default, optimal for go2rtc restreams).
+#
+# RTSP auth: hub password contains '#'. Template uses hub_password with '#' → '%23'.
+#   Go's url.Parse in go2rtc treats %23 as percent-literal, decodes to '#' for Basic Auth.
+# See OPS-956 research note: sentinel-cache/audits/frigate-reolink-research-2026-05-25.md
+frigate_cameras:
+  - name: reolink_01
+    comment: "Hub channel 0, h264Preview_01 (Reolink TrackMix — Side door, battery/solar)"
+    main_stream: "h264Preview_01_main"
+    sub_stream: "h264Preview_01_sub"
+    ffmpeg_input_args: "preset-rtsp-generic"
+    enabled: true
+  - name: reolink_02
+    comment: "Hub channel 1, Preview_02 (Reolink Atlas 1 — Back yard, battery)"
+    main_stream: "Preview_02_main"
+    sub_stream: "Preview_02_sub"
+    enabled: true
+  - name: reolink_03
+    comment: "Hub channel 2, Preview_03 (Reolink Atlas 2 — Front, battery)"
+    main_stream: "Preview_03_main"
+    sub_stream: "Preview_03_sub"
+    enabled: true

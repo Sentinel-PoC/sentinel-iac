@@ -1,0 +1,108 @@
+---
+# spire-workload-entries role defaults
+# OPS-535 / OPS-351 Phase 4.3 — Register SPIRE workload entries for sentinel-{worker,judge,planner,scribe}
+# OPS-553 — x509pop migration: parent SPIFFE IDs change from join_token/UUID to x509pop/fingerprint
+#
+# This role runs on the SPIRE Server host (iac-control) and uses
+# `docker exec spire-server` to declaratively register workload entries.
+# Idempotency: `spire-server entry show -spiffeID X -parentID Y` is checked
+# before each create; pretty-output marker "Found 0 entries" indicates absence.
+#
+# Selector design — see OPS-535 DESIGN-CALL comment for full rationale:
+#   - Strategy A (argv) REJECTED: 1.14.6 stock Unix attestor has no `argv` selector
+#     (verified at pkg/agent/plugin/workloadattestor/unix/unix_posix.go lines 133-206)
+#   - Strategy B (per-role script paths) REJECTED: proc.Exe() on a bash script
+#     resolves to /bin/bash, not the script path — selectors don't disambiguate
+#   - Strategy C (systemd) DEFERRED: no systemd attestor configured; agents are
+#     interactive Claude sessions, not units
+#   - Strategy U (per-role Linux user) ADOPTED: uses unix attestor primitives
+#     already emitted by deployed agents; SPIRE-canonical pattern; defense-in-
+#     depth via AND-ed shared-group selector
+#
+# OPS-553 parent SPIFFE ID change:
+#   BEFORE: spiffe://agents.haist.farm/spire/agent/join_token/<UUID>
+#   AFTER:  spiffe://agents.haist.farm/spire/agent/x509pop/<HEX-FINGERPRINT>
+#   The fingerprint is the lowercase SHA-1 hex of the SubjectPublicKeyInfo DER
+#   of the node cert (no colons, no spaces). This is STABLE across restarts as
+#   long as the cert key file is preserved.
+#
+# Dynamic resolution: tasks/main.yml queries `spire-server agent list` at apply
+# time and extracts ALL x509pop-attested agents. The static list below is used
+# only as a seed/fallback if the Server cannot be reached or has no live agents.
+# The static defaults will be stale after the first x509pop attestation — they
+# are placeholders that will be overridden by the dynamic lookup at apply time.
+#
+# MIGRATION NOTE: after first apply following x509pop agent attestation, the old
+# join_token entries will have no matching parent (expired agents). New x509pop
+# entries will be created alongside them (entries are keyed by spiffeID+parentID).
+# The old entries should be manually deleted via `spire-server entry delete` after
+# confirming the x509pop entries work (acceptance test in PR runbook).
+
+# Trust domain (matches spire-server.conf.j2 trust_domain)
+spire_workload_trust_domain: agents.haist.farm
+
+# Container name running on iac-control (matches docker-services.yml)
+spire_workload_container: spire-server
+
+# In-container path to the spire-server binary
+# (matches ENTRYPOINT of ghcr.io/spiffe/spire-server image)
+spire_workload_binary: /opt/spire/bin/spire-server
+
+# SVID TTLs — SPIRE defaults made explicit for documentation
+# X509 SVID: 1h rotation cadence (3600s)
+# JWT SVID: 5min rotation cadence (300s)
+spire_workload_x509_svid_ttl: 3600
+spire_workload_jwt_svid_ttl: 300
+
+# Shared group baked into the secondary AND-selector. Phase 4.5 provisions
+# this as a Linux group on the attested hosts with each sentinel-* user.
+spire_workload_shared_group: sentinel-agents
+
+# Per-host attested-agent parent SPIFFE IDs — x509pop format (OPS-553).
+# These are PLACEHOLDER values: the actual fingerprints are derived from the
+# node cert public keys issued by Vault spire-pki/ at deploy time.
+# tasks/main.yml resolves the LIVE x509pop agent SPIFFE IDs at apply time
+# from `spire-server agent list`; these defaults are only used as fallback
+# if the Server is unreachable or has no live x509pop agents.
+#
+# To populate with live values after first x509pop apply:
+#   1. Run: docker exec spire-server /opt/spire/bin/spire-server agent list
+#   2. Copy the x509pop SPIFFE IDs here (replaces the placeholder values)
+#   3. Commit to IaC for audit trail
+#
+# STALE join_token parents (kept for reference, DO NOT use as active parents):
+#   iac-control (expired 2026-05-17): join_token/2dd4f8c8-3402-41fd-9f20-45cc4d89e50d
+#   workstation (expired 2026-05-12): join_token/931f453a-a6b5-4b1f-b931-39a7107680d6
+#   workstation (post-OPS-546):       join_token/46ee0c26-5947-4997-9232-1b29e56b5366
+spire_workload_agent_parents:
+  # iac-control x509pop agent (placeholder — will be dynamically resolved at apply time)
+  - "spiffe://agents.haist.farm/spire/agent/x509pop/PLACEHOLDER_IAC_CONTROL_FINGERPRINT"
+  # workstation x509pop agent (placeholder — will be dynamically resolved at apply time)
+  - "spiffe://agents.haist.farm/spire/agent/x509pop/PLACEHOLDER_WORKSTATION_FINGERPRINT"
+
+# Attestation type filter for dynamic parent resolution (OPS-553).
+# tasks/main.yml queries `spire-server agent list` and filters by this type.
+# x509pop agents list with "Attestation type : x509pop" in the output.
+spire_workload_attestation_type: "x509pop"
+
+# Known-stable iac-control agent identifier for dynamic resolution.
+# With x509pop, the iac-control agent's SPIFFE ID is stable (cert-derived).
+# This field is left as UNKNOWN until the first x509pop attestation; the
+# dynamic lookup in tasks/main.yml handles the partition between iac-control
+# and workstation agents by hostname/CN matching in the cert if needed, or
+# by listing all x509pop agents and assigning roles based on order.
+#
+# NOTE: x509pop SPIFFE IDs are not human-readable (hex fingerprint). The
+# disambiguation strategy in tasks/main.yml is to list ALL x509pop agents and
+# create entries for EACH — cross-product with roles. This ensures both nodes
+# get entries regardless of which is "iac-control" vs "workstation".
+spire_workload_iac_control_agent_spiffe_id: >-
+  spiffe://agents.haist.farm/spire/agent/x509pop/PLACEHOLDER_IAC_CONTROL_FINGERPRINT
+
+# Sentinel agent roles. Each role gets one workload entry per attested-agent
+# parent (cross-product = N_roles × N_parents entries; currently 4 × 2 = 8).
+spire_workload_roles:
+  - worker
+  - judge
+  - planner
+  - scribe

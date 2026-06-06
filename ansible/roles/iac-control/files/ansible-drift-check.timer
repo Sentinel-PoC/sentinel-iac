@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily drift detection (8AM UTC)
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

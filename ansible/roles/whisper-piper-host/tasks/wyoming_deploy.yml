@@ -1,0 +1,131 @@
+---
+# wyoming_deploy.yml — Phase 3: Deploy Wyoming Whisper + Piper via Docker Compose
+# OPS-586 Section B
+#
+# Deploys containers using pct exec pattern from PVE host targeting ai-tier1 LXC.
+# Files are rendered to /tmp on PVE host, then pushed into LXC with pct push.
+# Pattern mirrors ha-lxc/tasks/ha_deploy.yml (OPS-585).
+#
+# Container addresses from HA perspective (cross-host, NOT same-host Docker bridge):
+#   Whisper: 192.168.12.80:10300 (ai-tier1 LXC IP, bound by Docker port mapping)
+#   Piper:   192.168.12.80:10200
+# Using direct IP is correct here — HA is on a different LXC (192.168.12.81).
+# Per feedback_seedbox_docker_dns_not_host_ip: inter-container-on-same-host DNS
+# applies; cross-host LXC communication uses IP. This is cross-host.
+
+# ── Create deployment directories inside LXC ──────────────────────────────────
+
+- name: Create Wyoming deployment directory inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      mkdir -p
+      {{ wyoming_deploy_dir }}
+      {{ wyoming_whisper_data_dir }}
+      {{ wyoming_piper_data_dir }}
+  changed_when: false
+  tags: [whisper-piper, wyoming, deploy]
+
+# ── Render Docker Compose file ────────────────────────────────────────────────
+
+- name: Render Docker Compose template to PVE host temp location
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /tmp/wyoming-compose.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [whisper-piper, wyoming, deploy]
+
+- name: Push Docker Compose file into ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ whisper_piper_lxc_id }}
+      /tmp/wyoming-compose.yaml
+      {{ wyoming_deploy_dir }}/compose.yaml
+  changed_when: true
+  tags: [whisper-piper, wyoming, deploy]
+
+- name: Remove temp compose file from PVE host
+  ansible.builtin.file:
+    path: /tmp/wyoming-compose.yaml
+    state: absent
+  tags: [whisper-piper, wyoming, deploy]
+
+# ── Write systemd unit to manage the Compose stack ───────────────────────────
+# A systemd unit ensures Wyoming services restart on LXC reboot,
+# launch after Docker is ready, and are manageable via systemctl.
+
+- name: Write wyoming systemd unit to PVE host temp location
+  ansible.builtin.copy:
+    dest: /tmp/wyoming.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Ansible managed — OPS-586 Section B whisper-piper-host role
+      [Unit]
+      Description=Wyoming Voice Services (Whisper + Piper)
+      Documentation=https://github.com/rhasspy/wyoming-faster-whisper
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory={{ wyoming_deploy_dir }}
+      ExecStart=/usr/bin/docker compose up -d --pull=always
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=300
+
+      [Install]
+      WantedBy=multi-user.target
+  tags: [whisper-piper, wyoming, service]
+
+- name: Push wyoming systemd unit into ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ whisper_piper_lxc_id }}
+      /tmp/wyoming.service
+      /etc/systemd/system/wyoming.service
+  changed_when: true
+  tags: [whisper-piper, wyoming, service]
+
+- name: Remove temp systemd unit from PVE host
+  ansible.builtin.file:
+    path: /tmp/wyoming.service
+    state: absent
+  tags: [whisper-piper, wyoming, service]
+
+# ── Enable + start Wyoming services ──────────────────────────────────────────
+
+- name: Reload systemd daemon inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- systemctl daemon-reload"
+  changed_when: false
+  tags: [whisper-piper, wyoming, service]
+
+- name: Enable Wyoming service inside ai-tier1 LXC (start on boot)
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- systemctl enable wyoming"
+  register: wyoming_enable
+  changed_when: "'Created symlink' in wyoming_enable.stdout"
+  tags: [whisper-piper, wyoming, service]
+
+- name: Pull Wyoming Docker images (may take several minutes on first run)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} -- bash -c
+      "cd {{ wyoming_deploy_dir }} && docker compose pull"
+  register: wyoming_pull
+  changed_when: "'Pulled' in wyoming_pull.stdout or 'Downloaded' in wyoming_pull.stderr"
+  async: 600
+  poll: 15
+  tags: [whisper-piper, wyoming, deploy]
+
+- name: Start Wyoming services via systemctl
+  ansible.builtin.command:
+    cmd: "pct exec {{ whisper_piper_lxc_id }} -- systemctl start wyoming"
+  register: wyoming_start
+  changed_when: wyoming_start.rc == 0
+  tags: [whisper-piper, wyoming, service]

@@ -1,0 +1,188 @@
+---
+- name: Install libpam-pwquality
+  ansible.builtin.apt:
+    name: libpam-pwquality
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == 'Debian'
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Configure password quality requirements
+  ansible.builtin.copy:
+    dest: /etc/security/pwquality.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Sentinel password quality - deployed by Ansible
+      minlen = {{ password_min_length }}
+      minclass = 4
+      dcredit = -1
+      ucredit = -1
+      lcredit = -1
+      ocredit = -1
+      difok = 2
+      maxrepeat = 3
+      maxsequence = 3
+      enforcing = 1
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Configure pam_faillock
+  ansible.builtin.copy:
+    dest: /etc/security/faillock.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Sentinel faillock config - deployed by Ansible
+      deny = {{ pam_faillock_deny }}
+      unlock_time = {{ pam_faillock_unlock_time }}
+      even_deny_root
+      root_unlock_time = {{ pam_faillock_unlock_time }}
+      audit
+      silent
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Configure password history (CIS 5.3.3.3)
+  ansible.builtin.lineinfile:
+    path: /etc/pam.d/common-password
+    regexp: '^password\s+(required|requisite)\s+pam_pwhistory\.so'
+    line: "password requisite pam_pwhistory.so remember={{ pam_pwhistory_remember }} use_authtok enforce_for_root"
+    insertbefore: '^password.*pam_unix\.so'
+    state: present
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Ensure SHA512 hashing for passwords
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^ENCRYPT_METHOD'
+    line: "ENCRYPT_METHOD SHA512"
+    state: present
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Set PASS_MAX_DAYS in login.defs
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^PASS_MAX_DAYS'
+    line: "PASS_MAX_DAYS\t{{ password_max_days }}"
+    state: present
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Set PASS_MIN_DAYS in login.defs
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^PASS_MIN_DAYS'
+    line: "PASS_MIN_DAYS\t{{ password_min_days }}"
+    state: present
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Set PASS_WARN_AGE in login.defs
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^PASS_WARN_AGE'
+    line: "PASS_WARN_AGE\t{{ password_warn_age }}"
+    state: present
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Remove nullok from common-auth
+  ansible.builtin.replace:
+    path: /etc/pam.d/common-auth
+    regexp: '(\s)nullok'
+    replace: ''
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Remove nullok from common-password
+  ansible.builtin.replace:
+    path: /etc/pam.d/common-password
+    regexp: '(\s)nullok'
+    replace: ''
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Ensure pam_unix uses sha512 in common-password
+  ansible.builtin.lineinfile:
+    path: /etc/pam.d/common-password
+    regexp: '^password.*pam_unix\.so'
+    backrefs: true
+    line: 'password\t[success=1 default=ignore]\tpam_unix.so obscure use_authtok try_first_pass yescrypt sha512'
+    state: present
+  tags:
+    - common
+    - pam
+    - hardening
+
+- name: Ensure opasswd file exists with correct permissions (CIS 5.4.2.8)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0600"
+    state: touch
+    modification_time: preserve
+    access_time: preserve
+  loop:
+    - /etc/security/opasswd
+    - /etc/security/opasswd.old
+  tags:
+    - common
+    - pam
+    - hardening
+
+# Enable pam_unix in PAM stack (CIS 5.4.2.2 — OPS-220)
+# pam_unix is the default module but may be disabled on drift-affected hosts.
+# pam-auth-update --enable unix re-activates it idempotently via Debian's
+# /usr/share/pam-configs/unix profile.
+- name: Enable pam_unix via pam-auth-update (CIS 5.4.2.2)
+  ansible.builtin.command:
+    cmd: pam-auth-update --enable unix
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  failed_when: false
+  tags:
+    - common
+    - pam
+    - hardening
+
+# Enable pam_faillock in PAM stack (CIS 5.4.2)
+- name: Enable pam_faillock via pam-auth-update
+  ansible.builtin.command:
+    cmd: pam-auth-update --enable faillock
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  failed_when: false
+  tags:
+    - common
+    - pam
+    - hardening

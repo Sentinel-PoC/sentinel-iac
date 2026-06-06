@@ -1,0 +1,155 @@
+---
+# truenas-iscsi | targetextent_destroy — delete LUN mapping by target+extent name (OPS-1011)
+#
+# SAFETY GATE: Requires confirm_destroy: true to execute any deletion.
+# Default confirm_destroy: false means this task logs a warning and skips.
+#
+# Resolves target and extent IDs by name, then deletes the mapping.
+# This is the FIRST step in the destroy sequence:
+#   1. targetextent_destroy  ← run this first
+#   2. target_destroy
+#   3. extent_destroy
+#
+# Requires:
+#   truenas_iscsi_targetextent_target_name  — target name to resolve
+#   truenas_iscsi_targetextent_extent_name  — extent name to resolve
+
+- name: truenas-iscsi/targetextent_destroy | validate required variables
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_targetextent_target_name | length > 0
+      - truenas_iscsi_targetextent_extent_name | length > 0
+    fail_msg: >
+      Both truenas_iscsi_targetextent_target_name and
+      truenas_iscsi_targetextent_extent_name must be set.
+
+- name: truenas-iscsi/targetextent_destroy | SAFETY GATE — warn and skip if confirm_destroy not set
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPING targetextent deletion for
+      target='{{ truenas_iscsi_targetextent_target_name }}'
+      extent='{{ truenas_iscsi_targetextent_extent_name }}'.
+      Set confirm_destroy: true to enable deletion.
+  when: not confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_destroy | fetch all extents to resolve extent ID
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_td_all_extents
+  when: confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_destroy | fetch all targets to resolve target ID
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/target"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_td_all_targets
+  when: confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_destroy | resolve IDs (skip if either not found)
+  ansible.builtin.set_fact:
+    truenas_iscsi_td_extent_candidates: >-
+      {{
+        truenas_iscsi_td_all_extents.json
+        | selectattr('name', 'equalto', truenas_iscsi_targetextent_extent_name)
+        | list
+      }}
+    truenas_iscsi_td_target_candidates: >-
+      {{
+        truenas_iscsi_td_all_targets.json
+        | selectattr('name', 'equalto', truenas_iscsi_targetextent_target_name)
+        | list
+      }}
+  when: confirm_destroy | bool
+
+- name: truenas-iscsi/targetextent_destroy | report if either resource not found
+  ansible.builtin.debug:
+    msg: >-
+      One or both resources not found — nothing to delete (idempotent).
+      target='{{ truenas_iscsi_targetextent_target_name }}'
+      found={{ truenas_iscsi_td_target_candidates | length > 0 }},
+      extent='{{ truenas_iscsi_targetextent_extent_name }}'
+      found={{ truenas_iscsi_td_extent_candidates | length > 0 }}
+  when:
+    - confirm_destroy | bool
+    - (truenas_iscsi_td_target_candidates | length == 0) or (truenas_iscsi_td_extent_candidates | length == 0)
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_destroy | fetch all targetextents to find mapping
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/targetextent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_td_all_targetextents
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_td_target_candidates | length > 0
+    - truenas_iscsi_td_extent_candidates | length > 0
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_destroy | find mapping by target+extent IDs
+  ansible.builtin.set_fact:
+    truenas_iscsi_td_mapping_to_delete: >-
+      {{
+        truenas_iscsi_td_all_targetextents.json
+        | selectattr('target', 'equalto', (truenas_iscsi_td_target_candidates | first).id | int)
+        | selectattr('extent', 'equalto', (truenas_iscsi_td_extent_candidates | first).id | int)
+        | list
+      }}
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_td_target_candidates | length > 0
+    - truenas_iscsi_td_extent_candidates | length > 0
+
+- name: truenas-iscsi/targetextent_destroy | report if mapping not found
+  ansible.builtin.debug:
+    msg: >-
+      LUN mapping not found for target='{{ truenas_iscsi_targetextent_target_name }}'
+      → extent='{{ truenas_iscsi_targetextent_extent_name }}' — nothing to delete (idempotent)
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_td_target_candidates | length > 0
+    - truenas_iscsi_td_extent_candidates | length > 0
+    - truenas_iscsi_td_mapping_to_delete | length == 0
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_destroy | delete LUN mapping
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/targetextent/id/{{ (truenas_iscsi_td_mapping_to_delete | first).id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: [200, 204]
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_td_target_candidates | length > 0
+    - truenas_iscsi_td_extent_candidates | length > 0
+    - truenas_iscsi_td_mapping_to_delete | length > 0
+
+- name: truenas-iscsi/targetextent_destroy | report deletion
+  ansible.builtin.debug:
+    msg: >-
+      Deleted LUN mapping id={{ (truenas_iscsi_td_mapping_to_delete | first).id }}
+      target='{{ truenas_iscsi_targetextent_target_name }}'
+      → extent='{{ truenas_iscsi_targetextent_extent_name }}'
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_td_target_candidates | length > 0
+    - truenas_iscsi_td_extent_candidates | length > 0
+    - truenas_iscsi_td_mapping_to_delete | length > 0
+  changed_when: false

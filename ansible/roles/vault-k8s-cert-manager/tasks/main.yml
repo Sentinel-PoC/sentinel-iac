@@ -1,0 +1,74 @@
+---
+# vault-k8s-cert-manager tasks
+# Tracking: OPS-1202
+#
+# Provisions the Vault Kubernetes auth role and policy that allow the
+# cert-manager controller (SA cert-manager in namespace cert-manager) to
+# authenticate to Vault and sign TLS certificates via pki_int/sign/208-haist-farm.
+#
+# Root cause context: the vault-issuer ClusterIssuer was created in overwatch-gitops
+# referencing role "cert-manager" on auth/kubernetes, but this role was never
+# provisioned in Vault. The ClusterIssuer remained Ready=False with:
+#   "invalid role name \"cert-manager\""
+# until this role was applied (discovered 2026-06-05, OPS-1202).
+#
+# Idempotency:
+#   - sys/policies/acl/cert-manager: idempotent upsert (same HCL → no change)
+#   - auth/kubernetes/role/cert-manager: idempotent upsert (same config → no change)
+#   - vault_write may report changed=true on re-runs due to response-echo quirk
+#     (Vault returns written data; module has no diff comparison).
+#
+# Requires at runtime (pass via -e or environment — NOT in defaults):
+#   vault_token — Vault token with sys/policies/acl + auth/kubernetes/role write scope
+
+# ─── Pre-flight ───────────────────────────────────────────────────────────────
+
+- name: Pre-flight | assert vault_token is provided
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<token>
+  no_log: false
+  tags: [vault-k8s-cert-manager, validation]
+
+# ─── Task 1/2 — Write cert-manager Vault policy ───────────────────────────────
+# Grants create+update on pki_int/sign/208-haist-farm so cert-manager can
+# request certificate signing from the Vault intermediate CA.
+
+- name: "Task 1/2 | Write cert-manager Vault policy"
+  community.hashi_vault.vault_write:
+    path: "sys/policies/acl/{{ vault_cert_manager_policy }}"
+    data:
+      policy: "{{ lookup('file', role_path + '/files/policies/cert-manager.hcl') }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-k8s-cert-manager, policy]
+
+# ─── Task 2/2 — Write cert-manager Kubernetes auth role ───────────────────────
+# Binds the cert-manager service account in the cert-manager namespace
+# to the cert-manager policy. TTL 1h matches the cert-manager renewal cadence.
+#
+# Note: Vault warns if no audience is configured. cert-manager's Vault issuer
+# does not set a token audience by default, so the warning is expected and safe.
+# If a future cert-manager version requires audience binding, add:
+#   audience: "vault.208.haist.farm"
+# and set serviceAccountRef.audiences in the ClusterIssuer spec.
+
+- name: "Task 2/2 | Write cert-manager Kubernetes auth role"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_k8s_mount_path }}/role/{{ vault_cert_manager_k8s_role }}"
+    data:
+      bound_service_account_names:
+        - "{{ vault_cert_manager_sa_name }}"
+      bound_service_account_namespaces:
+        - "{{ vault_cert_manager_namespace }}"
+      policies:
+        - "{{ vault_cert_manager_policy }}"
+      ttl: "{{ vault_cert_manager_token_ttl }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  tags: [vault-k8s-cert-manager, role]

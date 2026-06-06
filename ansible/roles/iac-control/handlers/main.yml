@@ -1,0 +1,167 @@
+---
+- name: Daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    state: restarted
+    enabled: true
+
+- name: Restart squid
+  ansible.builtin.systemd:
+    name: squid
+    state: restarted
+    enabled: true
+
+- name: Restart dnsmasq
+  ansible.builtin.systemd:
+    name: dnsmasq
+    state: restarted
+    enabled: true
+
+- name: Restart nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted
+    enabled: true
+
+- name: Restart etcd-backup-timer
+  ansible.builtin.systemd:
+    name: etcd-backup.timer
+    state: restarted
+    enabled: true
+
+- name: Restart sentinel-matrix-bot
+  ansible.builtin.systemd:
+    name: sentinel-matrix-bot
+    state: restarted
+    enabled: true
+
+- name: Restart qbit-proxy
+  ansible.builtin.systemd:
+    name: qbit-proxy
+    state: restarted
+    enabled: true
+
+- name: Restart proxmox-snapshot-timer
+  ansible.builtin.systemd:
+    name: proxmox-snapshot.timer
+    state: restarted
+    enabled: true
+
+- name: Restart idrac-health-timer
+  ansible.builtin.systemd:
+    name: idrac-health.timer
+    state: restarted
+    enabled: true
+
+- name: Restart idrac-watchdog-timer
+  ansible.builtin.systemd:
+    name: idrac-watchdog.timer
+    state: restarted
+    enabled: true
+
+- name: Restart keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: restarted
+    enabled: true
+
+- name: Apply netplan
+  ansible.builtin.command:
+    cmd: netplan apply
+  changed_when: true
+
+- name: Reload ufw
+  community.general.ufw:
+    state: reloaded
+
+- name: Restart ssh-cert-renewal-timer
+  ansible.builtin.systemd:
+    name: ssh-cert-renewal.timer
+    state: restarted
+    enabled: true
+
+- name: Restart wazuh-agent
+  ansible.builtin.systemd:
+    name: wazuh-agent
+    state: restarted
+    enabled: true
+
+- name: Restart netbox-sync-timer
+  ansible.builtin.systemd:
+    name: netbox-sync-proxmox.timer
+    state: restarted
+    enabled: true
+
+- name: Restart rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+
+- name: Restart sentinel-prometheus
+  ansible.builtin.systemd:
+    name: sentinel-prometheus
+    state: restarted
+    enabled: true
+
+- name: Restart unifi-exporter
+  ansible.builtin.systemd:
+    name: unifi-exporter
+    state: restarted
+    enabled: true
+
+- name: Restart unifi-collector-timer
+  ansible.builtin.systemd:
+    name: unifi-collector.timer
+    state: restarted
+    enabled: true
+
+- name: Restart vault-agent-unifi-collector
+  # [OPS-169] Restart vault-agent sidecar when config, role-id, or secret-id changes.
+  # vault-agent will re-authenticate with AppRole and write a fresh token to the sink.
+  ansible.builtin.systemd:
+    name: vault-agent-unifi-collector.service
+    state: restarted
+    enabled: true
+    daemon_reload: true
+
+- name: Restart unifi-netbox-drift-timer
+  ansible.builtin.systemd:
+    name: unifi-netbox-drift.timer
+    state: restarted
+    enabled: true
+
+
+- name: Restart forgejo-runner
+  ansible.builtin.systemd:
+    name: forgejo-runner
+    state: restarted
+    enabled: true
+
+- name: Restart wazuh-metrics-relay
+  ansible.builtin.systemd:
+    name: wazuh-metrics-relay
+    state: restarted
+    enabled: true
+
+- name: Restart spire-server
+  community.docker.docker_container:
+    name: spire-server
+    state: started
+    restart: true
+
+- name: Restart spire-agent
+  community.docker.docker_container:
+    name: spire-agent
+    state: started
+    restart: true
+
+- name: Restart alertmanager-deadman-timer
+  ansible.builtin.systemd:
+    name: alertmanager-deadman.timer
+    state: restarted
+    enabled: true
+    daemon_reload: true

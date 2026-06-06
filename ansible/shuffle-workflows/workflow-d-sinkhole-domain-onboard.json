@@ -1,0 +1,125 @@
+{
+  "id": "wf-d-sinkhole-domain-onboard",
+  "name": "sinkhole-domain-onboard",
+  "description": "G'-prime Workflow D: Cloudflare DNS + listener provisioning when sinkhole opportunity is detected. Adds DNS record pointing to sinkhole listener host. Operator-confirmed. Tracking: OPS-573.",
+  "tags": ["g-prime", "sinkhole", "deception", "cloudflare"],
+  "status": "active",
+  "start": "trigger-sinkhole-opportunity",
+  "triggers": [
+    {
+      "id": "trigger-sinkhole-opportunity",
+      "name": "Sinkhole Opportunity Webhook",
+      "app_name": "Webhook",
+      "app_version": "1.0.0",
+      "trigger_type": "webhook",
+      "label": "Sinkhole domain opportunity trigger",
+      "description": "Triggered manually or by MISP detection when a domain sinkhole opportunity is identified. Fields: domain, sinkhole_ip, rationale.",
+      "parameters": []
+    }
+  ],
+  "actions": [
+    {
+      "id": "telegram-confirm-sinkhole",
+      "name": "Telegram confirm: sinkhole domain",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Request operator confirmation before DNS change",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "SINKHOLE REQUEST\\nDomain: $exec.body.domain\\nSinkhole IP: $exec.body.sinkhole_ip\\nRationale: $exec.body.rationale\\n\\nReply YES to provision Cloudflare DNS + listener, NO to abort."
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-create-dns",
+      "name": "Create Cloudflare DNS record",
+      "app_name": "Cloudflare",
+      "app_version": "1.0.0",
+      "label": "Add A record pointing domain to sinkhole IP",
+      "parameters": [
+        {
+          "name": "action",
+          "value": "create_dns_record"
+        },
+        {
+          "name": "zone_id",
+          "value": "$exec.body.zone_id"
+        },
+        {
+          "name": "type",
+          "value": "A"
+        },
+        {
+          "name": "name",
+          "value": "$exec.body.domain"
+        },
+        {
+          "name": "content",
+          "value": "$exec.body.sinkhole_ip"
+        },
+        {
+          "name": "proxied",
+          "value": "false"
+        },
+        {
+          "name": "ttl",
+          "value": "120"
+        }
+      ]
+    },
+    {
+      "id": "record-sinkhole-db",
+      "name": "Record sinkhole in attacker-intel DB",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Insert sinkhole domain record",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "INSERT INTO attacker_intel.sinkhole_domains (domain, sinkhole_ip, cloudflare_record_id, rationale, provisioned_at) VALUES ('$exec.body.domain', '$exec.body.sinkhole_ip', '$cloudflare-create-dns.result.id', '$exec.body.rationale', NOW());"
+        }
+      ]
+    },
+    {
+      "id": "telegram-notify-sinkhole-done",
+      "name": "Telegram notify: sinkhole provisioned",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Notify operator of successful provisioning",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "SINKHOLE PROVISIONED\\nDomain: $exec.body.domain -> $exec.body.sinkhole_ip\\nCloudflare record: $cloudflare-create-dns.result.id\\nMonitor traffic to sinkhole listener."
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {"source_id": "trigger-sinkhole-opportunity", "destination_id": "telegram-confirm-sinkhole", "has_errors": false, "conditions": []},
+    {
+      "source_id": "telegram-confirm-sinkhole",
+      "destination_id": "cloudflare-create-dns",
+      "has_errors": false,
+      "conditions": [{"condition": "$telegram-confirm-sinkhole.result == 'YES'", "source": "telegram-confirm-sinkhole"}]
+    },
+    {"source_id": "cloudflare-create-dns", "destination_id": "record-sinkhole-db", "has_errors": false, "conditions": []},
+    {"source_id": "record-sinkhole-db", "destination_id": "telegram-notify-sinkhole-done", "has_errors": false, "conditions": []}
+  ]
+}

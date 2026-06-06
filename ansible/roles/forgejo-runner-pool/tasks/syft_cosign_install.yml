@@ -1,0 +1,245 @@
+---
+# syft_cosign_install.yml — OPS-1139: Provision syft + cosign to pve4 buildah runner LXCs
+#
+# Discovered during OPS-1135 end-to-end verification (build run 27, task 45071,
+# 2026-06-02T19:57Z): after OPS-1136 fixed buildah, builds that land on pve4 LXCs
+# fail at the shared security-scan composite action's first step:
+#   ::error::syft not found on runner.
+# Neither syft nor cosign is installed on any of the 6 buildah-labeled LXCs (210-215).
+# iac-control has both at /usr/local/bin/.
+#
+# cosign key material: the security-scan action receives the private key via
+# ${{ inputs.cosign-key }} → ${{ secrets.COSIGN_KEY }} Forgejo Action secret at
+# job time (see .forgejo/actions/security-scan/action.yml step 7). The key is
+# written to a mktemp file with chmod 600 inside the job and deleted on exit.
+# No key material is stored on the runner filesystem — only the binaries are needed.
+#
+# Versions pinned to match iac-control (verified 2026-06-02):
+#   syft   1.21.0  — from anchore/syft releases (tarball; extract binary)
+#   cosign 2.4.3   — from sigstore/cosign releases (direct binary)
+#
+# Pattern: matches ci_tooling.yml (trivy, osv-scanner, tflint):
+#   1. version-check gate — skip download if already at pinned version
+#   2. download to PVE host (once, with SHA256 checksum)
+#   3. pct push into each LXC
+#   4. chmod +x
+#   5. verify per-LXC
+#   6. clean up from PVE host
+#
+# Idempotent: version-check gate skips download+push if correct version already installed.
+# Tags: forgejo-runner-pool, syft-cosign
+
+# ── Syft ──────────────────────────────────────────────────────────────────────
+
+- name: Check syft version in each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- /usr/local/bin/syft --version"
+  register: syft_version_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Download syft tarball to PVE host (once)  # OPS-1139
+  ansible.builtin.get_url:
+    url: "{{ ci_tooling_syft_download_url }}"
+    dest: "/tmp/syft_{{ ci_tooling_syft_version }}_linux_amd64.tar.gz"
+    checksum: "sha256:{{ ci_tooling_syft_sha256 }}"
+    mode: "0644"
+  when: >
+    syft_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or syft_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_syft_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Create syft extract directory on PVE host  # OPS-1139
+  ansible.builtin.file:
+    path: "/tmp/syft_{{ ci_tooling_syft_version }}_extract"
+    state: directory
+    mode: "0755"
+  when: >
+    syft_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or syft_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_syft_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Extract syft binary from tarball on PVE host  # OPS-1139
+  # noqa command-instead-of-module — uses shell with creates: for idempotency
+  # with selective single-file extraction (same pattern as trivy in ci_tooling.yml).
+  ansible.builtin.shell:
+    cmd: >
+      tar -xzf /tmp/syft_{{ ci_tooling_syft_version }}_linux_amd64.tar.gz
+      -C /tmp/syft_{{ ci_tooling_syft_version }}_extract
+      syft
+    creates: "/tmp/syft_{{ ci_tooling_syft_version }}_extract/syft"
+  args:
+    executable: /bin/bash
+  when: >
+    syft_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or syft_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_syft_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Push syft binary into each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/syft_{{ ci_tooling_syft_version }}_extract/syft
+      /usr/local/bin/syft
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (syft_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_syft_version not in
+    (syft_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Set syft executable bit in each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- chmod +x /usr/local/bin/syft"
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (syft_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_syft_version not in
+    (syft_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Clean up syft download and extract from PVE host  # OPS-1139
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/tmp/syft_{{ ci_tooling_syft_version }}_linux_amd64.tar.gz"
+    - "/tmp/syft_{{ ci_tooling_syft_version }}_extract"
+  tags: [forgejo-runner-pool, syft-cosign]
+
+# ── Cosign ────────────────────────────────────────────────────────────────────
+
+- name: Check cosign version in each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- /usr/local/bin/cosign version"
+  register: cosign_version_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Download cosign binary to PVE host (once)  # OPS-1139
+  # cosign is a direct binary (no tarball) — same pattern as osv-scanner.
+  # SHA256 from: https://github.com/sigstore/cosign/releases/download/v2.4.3/cosign_checksums.txt
+  ansible.builtin.get_url:
+    url: "{{ ci_tooling_cosign_download_url }}"
+    dest: "/tmp/cosign-linux-amd64_{{ ci_tooling_cosign_version }}"
+    checksum: "sha256:{{ ci_tooling_cosign_sha256 }}"
+    mode: "0755"
+  when: >
+    cosign_version_check.results
+    | selectattr('rc', 'ne', 0)
+    | list | length > 0
+    or cosign_version_check.results
+    | selectattr('stdout', 'search', ci_tooling_cosign_version)
+    | list | length < (forgejo_runner_pool_instances | length)
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Push cosign binary into each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/cosign-linux-amd64_{{ ci_tooling_cosign_version }}
+      /usr/local/bin/cosign
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (cosign_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_cosign_version not in
+    (cosign_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Set cosign executable bit in each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- chmod +x /usr/local/bin/cosign"
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  when: >
+    (cosign_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='rc') | first | default(1)) != 0
+    or ci_tooling_cosign_version not in
+    (cosign_version_check.results
+     | selectattr('item.vmid', 'equalto', item.vmid)
+     | map(attribute='stdout') | first | default(''))
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Clean up cosign download from PVE host  # OPS-1139
+  ansible.builtin.file:
+    path: "/tmp/cosign-linux-amd64_{{ ci_tooling_cosign_version }}"
+    state: absent
+  tags: [forgejo-runner-pool, syft-cosign]
+
+# ── Verify ────────────────────────────────────────────────────────────────────
+
+- name: Verify syft and cosign installed correctly in each runner LXC  # OPS-1139
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - bash
+      - "-c"
+      - |
+        set -e
+        export PATH=/usr/local/bin:/usr/bin:/bin
+        syft --version | grep -F '{{ ci_tooling_syft_version }}'
+        cosign version | grep -F '{{ ci_tooling_cosign_version }}'
+  register: syft_cosign_verify
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, syft-cosign]
+
+- name: Log syft+cosign verify result per runner  # OPS-1139
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.name }} (VMID {{ item.item.vmid }}):
+      syft {{ ci_tooling_syft_version }} OK,
+      cosign {{ ci_tooling_cosign_version }} OK
+  loop: "{{ syft_cosign_verify.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, syft-cosign]

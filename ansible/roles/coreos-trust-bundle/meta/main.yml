@@ -1,0 +1,26 @@
+---
+# ansible/roles/coreos-trust-bundle/meta/main.yml
+#
+# OPS-238: Distribute Vault root CA to OKD CoreOS nodes via MachineConfig
+# so CRI-O trusts mirror.208.haist.farm (Harbor) TLS certificates.
+#
+# Discovery context: OPS-159 (Vault PKI setup) / OPS-147 (MW1 registry split)
+# OKD CoreOS nodes have a read-only rootfs — trust bundle distribution
+# requires a MachineConfig, NOT direct file placement.
+
+galaxy_info:
+  author: sentinel-automation
+  description: >
+    Deploy Vault root CA and intermediate CA to OKD CoreOS nodes via
+    MachineConfig so CRI-O can verify TLS connections to Harbor
+    (mirror.208.haist.farm).
+  license: proprietary
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+  galaxy_tags: []
+
+dependencies: []

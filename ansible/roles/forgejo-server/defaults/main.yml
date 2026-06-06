@@ -1,0 +1,151 @@
+---
+forgejo_dir: "/opt/forgejo"
+forgejo_data_dir: "/opt/forgejo/data"
+forgejo_postgres_dir: "/opt/forgejo/postgres"
+
+forgejo_http_port: 3000
+forgejo_ssh_port: 2222
+
+forgejo_domain: "forgejo.208.haist.farm"
+forgejo_root_url: "https://forgejo.208.haist.farm"
+
+forgejo_image: "codeberg.org/forgejo/forgejo:14"
+forgejo_postgres_image: "postgres:16-alpine"
+forgejo_runner_image: "codeberg.org/forgejo/runner:6"
+
+# Database
+forgejo_db_name: "forgejo"
+forgejo_db_user: "forgejo"
+# OPS-48: read from FORGEJO_DB_PASSWORD env var so CI does not need to pass
+# secrets as -e CLI args (which expose them in process listings). The env var
+# is already set in the rebuild.yml step env block. Explicit -e override still
+# works (takes precedence over lookup) for ad-hoc manual runs.
+forgejo_db_password: "{{ lookup('env', 'FORGEJO_DB_PASSWORD') }}"
+
+# Keycloak OIDC
+forgejo_oidc_enabled: true
+forgejo_oidc_provider: "keycloak"
+forgejo_oidc_client_id: "forgejo"
+# OPS-48: same pattern as forgejo_db_password — read from env, no CLI exposure.
+forgejo_oidc_client_secret: "{{ lookup('env', 'FORGEJO_OIDC_CLIENT_SECRET') }}"
+forgejo_oidc_discovery_url: "https://auth.haist.farm/realms/sentinel/.well-known/openid-configuration"
+forgejo_oidc_auto_discover: true
+forgejo_oidc_scopes: "openid email profile"
+
+# Authentik OIDC — OPS-605 Phase 3 (dual-running with Keycloak per OPS-604)
+# client_id and client_secret are read at runtime from Vault (secret/authentik/clients/forgejo)
+# and overwrite these placeholder values via authentik-source.yml.
+authentik_oidc_enabled: false
+authentik_oidc_provider: "Authentik"
+authentik_oidc_client_id: ""
+authentik_oidc_client_secret: ""
+authentik_oidc_discovery_url: "https://auth-next.208.haist.farm/application/o/forgejo/.well-known/openid-configuration"
+authentik_oidc_scopes: "openid email profile"
+
+# One-time canonicalisation of the Forgejo auth source Name from "Keycloak" (capital K, UI typo)
+# to "keycloak" (lowercase). Opt-in flag — operator runs during maintenance window. See
+# tasks/oidc-migration.yml for the runbook. Tracking: OPS-188.
+forgejo_oidc_migrate_capital_k: false
+
+# Extra hosts injected into the forgejo container's /etc/hosts (docker-compose extra_hosts).
+# OPS-642: the Forgejo host (192.168.12.70) systemd-resolved does not forward
+# auth-next.208.haist.farm; adding it here ensures DNS resolution inside the container
+# survives restarts without relying on ephemeral /etc/hosts edits.
+# OPS-779: forgejo.208.haist.farm:127.0.0.1 is hardcoded in docker-compose.yml.j2
+# (not in this list) because it is always required for LOCAL_ROOT_URL to be reachable
+# inside the container — it must never be accidentally overridden by host_vars.
+forgejo_extra_hosts:
+  - "auth-next.208.haist.farm:192.168.12.168"
+
+# OPS-688: Repos where sentinel-worker must have write (push) access for CI pipelines.
+# sentinel-worker is the automation token used by CI jobs to push branches and open PRs.
+# The forgejo-server role idempotently ensures collaborator assignments on each run.
+# PUT /repos/{owner}/{repo}/collaborators/{collaborator} returns HTTP 204 whether
+# the collaborator is being added or already exists -- safe to run repeatedly.
+forgejo_worker_repos:
+  - "sentinel-admin/sentinel-iac"
+  - "sentinel-admin/sentinel-unifi"
+  - "sentinel-admin/overwatch-gitops"
+  - "sentinel-admin/overwatch-console"
+
+# OPS-779: nginx TLS sidecar — terminates HTTPS on :443, proxies to forgejo:3000.
+# Artifact uploads from runners (which resolve forgejo.208.haist.farm → this host
+# via /etc/hosts OPS-773 split) now land on nginx:443 instead of hitting Pangolin.
+forgejo_nginx_image: "nginx:alpine"
+forgejo_nginx_port: 443
+forgejo_tls_dir: "{{ forgejo_dir }}/tls"
+# Docker network subnet for REVERSE_PROXY_TRUSTED_PROXIES in app.ini
+# (so Forgejo correctly attributes real client IPs from nginx X-Forwarded-For)
+forgejo_nginx_docker_subnet: "172.18.0.0/16"
+# Timeout values for large artifact uploads
+forgejo_nginx_proxy_read_timeout: "300s"
+forgejo_nginx_proxy_send_timeout: "300s"
+forgejo_nginx_proxy_connect_timeout: "30s"
+# Pangolin host in Ansible inventory (for TLS cert extraction)
+forgejo_tls_pangolin_host: "pangolin-proxy"
+# Path to Traefik acme.json on the Pangolin host
+forgejo_tls_acme_json_path: "/opt/pangolin/letsencrypt/acme.json"
+# Wildcard cert domain entry key in acme.json
+forgejo_tls_cert_domain: "*.208.haist.farm"
+
+# act_runner registration token (generated from Forgejo admin)
+forgejo_runner_token: ""
+
+# OPS-251: Action mirror configuration.
+# DEFAULT_ACTIONS_URL = self in app.ini causes the runner to resolve all unqualified
+# `uses: org/repo/path@ref` references from this Forgejo instance. Standard GitHub Actions
+# (actions/checkout, etc.) therefore need to be mirrored here from code.forgejo.org.
+# tasks/action-mirrors.yml creates these mirrors idempotently on each role run.
+#
+# To add a new mirror: append to this list and re-run the forgejo-server playbook.
+# Mirror interval: 8h (Forgejo default; actions repos are stable, infrequent updates).
+forgejo_action_mirrors_enabled: true
+forgejo_action_mirrors_source: "https://code.forgejo.org"
+forgejo_action_mirrors_org: "actions"
+forgejo_action_mirrors:
+  - name: "checkout"
+    description: "OPS-251 mirror: actions/checkout from code.forgejo.org"
+  - name: "upload-artifact"
+    description: "OPS-251 mirror: actions/upload-artifact from code.forgejo.org"
+  - name: "download-artifact"
+    description: "OPS-251 mirror: actions/download-artifact from code.forgejo.org"
+
+# MinIO backup settings
+# SEC-88: S3 API now TLS-terminated; use FQDN so wildcard cert validates.
+minio_endpoint: "https://s3.208.haist.farm:9000"
+minio_access_key: ""
+minio_secret_key: ""
+
+# OPS-820: Backup retention + disk guard
+# Number of local backup pairs (db dump + data archive) to keep.
+# Older files are pruned after each backup run, unconditionally of MinIO upload success.
+forgejo_backup_retention_count: 7
+# Disk-full warning threshold (% of the /opt/forgejo partition).
+# If utilisation exceeds this after pruning, a WARNING line is written to the
+# systemd journal (visible in Loki via the forgejo-backup unit label).
+forgejo_backup_disk_warning_pct: 75
+
+# OPS-1061 / OPS-1063: agentic-scale tuning (applied 2026-05-29, codified here).
+# Redis sidecar — queue, cache, session backend.  In-memory only (no RDB persistence).
+forgejo_redis_image: "redis:7-alpine"
+forgejo_redis_maxmemory: "256mb"
+forgejo_redis_maxmemory_policy: "allkeys-lru"
+
+# Forgejo DB connection pool (overrides compile-time defaults of MAX_OPEN_CONNS=0/MAX_IDLE_CONNS=2).
+# 80 open + 20 idle fits within postgres max_connections=100, leaving 20 headroom for admin/backups.
+forgejo_db_max_open_conns: 80
+forgejo_db_max_idle_conns: 20
+forgejo_db_conn_max_lifetime: 3600
+
+# Queue (redis) settings.
+forgejo_queue_length: 1000
+forgejo_queue_batch_length: 20
+
+# Git subprocess timeout (seconds).  120s fast-fails stuck goroutines under I/O contention.
+# MIGRATE/MIRROR are kept at 300s (large repo operations).
+forgejo_git_timeout_default: 120
+forgejo_git_timeout_clone: 120
+forgejo_git_timeout_fetch: 120
+forgejo_git_timeout_gc: 120
+forgejo_git_timeout_migrate: 300
+forgejo_git_timeout_mirror: 300

@@ -1,0 +1,1285 @@
+---
+# iac-control role - additional services
+# Binary tools, etcd backup, grafana alerts, qbit proxy, nginx PXE, Forgejo Runner
+
+# --- Binary tools ---
+# These are installed manually via scripts/binaries, not apt.
+# We check if they exist and skip if present.
+# Version pinning could be added later for reproducibility.
+
+- name: Check which binary tools are installed
+  ansible.builtin.command:
+    cmd: "which {{ item.name }}"
+  loop: "{{ binary_tools }}"
+  register: binary_tool_checks
+  changed_when: false
+  failed_when: false
+  tags:
+    - services
+    - binary-tools
+
+- name: Display binary tool status
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }}: {{ 'installed' if item.rc == 0 else 'MISSING - install manually' }}"
+  loop: "{{ binary_tool_checks.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags:
+    - services
+    - binary-tools
+
+# --- GitLab Runner removal ---
+# GitLab Runner was replaced by Forgejo Runner post-migration (OPS-216).
+# These tasks remove the deployed binary, service, config directory, and
+# cache-cleanup timer so they do not persist across future Ansible runs.
+
+- name: Stop and disable gitlab-runner.service if present
+  ansible.builtin.systemd:
+    name: gitlab-runner
+    state: stopped
+    enabled: false
+  failed_when: false
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Stop and disable gitlab-runner-cache-cleanup.timer if present
+  ansible.builtin.systemd:
+    name: gitlab-runner-cache-cleanup.timer
+    state: stopped
+    enabled: false
+  failed_when: false
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Stop and disable gitlab-runner-cache-cleanup.service if present
+  ansible.builtin.systemd:
+    name: gitlab-runner-cache-cleanup
+    state: stopped
+    enabled: false
+  failed_when: false
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Remove gitlab-runner binary
+  ansible.builtin.file:
+    path: /usr/local/bin/gitlab-runner
+    state: absent
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Remove gitlab-runner systemd service unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/gitlab-runner.service
+    state: absent
+  notify: Daemon-reload
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Remove gitlab-runner-cache-cleanup systemd service unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/gitlab-runner-cache-cleanup.service
+    state: absent
+  notify: Daemon-reload
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Remove gitlab-runner-cache-cleanup systemd timer unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/gitlab-runner-cache-cleanup.timer
+    state: absent
+  notify: Daemon-reload
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Remove /etc/gitlab-runner directory
+  ansible.builtin.file:
+    path: /etc/gitlab-runner
+    state: absent
+  tags:
+    - services
+    - gitlab-runner-removal
+
+- name: Remove gitlab-runner-cache-cleanup script
+  ansible.builtin.file:
+    path: /usr/local/bin/gitlab-runner-cache-cleanup.sh
+    state: absent
+  tags:
+    - services
+    - gitlab-runner-removal
+
+# --- etcd backup ---
+
+# OPS-285: Fetch scoped MinIO credentials for etcd-backup from Vault.
+# Vault path: secret/minio/etcd-backup (access_key: etcd-backup-prod, bucket-only policy)
+# These vars are used by etcd-backup.env.j2 and are NOT written to disk directly.
+- name: Fetch etcd-backup MinIO access key from Vault (OPS-285)
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -address=https://vault.208.haist.farm
+      -field=access_key secret/minio/etcd-backup
+  register: vault_etcd_backup_minio_ak_raw
+  changed_when: false
+  no_log: true
+  environment:
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  tags:
+    - services
+    - etcd-backup
+
+- name: Fetch etcd-backup MinIO secret key from Vault (OPS-285)
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -address=https://vault.208.haist.farm
+      -field=secret_key secret/minio/etcd-backup
+  register: vault_etcd_backup_minio_sk_raw
+  changed_when: false
+  no_log: true
+  environment:
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  tags:
+    - services
+    - etcd-backup
+
+- name: Set etcd-backup MinIO credential facts (OPS-285)
+  ansible.builtin.set_fact:
+    vault_etcd_backup_minio_ak: "{{ vault_etcd_backup_minio_ak_raw.stdout }}"
+    vault_etcd_backup_minio_sk: "{{ vault_etcd_backup_minio_sk_raw.stdout }}"
+  no_log: true
+  tags:
+    - services
+    - etcd-backup
+
+- name: Ensure /etc/sentinel directory exists
+  ansible.builtin.file:
+    path: /etc/sentinel
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - services
+    - etcd-backup
+
+- name: Deploy etcd-backup env file with scoped MinIO creds (OPS-285)
+  ansible.builtin.template:
+    src: etcd-backup.env.j2
+    dest: /etc/sentinel/etcd-backup.env
+    owner: root
+    group: ubuntu
+    mode: "0640"
+  no_log: true
+  notify: Restart etcd-backup-timer
+  tags:
+    - services
+    - etcd-backup
+
+- name: Deploy etcd backup script
+  ansible.builtin.template:
+    src: etcd-backup.sh.j2
+    dest: /usr/local/bin/etcd-backup.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - etcd-backup
+
+- name: Deploy etcd backup systemd service
+  ansible.builtin.template:
+    src: etcd-backup.service.j2
+    dest: /etc/systemd/system/etcd-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - etcd-backup
+
+- name: Deploy etcd backup systemd timer
+  ansible.builtin.template:
+    src: etcd-backup.timer.j2
+    dest: /etc/systemd/system/etcd-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart etcd-backup-timer
+  tags:
+    - services
+    - etcd-backup
+
+- name: Enable and start etcd backup timer
+  ansible.builtin.systemd:
+    name: etcd-backup.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - etcd-backup
+
+# --- Sentinel Matrix Bot (replaces grafana-alert-receiver) ---
+
+- name: Stop and disable legacy grafana-alert-receiver if present
+  ansible.builtin.systemd:
+    name: grafana-alert-receiver
+    state: stopped
+    enabled: false
+  failed_when: false
+  tags:
+    - services
+    - matrix-bot
+
+- name: Create Sentinel Matrix bot log file
+  ansible.builtin.file:
+    path: "{{ matrix_bot_log }}"
+    state: touch
+    owner: ubuntu
+    group: ubuntu
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+  tags:
+    - services
+    - matrix-bot
+
+- name: Deploy Sentinel Matrix bot script
+  ansible.builtin.template:
+    src: sentinel-matrix-bot.py.j2
+    dest: /usr/local/bin/sentinel-matrix-bot.py
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart sentinel-matrix-bot
+  tags:
+    - services
+    - matrix-bot
+
+- name: Deploy Sentinel Matrix bot environment file
+  ansible.builtin.template:
+    src: sentinel-matrix-bot.env.j2
+    dest: /etc/sentinel/matrix-bot.env
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart sentinel-matrix-bot
+  tags:
+    - services
+    - matrix-bot
+
+- name: Deploy Sentinel Matrix bot systemd service
+  ansible.builtin.template:
+    src: sentinel-matrix-bot.service.j2
+    dest: /etc/systemd/system/sentinel-matrix-bot.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart sentinel-matrix-bot
+  tags:
+    - services
+    - matrix-bot
+
+- name: Enable and start Sentinel Matrix bot
+  ansible.builtin.systemd:
+    name: sentinel-matrix-bot
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - matrix-bot
+
+# --- qBittorrent socat proxy ---
+
+- name: Deploy qBittorrent proxy systemd service
+  ansible.builtin.template:
+    src: qbit-proxy.service.j2
+    dest: /etc/systemd/system/qbit-proxy.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart qbit-proxy
+  tags:
+    - services
+    - qbit-proxy
+
+- name: Enable and start qBittorrent proxy
+  ansible.builtin.systemd:
+    name: qbit-proxy
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - qbit-proxy
+
+# --- Nginx PXE server ---
+
+- name: Create Nginx PXE directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+  loop: "{{ nginx_pxe_dirs }}"
+  tags:
+    - services
+    - nginx
+    - pxe
+
+- name: Set ignition directory writable by forgejo-runner (CI pipeline writes here)
+  ansible.builtin.file:
+    path: /var/www/html/ignition
+    state: directory
+    owner: forgejo-runner
+    group: www-data
+    mode: "0775"
+  failed_when: false
+  tags:
+    - services
+    - nginx
+    - pxe
+
+- name: Remove default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Restart nginx
+  tags:
+    - services
+    - nginx
+    - pxe
+
+- name: Deploy Nginx PXE config to conf.d
+  ansible.builtin.template:
+    src: nginx-pxe.conf.j2
+    dest: /etc/nginx/conf.d/pxe.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart nginx
+  tags:
+    - services
+    - nginx
+    - pxe
+
+- name: Enable and start Nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: started
+    enabled: true
+  tags:
+    - services
+    - nginx
+
+# --- Proxmox snapshot automation ---
+# Token secret stored in Vault at secret/proxmox (field: api_token_secret).
+# Retrieve with: vault kv get -field=api_token_secret secret/proxmox
+# Pass at run time via: ansible-playbook ... -e vault_proxmox_snapshot_token_secret=<value>
+# OR use the automatic Vault fetch task below (requires VAULT_ADDR + VAULT_TOKEN env vars
+# set in the CI environment, or run the vault-env.sh helper first).
+
+- name: Fetch Proxmox API token secret from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.command:
+    cmd: vault kv get -field=api_token_secret secret/proxmox
+  environment:
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.208.haist.farm', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_proxmox_token_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: vault_proxmox_snapshot_token_secret == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - services
+    - proxmox-snapshot
+
+- name: Set Proxmox API token secret from Vault lookup result
+  ansible.builtin.set_fact:
+    vault_proxmox_snapshot_token_secret: "{{ _vault_proxmox_token_result.stdout | trim }}"
+  when:
+    - vault_proxmox_snapshot_token_secret == 'CHANGE_ME'
+    - _vault_proxmox_token_result is defined
+    - _vault_proxmox_token_result.rc | default(1) == 0
+    - _vault_proxmox_token_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - services
+    - proxmox-snapshot
+
+- name: Fail if Proxmox API token secret is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      vault_proxmox_snapshot_token_secret is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e vault_proxmox_snapshot_token_secret=<value>.
+      Retrieve with: VAULT_ADDR=https://vault.208.haist.farm
+      vault kv get -field=api_token_secret secret/proxmox
+  when:
+    - vault_proxmox_snapshot_token_secret == 'CHANGE_ME'
+  tags:
+    - services
+    - proxmox-snapshot
+
+- name: Deploy Proxmox snapshot script
+  ansible.builtin.template:
+    src: proxmox-snapshot.sh.j2
+    dest: /usr/local/bin/proxmox-snapshot.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - proxmox-snapshot
+
+- name: Deploy Proxmox snapshot systemd service
+  ansible.builtin.template:
+    src: proxmox-snapshot.service.j2
+    dest: /etc/systemd/system/proxmox-snapshot.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - proxmox-snapshot
+
+- name: Deploy Proxmox snapshot systemd timer
+  ansible.builtin.template:
+    src: proxmox-snapshot.timer.j2
+    dest: /etc/systemd/system/proxmox-snapshot.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart proxmox-snapshot-timer
+  tags:
+    - services
+    - proxmox-snapshot
+
+- name: Enable and start Proxmox snapshot timer
+  ansible.builtin.systemd:
+    name: proxmox-snapshot.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - proxmox-snapshot
+
+# --- iDRAC Redfish monitoring and recovery ---
+
+- name: Create iDRAC log directory
+  ansible.builtin.file:
+    path: /var/log/sentinel/idrac
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - idrac
+
+- name: Create iDRAC watchdog state directory
+  ansible.builtin.file:
+    path: /var/run/idrac-watchdog
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC credentials env file
+  ansible.builtin.template:
+    src: idrac-recovery.env.j2
+    dest: /etc/idrac-recovery.env
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC node recovery script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/idrac-node-recovery.sh"
+    dest: /usr/local/bin/idrac-node-recovery.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC health check script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/idrac-health-check.sh"
+    dest: /usr/local/bin/idrac-health-check.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC watchdog script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/idrac-watchdog.sh"
+    dest: /usr/local/bin/idrac-watchdog.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC health check systemd service
+  ansible.builtin.template:
+    src: idrac-health.service.j2
+    dest: /etc/systemd/system/idrac-health.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC health check systemd timer
+  ansible.builtin.template:
+    src: idrac-health.timer.j2
+    dest: /etc/systemd/system/idrac-health.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart idrac-health-timer
+  tags:
+    - services
+    - idrac
+
+- name: Enable and start iDRAC health check timer
+  ansible.builtin.systemd:
+    name: idrac-health.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC watchdog systemd service
+  ansible.builtin.template:
+    src: idrac-watchdog.service.j2
+    dest: /etc/systemd/system/idrac-watchdog.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - idrac
+
+- name: Deploy iDRAC watchdog systemd timer
+  ansible.builtin.template:
+    src: idrac-watchdog.timer.j2
+    dest: /etc/systemd/system/idrac-watchdog.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart idrac-watchdog-timer
+  tags:
+    - services
+    - idrac
+
+- name: Enable and start iDRAC watchdog timer
+  ansible.builtin.systemd:
+    name: idrac-watchdog.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - idrac
+
+# --- SSH certificate auto-renewal ---
+
+- name: Deploy SSH cert renewal systemd service
+  ansible.builtin.template:
+    src: ssh-cert-renewal.service.j2
+    dest: /etc/systemd/system/ssh-cert-renewal.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - ssh-cert
+
+- name: Deploy SSH cert renewal systemd timer
+  ansible.builtin.template:
+    src: ssh-cert-renewal.timer.j2
+    dest: /etc/systemd/system/ssh-cert-renewal.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart ssh-cert-renewal-timer
+  tags:
+    - services
+    - ssh-cert
+
+- name: Enable and start SSH cert renewal timer
+  ansible.builtin.systemd:
+    name: ssh-cert-renewal.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - ssh-cert
+
+# --- Compliance environment ---
+# VAULT_TOKEN for compliance.env is fetched from Vault at run time.
+# Requires: VAULT_ADDR + VAULT_TOKEN set in CI env (or run vault-env.sh first).
+# Vault path: secret/compliance  field: vault_token
+# Create with: vault kv put secret/compliance vault_token=<periodic-token>
+# Token policy must allow: read secret/data/defectdojo and other paths the
+# compliance check script reads. Minimum TTL 30d; renewable.
+# See also: ansible/roles/iac-control/tasks/services.yml proxmox-snapshot block
+# for the same pattern.
+
+- name: Create sentinel config directory
+  ansible.builtin.file:
+    path: /etc/sentinel
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - compliance
+
+# OPS-737: nist-compliance-check.service runs as User=ubuntu and writes daily JSON
+# reports to /var/log/sentinel/. The directory must be ubuntu-owned so the service
+# can create new date-stamped files. /etc/sentinel/compliance.env stays root:root 0600;
+# systemd reads EnvironmentFile= as root before privilege drop — no mode change needed there.
+- name: Create sentinel compliance log directory (ubuntu-writable for daily JSON reports)
+  ansible.builtin.file:
+    path: /var/log/sentinel
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+  tags:
+    - services
+    - compliance
+
+- name: Fetch compliance VAULT_TOKEN from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.command:
+    cmd: vault kv get -field=vault_token secret/compliance
+  environment:
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.208.haist.farm', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_compliance_token_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: vault_compliance_token == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - services
+    - compliance
+
+- name: Set compliance VAULT_TOKEN from Vault lookup result
+  ansible.builtin.set_fact:
+    vault_compliance_token: "{{ _vault_compliance_token_result.stdout | trim }}"
+  when:
+    - vault_compliance_token == 'CHANGE_ME'
+    - _vault_compliance_token_result is defined
+    - _vault_compliance_token_result.rc | default(1) == 0
+    - _vault_compliance_token_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - services
+    - compliance
+
+- name: Fail if compliance VAULT_TOKEN is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      vault_compliance_token is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e vault_compliance_token=<value>.
+      Retrieve with: VAULT_ADDR=https://vault.208.haist.farm
+      vault kv get -field=vault_token secret/compliance
+  when:
+    - vault_compliance_token == 'CHANGE_ME'
+  tags:
+    - services
+    - compliance
+
+# [COMP-25] Fetch Wazuh API password (wazuh-wui user) from Vault.
+# Vault path: secret/wazuh  field: api_password
+# Used by: compliance_wazuh_pass → WAZUH_PASS in compliance.env
+
+- name: Fetch compliance WAZUH_PASS from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.command:
+    cmd: vault kv get -field=api_password secret/wazuh
+  environment:
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.208.haist.farm', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_wazuh_pass_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: vault_wazuh_api_password == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - services
+    - compliance
+
+- name: Set compliance WAZUH_PASS from Vault lookup result
+  ansible.builtin.set_fact:
+    vault_wazuh_api_password: "{{ _vault_wazuh_pass_result.stdout | trim }}"
+  when:
+    - vault_wazuh_api_password == 'CHANGE_ME'
+    - _vault_wazuh_pass_result is defined
+    - _vault_wazuh_pass_result.rc | default(1) == 0
+    - _vault_wazuh_pass_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - services
+    - compliance
+
+- name: Fail if compliance WAZUH_PASS is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      vault_wazuh_api_password is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e vault_wazuh_api_password=<value>.
+      Retrieve with: VAULT_ADDR=https://vault.208.haist.farm
+      vault kv get -field=api_password secret/wazuh
+  when:
+    - vault_wazuh_api_password == 'CHANGE_ME'
+  tags:
+    - services
+    - compliance
+
+# [COMP-25] Fetch MinIO access key from Vault.
+# Vault path: secret/minio  field: access_key
+# Used by: compliance_minio_ak → MINIO_AK in compliance.env
+
+- name: Fetch compliance MINIO_AK from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.command:
+    cmd: vault kv get -field=access_key secret/minio
+  environment:
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.208.haist.farm', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_minio_ak_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: vault_minio_access_key == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - services
+    - compliance
+
+- name: Set compliance MINIO_AK from Vault lookup result
+  ansible.builtin.set_fact:
+    vault_minio_access_key: "{{ _vault_minio_ak_result.stdout | trim }}"
+  when:
+    - vault_minio_access_key == 'CHANGE_ME'
+    - _vault_minio_ak_result is defined
+    - _vault_minio_ak_result.rc | default(1) == 0
+    - _vault_minio_ak_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - services
+    - compliance
+
+- name: Fail if compliance MINIO_AK is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      vault_minio_access_key is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e vault_minio_access_key=<value>.
+      Retrieve with: VAULT_ADDR=https://vault.208.haist.farm
+      vault kv get -field=access_key secret/minio
+  when:
+    - vault_minio_access_key == 'CHANGE_ME'
+  tags:
+    - services
+    - compliance
+
+# [COMP-25] Fetch MinIO secret key from Vault.
+# Vault path: secret/minio  field: secret_key
+# Used by: compliance_minio_sk → MINIO_SK in compliance.env
+
+- name: Fetch compliance MINIO_SK from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.command:
+    cmd: vault kv get -field=secret_key secret/minio
+  environment:
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.208.haist.farm', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_minio_sk_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: vault_minio_secret_key == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - services
+    - compliance
+
+- name: Set compliance MINIO_SK from Vault lookup result
+  ansible.builtin.set_fact:
+    vault_minio_secret_key: "{{ _vault_minio_sk_result.stdout | trim }}"
+  when:
+    - vault_minio_secret_key == 'CHANGE_ME'
+    - _vault_minio_sk_result is defined
+    - _vault_minio_sk_result.rc | default(1) == 0
+    - _vault_minio_sk_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - services
+    - compliance
+
+- name: Fail if compliance MINIO_SK is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      vault_minio_secret_key is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e vault_minio_secret_key=<value>.
+      Retrieve with: VAULT_ADDR=https://vault.208.haist.farm
+      vault kv get -field=secret_key secret/minio
+  when:
+    - vault_minio_secret_key == 'CHANGE_ME'
+  tags:
+    - services
+    - compliance
+
+- name: Deploy compliance environment file
+  ansible.builtin.template:
+    src: compliance.env.j2
+    dest: /etc/sentinel/compliance.env
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - services
+    - compliance
+
+# --- OpenTofu drift detection ---
+
+- name: Deploy OpenTofu drift check script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/tofu-drift-check.sh"
+    dest: /usr/local/bin/tofu-drift-check.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - tofu-drift
+
+- name: Deploy OpenTofu drift check systemd service
+  ansible.builtin.copy:
+    src: tofu-drift-check.service
+    dest: /etc/systemd/system/tofu-drift-check.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - tofu-drift
+
+- name: Deploy OpenTofu drift check systemd timer
+  ansible.builtin.copy:
+    src: tofu-drift-check.timer
+    dest: /etc/systemd/system/tofu-drift-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+  tags:
+    - services
+    - tofu-drift
+
+- name: Enable and start OpenTofu drift check timer
+  ansible.builtin.systemd:
+    name: tofu-drift-check.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - tofu-drift
+
+# --- Wazuh agent tuning ---
+
+- name: Deploy Wazuh agent local_internal_options to increase event buffer
+  ansible.builtin.copy:
+    content: |
+      # Increased buffer to prevent event queue overflow (L9 alerts during compliance runs)
+      agent.buffer_size=20000
+      agent.events_per_second=1000
+    dest: /var/ossec/etc/local_internal_options.conf
+    owner: root
+    group: wazuh
+    mode: "0640"
+  notify: Restart wazuh-agent
+  tags:
+    - services
+    - wazuh
+
+# --- mirror-registry dnsmasq split-horizon + DHCP reservation — OPS-148 (2026-04-28) ---
+# Resolves mirror.208.haist.farm to 10.0.0.50 (OKD NIC) for cluster-internal clients.
+# Workstation/mgmt resolution via UniFi stays at 192.168.12.215.
+# Also pins 10.0.0.50 to mirror-registry MAC to prevent DHCP pool conflict.
+
+- name: Deploy mirror-registry dnsmasq override (split-horizon + DHCP reservation)
+  ansible.builtin.copy:
+    src: mirror-registry.conf
+    dest: /etc/dnsmasq.d/mirror-registry.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+  tags:
+    - services
+    - dnsmasq
+    - mirror-registry
+
+# --- rsyslog dnsmasq filter ---
+
+- name: Deploy rsyslog dnsmasq query filter
+  ansible.builtin.template:
+    src: rsyslog-dnsmasq-filter.conf.j2
+    dest: /etc/rsyslog.d/10-dnsmasq-filter.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart rsyslog
+  tags:
+    - services
+    - dnsmasq
+
+# --- Sentinel Prometheus ---
+# Standalone Prometheus instance for scraping UniFi, Traefik, Vault, Wazuh metrics.
+# Grafana in OKD uses this as a secondary datasource (http://192.168.12.210:9099).
+
+- name: Download Prometheus {{ prometheus_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+    dest: /tmp/prometheus-{{ prometheus_version }}.tar.gz
+    mode: "0644"
+  tags:
+    - services
+    - prometheus
+
+- name: Extract Prometheus binary
+  ansible.builtin.unarchive:
+    src: /tmp/prometheus-{{ prometheus_version }}.tar.gz
+    dest: /tmp/
+    remote_src: true
+    creates: /tmp/prometheus-{{ prometheus_version }}.linux-amd64/prometheus
+  tags:
+    - services
+    - prometheus
+
+- name: Install Prometheus binary
+  ansible.builtin.copy:
+    src: /tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}
+    dest: /usr/local/bin/{{ item }}
+    mode: "0755"
+    remote_src: true
+  loop:
+    - prometheus
+    - promtool
+  notify:
+    - Restart sentinel-prometheus
+  tags:
+    - services
+    - prometheus
+
+- name: Create Prometheus directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: "0755"
+  loop:
+    - /etc/prometheus
+    - /opt/prometheus-unifi
+    - "{{ prometheus_data_dir }}"
+  tags:
+    - services
+    - prometheus
+
+- name: Deploy Prometheus config
+  ansible.builtin.template:
+    src: sentinel-prometheus.yml.j2
+    dest: /opt/prometheus-unifi/prometheus.yml
+    owner: ubuntu
+    group: ubuntu
+    mode: "0644"
+  notify:
+    - Restart sentinel-prometheus
+  tags:
+    - services
+    - prometheus
+
+- name: Create Prometheus config symlink
+  ansible.builtin.file:
+    src: /opt/prometheus-unifi/prometheus.yml
+    dest: /etc/prometheus/prometheus.yml
+    state: link
+    force: true
+  tags:
+    - services
+    - prometheus
+
+- name: Deploy sentinel-prometheus.service
+  ansible.builtin.template:
+    src: sentinel-prometheus.service.j2
+    dest: /etc/systemd/system/sentinel-prometheus.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart sentinel-prometheus
+  tags:
+    - services
+    - prometheus
+
+- name: Enable and start sentinel-prometheus
+  ansible.builtin.systemd:
+    name: sentinel-prometheus
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - prometheus
+
+- name: Clean up Prometheus tarball
+  ansible.builtin.file:
+    path: /tmp/prometheus-{{ prometheus_version }}.tar.gz
+    state: absent
+  tags:
+    - services
+    - prometheus
+
+# --- UniFi monitoring stack (collector + exporter) ---
+# Collector runs every 5 minutes via systemd timer, writes JSON snapshot.
+# Exporter is a long-running HTTP server exposing Prometheus metrics at :9120.
+
+- name: Clone sentinel-unifi repository
+  ansible.builtin.git:
+    repo: "{{ unifi_gitlab_repo }}"
+    dest: "{{ unifi_repo_dir }}"
+    version: main
+    update: true
+    force: true  # OPS-244: reset local drift; IaC state is authoritative
+  become: true
+  become_user: ubuntu
+  tags:
+    - services
+    - unifi
+
+- name: Create UniFi collector log directory
+  ansible.builtin.file:
+    path: /var/log/sentinel/unifi
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+  tags:
+    - services
+    - unifi
+
+# --- [OPS-169] vault-agent AppRole credential for unifi-collector ---
+# Replaces the OPS-167 static 32-day periodic token with AppRole auto-auth.
+# vault-agent-unifi-collector.service authenticates via AppRole and writes a
+# short-lived renewable token to /run/sentinel-unifi/.vault-token.
+# unifi-collector.service reads VAULT_TOKEN from that path at each invocation.
+#
+# AppRole provisioning + vault-agent deploy are handled by the included task file.
+# The static vault-token.env file is now reduced to VAULT_ADDR + VAULT_SKIP_VERIFY only.
+
+- name: Create /etc/sentinel-unifi config directory
+  ansible.builtin.file:
+    path: /etc/sentinel-unifi
+    state: directory
+    owner: root
+    group: ubuntu
+    mode: "0750"
+  tags:
+    - services
+    - unifi
+
+- name: Deploy unifi-collector Vault address env file (VAULT_ADDR + VAULT_SKIP_VERIFY only)
+  # [OPS-169] VAULT_TOKEN removed — now provided at runtime by vault-agent token sink.
+  ansible.builtin.template:
+    src: unifi-vault-token.env.j2
+    dest: /etc/sentinel-unifi/vault-token.env
+    owner: root
+    group: ubuntu
+    mode: "0640"
+  notify: Daemon-reload
+  tags:
+    - services
+    - unifi
+
+- name: Include unifi-collector AppRole provisioning and vault-agent deploy (OPS-169)
+  ansible.builtin.include_tasks: unifi-collector-approle.yml
+  tags:
+    - services
+    - unifi
+    - unifi-approle
+
+- name: Deploy unifi-exporter.service
+  ansible.builtin.template:
+    src: unifi-exporter.service.j2
+    dest: /etc/systemd/system/unifi-exporter.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart unifi-exporter
+  tags:
+    - services
+    - unifi
+
+- name: Deploy unifi-collector.service
+  ansible.builtin.template:
+    src: unifi-collector.service.j2
+    dest: /etc/systemd/system/unifi-collector.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - unifi
+
+- name: Deploy unifi-collector.timer
+  ansible.builtin.template:
+    src: unifi-collector.timer.j2
+    dest: /etc/systemd/system/unifi-collector.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart unifi-collector-timer
+  tags:
+    - services
+    - unifi
+
+# [OPS-167] Remove pre-Vault plaintext credential file.
+# /etc/sentinel/unifi.env (born 2026-02-10) stored UNIFI_API_KEY in plaintext under the
+# old from_env() approach. It is NOT referenced by any systemd unit, crontab, or running
+# process as of OPS-167 audit (2026-04-28). The key is preserved in Vault at secret/data/unifi.
+# Gate 10 acceptance criterion: `grep -rE "YrF1" /etc /home/ubuntu/sentinel-unifi` must return empty.
+- name: Remove pre-Vault plaintext UniFi credential file (OPS-167 gate 10 cleanup)
+  ansible.builtin.file:
+    path: /etc/sentinel/unifi.env
+    state: absent
+  tags:
+    - services
+    - unifi
+
+- name: Enable and start unifi-exporter
+  ansible.builtin.systemd:
+    name: unifi-exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - unifi
+
+- name: Enable and start unifi-collector timer
+  ansible.builtin.systemd:
+    name: unifi-collector.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - unifi
+
+# --- Forgejo Runner ---
+# OPS-319: binary now version-controlled via Ansible (was manually installed 2026-03-07).
+# All forgejo-runner tasks moved to tasks/forgejo-runner.yml (included from tasks/main.yml
+# with --tags forgejo-runner). See defaults/main.yml for forgejo_runner_version + sha256.
+
+# --- Wazuh Metrics Relay ---
+# Socat relay that forwards Wazuh vulnerability metrics from wazuh-server (192.168.12.100:9101)
+# to local port 9101 so the Docker-internal Prometheus can scrape it.
+
+- name: Deploy wazuh-metrics-relay systemd service
+  ansible.builtin.copy:
+    src: wazuh-metrics-relay.service
+    dest: /etc/systemd/system/wazuh-metrics-relay.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart wazuh-metrics-relay
+  tags:
+    - services
+    - wazuh-metrics-relay
+
+- name: Enable and start wazuh-metrics-relay
+  ansible.builtin.systemd:
+    name: wazuh-metrics-relay
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - wazuh-metrics-relay
+
+# --- Docker group membership ---
+
+- name: Add users to docker group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+  when: docker_users | length > 0
+  tags:
+    - services
+    - docker

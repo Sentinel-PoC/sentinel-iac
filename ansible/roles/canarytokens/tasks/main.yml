@@ -1,0 +1,241 @@
+---
+# Canarytokens self-hosted deployment
+# OPS-572 — Plan G'/02 passive-beacon deception layer
+#
+# HARD LIMITS (do not remove this block):
+#   - NO reverse-shell payloads
+#   - NO hack-back
+#   - NO active C2 into attacker systems
+#   - Passive beacon (outbound report) ONLY — CFAA hard-edge
+#
+# Deploy sequence:
+#   1. Prerequisites (git, python3 for webhook receiver)
+#   2. Directory layout
+#   3. Clone upstream thinkst/canarytokens-docker (main branch)
+#   4. Create data/ and uploads/ dirs inside clone (required by volume mounts)
+#   5. Generate per-service env files (frontend.env, switchboard.env, certbot.env)
+#      into the cloned src dir — matching upstream's expected file locations
+#   6. Write docker-compose.yml (REPLACES upstream file) — standalone, no extends:,
+#      with restricted port bindings. See templates/docker-compose.yml.j2 for rationale.
+#   7. Deploy webhook receiver (logs trips as JSON for Wazuh)
+#   8. Pull images + start services via compose (--no-build: pre-built images only)
+#   9. Deploy Wazuh localfile stanza + decoder + rules
+#  10. Health check
+
+- name: Install prerequisites
+  ansible.builtin.apt:
+    name:
+      - git
+      - python3
+      - python3-flask
+      - python3-requests
+      - curl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags: [canarytokens, packages]
+
+- name: Create canarytokens directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ canarytokens_dir }}"
+    - "{{ canarytokens_data_dir }}"
+    - "{{ canarytokens_log_dir }}"
+  tags: [canarytokens, dirs]
+
+# Clone the upstream repo to get nginx config, canarytokens source tree, etc.
+# Only tag in the repo is v1.5; clone main branch for latest stable.
+# We REPLACE docker-compose.yml (step 6) rather than using it directly — see template.
+- name: Clone thinkst/canarytokens-docker
+  ansible.builtin.git:
+    repo: "https://github.com/thinkst/canarytokens-docker.git"
+    dest: "{{ canarytokens_dir }}/src"
+    version: "main"
+    force: false
+    depth: 1
+  tags: [canarytokens, clone]
+
+# Create data/ and uploads/ dirs inside the clone.
+# These are required by compose volume mounts (./data, ./uploads) relative to src/.
+- name: Create required directories inside clone
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ canarytokens_dir }}/src/data"
+    - "{{ canarytokens_dir }}/src/uploads"
+  tags: [canarytokens, dirs]
+
+# Generate per-service env files into the src dir where upstream compose expects them.
+# Env var prefix is CANARY_* — verified against frontend.env.dist and switchboard.env.dist.
+- name: Deploy frontend.env
+  ansible.builtin.template:
+    src: frontend.env.j2
+    dest: "{{ canarytokens_dir }}/src/frontend.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart canarytokens
+  tags: [canarytokens, config]
+
+- name: Deploy switchboard.env
+  ansible.builtin.template:
+    src: switchboard.env.j2
+    dest: "{{ canarytokens_dir }}/src/switchboard.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart canarytokens
+  tags: [canarytokens, config]
+
+- name: Deploy certbot.env
+  ansible.builtin.template:
+    src: certbot.env.j2
+    dest: "{{ canarytokens_dir }}/src/certbot.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart canarytokens
+  tags: [canarytokens, config]
+
+# Deploy standalone docker-compose.yml — REPLACES the upstream file.
+# Rationale: Docker Compose override `ports:` are ADDITIVE (not replacive). An override
+# would ADD our restricted bindings on top of upstream's 0.0.0.0 bindings (ports 25,
+# 3306, 53, 6443, 51820 from switchboard_common). Replacing gives full port control.
+# Service structure, volumes, and commands are taken verbatim from upstream common-services.yml.
+# Only differences: no build: directive, pinned image tags, restricted port bindings.
+- name: Deploy docker-compose.yml (standalone — replaces upstream)
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ canarytokens_dir }}/src/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Restart canarytokens
+  tags: [canarytokens, config]
+
+- name: Deploy webhook receiver script
+  ansible.builtin.template:
+    src: webhook-receiver.py.j2
+    dest: "{{ canarytokens_dir }}/webhook-receiver.py"
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Restart webhook receiver
+  tags: [canarytokens, webhook]
+
+- name: Deploy webhook systemd unit
+  ansible.builtin.template:
+    src: canarytokens-webhook.service.j2
+    dest: /etc/systemd/system/canarytokens-webhook.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart webhook receiver
+  tags: [canarytokens, webhook, systemd]
+
+- name: Enable and start webhook receiver
+  ansible.builtin.systemd:
+    name: canarytokens-webhook
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [canarytokens, webhook]
+
+- name: Create alert log file with correct permissions
+  ansible.builtin.file:
+    path: "{{ canarytokens_alert_log }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+  tags: [canarytokens, log]
+
+# Pull pre-built images from Docker Hub (thinkst/canarytokens + thinkst/canarytokens_nginx)
+- name: Pull canarytokens Docker images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ canarytokens_dir }}/src"
+  register: canarytokens_pull_result
+  changed_when: "'Pull complete' in canarytokens_pull_result.stdout or 'Downloaded' in canarytokens_pull_result.stdout"
+  tags: [canarytokens, images]
+
+- name: Start canarytokens services
+  ansible.builtin.command:
+    # --no-build: images pulled in previous task; no build context present in our compose.
+    cmd: docker compose up -d --no-build
+    chdir: "{{ canarytokens_dir }}/src"
+  register: canarytokens_compose_result
+  changed_when: >
+    'Started' in canarytokens_compose_result.stderr or
+    'Creating' in canarytokens_compose_result.stderr or
+    'Recreating' in canarytokens_compose_result.stderr
+  tags: [canarytokens, start]
+
+# Wazuh integration — only on Debian-family hosts (iac-control is Ubuntu)
+- name: Deploy Wazuh localfile stanza for canary alerts
+  ansible.builtin.template:
+    src: wazuh-localfile.xml.j2
+    dest: /var/ossec/etc/ossec.conf.d/canarytokens-localfile.xml
+    owner: root
+    group: wazuh
+    mode: "0640"
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [canarytokens, wazuh]
+
+- name: Deploy Wazuh custom decoder for canary alerts
+  ansible.builtin.copy:
+    src: wazuh-decoder-canarytokens.xml
+    dest: /var/ossec/etc/decoders/canarytokens.xml
+    owner: root
+    group: wazuh
+    mode: "0640"
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [canarytokens, wazuh]
+
+- name: Deploy Wazuh custom rule for canary alerts
+  ansible.builtin.copy:
+    src: wazuh-rule-canarytokens.xml
+    dest: /var/ossec/etc/rules/canarytokens.xml
+    owner: root
+    group: wazuh
+    mode: "0640"
+  when: ansible_facts['os_family'] == 'Debian'
+  tags: [canarytokens, wazuh]
+
+# Health check: nginx serves HTTP on LAN IP ({{ CANARY_PUBLIC_IP }}:{{ canarytokens_nginx_http_port }})
+- name: Wait for canarytokens nginx to be healthy
+  ansible.builtin.uri:
+    url: "http://{{ CANARY_PUBLIC_IP }}:{{ canarytokens_nginx_http_port }}/"
+    method: GET
+    status_code: [200, 301, 302, 404]
+    timeout: 10
+  register: canarytokens_health
+  retries: 12
+  delay: 10
+  until: canarytokens_health.status in [200, 301, 302, 404]
+  when: not ansible_check_mode
+  tags: [canarytokens, verify]
+
+- name: Print post-deploy reminder
+  ansible.builtin.debug:
+    msg: >
+      Canarytokens deployed. Next steps:
+      1. Create Keycloak client '{{ canarytokens_keycloak_client_id }}' in sentinel realm
+      2. Add Pangolin route canarytokens.208.haist.farm → 192.168.12.210:{{ canarytokens_nginx_http_port }}
+         with Keycloak ForwardAuth
+      3. Store secrets in Vault at {{ canarytokens_vault_path }}
+         (wg_private_key_seed is required for switchboard; generate one-time)
+      4. Generate initial token set per compliance-vault/runbooks/canarytoken-plant-strategy.md
+      5. Encrypt and commit sentinel-cache/canarytoken-inventory.md.gpg after planting
+  tags: [canarytokens, verify]

@@ -1,0 +1,18 @@
+---
+# vault-k8s-cert-manager defaults
+# Tracking: OPS-1202
+
+# Vault address — override with direct IP for token-auth if FQDN routes
+# through Pangolin SSO (which returns 403 on token auth).
+# Production default: FQDN with valid TLS cert (OPS-854).
+vault_addr: "https://vault.208.haist.farm"
+
+# Vault Kubernetes auth mount path
+vault_k8s_mount_path: "kubernetes"
+
+# cert-manager k8s auth role settings
+vault_cert_manager_k8s_role: "cert-manager"
+vault_cert_manager_sa_name: "cert-manager"
+vault_cert_manager_namespace: "cert-manager"
+vault_cert_manager_policy: "cert-manager"
+vault_cert_manager_token_ttl: "1h"

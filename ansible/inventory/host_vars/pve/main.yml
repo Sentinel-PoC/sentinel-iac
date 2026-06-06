@@ -1,0 +1,4 @@
+---
+# pve (192.168.12.6) — R440, uplink ens3f0 (10GbE DAC to USW Pro 48 port 52)
+# OPS-1125 Phase 2a: VLAN 30 storage bridge
+pve_vlan30_storage_cfg: vlan30-storage-pve.cfg

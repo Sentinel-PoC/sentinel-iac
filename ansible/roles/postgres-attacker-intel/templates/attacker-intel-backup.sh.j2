@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# [OPS-566] Attacker Intelligence DB — nightly backup to S3
+# Dumps attacker_intel database via pg_dump inside the container,
+# uploads to MinIO ({{ attacker_db_s3_endpoint }}) bucket {{ attacker_db_s3_bucket }}.
+# Separate-hardware target: MinIO @ 192.168.12.58 vs PostgreSQL host @ {{ inventory_hostname }}.
+# Uses mc (MinIO client, /usr/local/bin/mc) configured with alias attacker-intel-s3.
+
+set -euo pipefail
+
+BACKUP_DIR="{{ attacker_db_backup_dir }}"
+DB_NAME="{{ attacker_db_name }}"
+CONTAINER="{{ attacker_db_container_name }}"
+DB_USER="{{ attacker_db_superuser }}"
+S3_BUCKET="{{ attacker_db_s3_bucket }}"
+RETENTION_DAYS="{{ attacker_db_backup_retention_days }}"
+MC="/usr/local/bin/mc"
+
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+DUMP_FILE="${BACKUP_DIR}/${DB_NAME}_${TIMESTAMP}.sql.gz"
+
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Starting backup of ${DB_NAME}"
+
+# Ensure backup directory exists
+mkdir -p "${BACKUP_DIR}"
+
+# pg_dump via docker exec (no psycopg2 or host-side psql needed)
+docker exec "${CONTAINER}" \
+  pg_dump -U "${DB_USER}" -d "${DB_NAME}" --no-password \
+  | gzip > "${DUMP_FILE}"
+
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Dump written: ${DUMP_FILE} ($(du -sh "${DUMP_FILE}" | cut -f1))"
+
+# Upload to MinIO S3 via mc (alias attacker-intel-s3 configured by Ansible role)
+"${MC}" cp "${DUMP_FILE}" \
+  "attacker-intel-s3/${S3_BUCKET}/${DB_NAME}_${TIMESTAMP}.sql.gz" \
+  --insecure
+
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Upload complete: attacker-intel-s3/${S3_BUCKET}/${DB_NAME}_${TIMESTAMP}.sql.gz"
+
+# Local retention cleanup
+find "${BACKUP_DIR}" -name "${DB_NAME}_*.sql.gz" \
+  -mtime "+${RETENTION_DAYS}" -delete && \
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Local cleanup: removed files older than ${RETENTION_DAYS} days"
+
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Backup complete"

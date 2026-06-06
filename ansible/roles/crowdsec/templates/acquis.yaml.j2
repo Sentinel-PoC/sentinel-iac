@@ -1,0 +1,10 @@
+---
+filenames:
+  - {{ crowdsec_traefik_log_path }}
+labels:
+  type: traefik
+---
+filenames:
+  - {{ crowdsec_auth_log_path }}
+labels:
+  type: syslog

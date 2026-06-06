@@ -1,0 +1,28 @@
+---
+# OPS-593: Path to the Vault SSH CA public key on the Ansible controller.
+# Default resolves relative to the playbook directory:
+#   ansible/playbooks/ -> ../../infrastructure/vault-dr/ssh-ca-public-key.pub
+# Override per host_vars if the CA key lives elsewhere.
+jit_ssh_trust_ca_pubkey_src: "{{ playbook_dir }}/../../infrastructure/vault-dr/ssh-ca-public-key.pub"
+
+# OPS-593 amendment: per-user principal name map for AuthorizedPrincipalsFile.
+# Keys are local usernames; values are the Vault SSH CA principals that may
+# authenticate as that user. Matches the sshd_auth_principals pattern used in
+# the common role (roles/common/defaults/main.yml).
+#
+# AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u is required because:
+#  - OpenSSH rejects certs with no principals when TrustedUserCAKeys is set
+#    ("certificates that lack a list of principals will not be permitted")
+#  - Without the principals file, any cert with principal==username works, but
+#    this is less auditable and less flexible than explicit per-user mapping
+#  - pve4-alienware diagnostic: AuthorizedPrincipalsFile was missing entirely,
+#    blocking cert auth even when the CA key was correctly deployed
+jit_ssh_trust_principals:
+  koiakoia:
+    - koiakoia
+  root:
+    - root
+  ubuntu:
+    - ubuntu
+  rocky:
+    - rocky

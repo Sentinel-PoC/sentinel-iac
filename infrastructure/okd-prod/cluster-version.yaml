@@ -1,0 +1,29 @@
+---
+# OKD production cluster — desired version declaration.
+#
+# Editing this file IS the operator-approved change request for an OKD
+# upgrade (NIST CM-3 / CM-3(4)). Push to `main` triggers
+# `.forgejo/workflows/okd-upgrade-prod.yaml`.
+#
+# Pin the FULL release-image digest, not just a version tag — this makes the
+# upgrade reproducible and immune to release-channel drift mid-upgrade.
+#
+# Resolve the digest with:
+#   curl -sk "https://amd64.origin.releases.ci.openshift.org/graph?channel=stable-scos-4.20" \
+#     | jq -r '.nodes[] | select(.version=="4.20.0-okd-scos.9") | .payload'
+
+apiVersion: overwatch.haist.farm/v1
+kind: ClusterVersionTarget
+metadata:
+  name: okd-prod
+spec:
+  # Production upgrade target — 2026-05-13:
+  # Current cluster version: 4.19.0-okd-scos.19 (stable 108 days)
+  # Target: 4.20.0-okd-scos.9 — latest stable in stable-scos-4.20 channel
+  # Why this target:
+  #   - OKD 4.20 GA-promotes ClusterImagePolicy CRD (was TechPreviewNoUpgrade on 4.19);
+  #     unblocks OPS-149 + OPS-156 (image-signature verification at admission, NIST SC-12).
+  #   - 4.21-scos is still ec.X / engineering candidate as of digest resolution.
+  desiredVersion: "4.20.0-okd-scos.9"
+  desiredImage: "registry.ci.openshift.org/origin/release-scos@sha256:2237a02fc4d1554e655d3f4f7dd12c56109675dcf0c1189ef937941f8876257f"
+  channel: "stable-scos-4.20"

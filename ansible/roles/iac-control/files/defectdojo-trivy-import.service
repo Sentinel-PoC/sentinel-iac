@@ -1,0 +1,18 @@
+[Unit]
+Description=DefectDojo — push latest Trivy IaC scan to DefectDojo (SEC-50 Phase 1)
+After=network-online.target evidence-pipeline.service
+# Don't fight evidence-pipeline if it's still running this morning's collection
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/defectdojo-trivy-import.py
+StandardOutput=journal
+StandardError=journal
+# Best-effort. Failure logged to journal, doesn't cascade.
+SuccessExitStatus=0
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

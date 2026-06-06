@@ -1,0 +1,49 @@
+---
+# MISP playbook — OPS-571
+# Deploys MISP threat intelligence platform (Docker Compose + PostgreSQL)
+# with Keycloak OIDC SSO, 5 threat intel feeds, and Wazuh integration.
+#
+# Pre-requisites (operator actions before running):
+#   1. Provision misp-server VM/LXC (recommend: 4 vCPU / 8 GB RAM / 100 GB disk)
+#      and add to inventory [misp] group with:
+#        misp-server ansible_host=192.168.12.XXX ansible_user=ubuntu firewall_allowed_ports='[22,8080]'
+#   2. Initialize Vault secrets:
+#        vault kv put secret/misp \
+#          db_password="$(openssl rand -base64 24)" \
+#          admin_password="$(openssl rand -base64 24)" \
+#          admin_key="$(python3 -c 'import uuid; print(str(uuid.uuid4()))')" \
+#          oidc_client_secret="<from Keycloak MISP client>" \
+#          redis_password="" \
+#          greynoise_api_key="<GreyNoise Community API key>" \
+#          abuseipdb_api_key="<AbuseIPDB v2 API key>"
+#   3. Create "misp" OIDC client in Keycloak sentinel realm:
+#        - standardFlowEnabled: true
+#        - redirectUris: ["https://misp.208.haist.farm/*"]
+#        - webOrigins: ["https://misp.208.haist.farm"]
+#        - Mappers: add "misp_roles" groups claim (Group Membership type)
+#   4. Add Pangolin route for misp.208.haist.farm → localhost:8080 on misp-server
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.ini playbooks/misp.yml \
+#     -e vault_token=<scoped-vault-token>
+#
+# Tags available:
+#   misp          — all tasks
+#   vault         — Vault secret fetch only
+#   deploy        — Docker Compose stack only
+#   configure     — post-deploy MISP API config
+#   feeds         — feed configuration only
+#   wazuh         — Wazuh integration only
+#   verify        — verification checks only
+
+- name: Deploy MISP threat intelligence platform
+  hosts: misp
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: docker-host
+      tags: [docker]
+
+    - role: misp
+      tags: [misp]

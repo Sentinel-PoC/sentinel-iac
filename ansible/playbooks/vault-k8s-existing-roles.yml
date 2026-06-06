@@ -1,0 +1,37 @@
+---
+# Codify pre-existing Vault Kubernetes auth roles and policies in IaC
+#
+# Idempotently upserts the 3 Vault k8s auth roles + their policies that were
+# originally provisioned out-of-band (no IaC). Discovered by OPS-1202 audit.
+#
+# Roles managed by this playbook:
+#   - etcd-backup     (SA etcd-backup-sa, ns sentinel-ops, policy etcd-backup-policy)
+#   - external-secrets (SAs vault-auth/external-secrets/*, multiple ns, eso-read-secrets)
+#   - sentinel-ops    (SA sentinel-ops-sa, ns sentinel-ops, sentinel-ops-policy)
+#
+# See also: ansible/playbooks/vault-k8s-cert-manager.yml (OPS-1202) — cert-manager
+#           role follows the same pattern but lives in its own playbook.
+#
+# DR recovery note: after a Vault restore, run BOTH this playbook and
+# vault-k8s-cert-manager.yml to restore all 4 k8s auth roles.
+#
+# Runs locally — all work is Vault API calls.
+#
+# Required vars:
+#   vault_token  — Vault token with sys/policies/acl + auth/kubernetes/role write scope
+#
+# Example run:
+#   ansible-playbook ansible/playbooks/vault-k8s-existing-roles.yml \
+#     -e vault_token="$(cat ~/.vault-token)"
+#
+# Idempotent: safe to re-run (all 3 roles already exist — writes identical data back).
+# Tracking: OPS-1206
+
+- name: Codify pre-existing Vault Kubernetes auth roles and policies
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - vault-k8s-existing-roles

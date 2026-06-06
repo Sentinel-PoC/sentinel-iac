@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew id_sentinel SSH cert via Vault ssh/sign/admin
+Documentation=file:///usr/local/bin/jit-ssh-cert-renew
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/usr/local/bin/jit-ssh-cert-renew
+StandardOutput=journal
+StandardError=journal

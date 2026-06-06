@@ -1,0 +1,33 @@
+---
+# RETIRED: Disable dead Keycloak Vault JWT auth backend (OPS-1163 step 2).
+#
+# The Keycloak sentinel realm (auth.208.haist.farm/realms/sentinel) is
+# decommissioned. This playbook now runs the vault-jwt-agents RETIRE tasks
+# which idempotently disable auth/jwt/ (Keycloak) and its 4 agent roles.
+#
+# Runs locally (no SSH dependency) — all work is API calls against Vault.
+#
+# Required vars (pass via -e or environment):
+#   vault_token  — Vault token with sys/auth write scope
+#                  (root token or equivalent)
+#
+# Example run:
+#   ansible-playbook ansible/playbooks/vault-jwt-agents.yml \
+#     -e vault_token="${VAULT_TOKEN}"
+#
+# Idempotent: safe to re-run. If auth/jwt/ is already absent, all tasks
+# after the sys/auth read are skipped (when: gate on mount existence).
+#
+# Tracking: OPS-1163 (retire), originally OPS-345 Phase 3
+
+- name: Retire Keycloak Vault JWT auth backend (OPS-1163)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # hvac (required by community.hashi_vault) lives in /usr/lib/python3.14/site-packages/
+    # on this workstation. Ansible's auto-discovery picks python3.11 which only has hvac
+    # in user site-packages (excluded during module execution). Pin to python3 explicitly.
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - vault-jwt-agents

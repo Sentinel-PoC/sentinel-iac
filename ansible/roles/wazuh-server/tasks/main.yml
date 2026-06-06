@@ -1,0 +1,271 @@
+---
+# OPS-929: Ensure the rootfs LV uses all available VG free space.
+# Root cause: cloud-init runs growpart on /dev/sda3 when Terraform clones from the
+# Packer template (disk_size=20G) at the deployed size (disk_size=50G). cloud-init
+# grows sda3 → ~48G PV but does NOT run lvresize — the LV remains at the Ubuntu
+# installer-provisioned size (~49G, 50% of the final PV). Confirmed on VM 111
+# (192.168.12.100) in OPS-929 (2026-05-25): LV=49G, VFree=49G, rootfs at 75%.
+# Pattern cloned from OPS-928 precedent (commit fe8687c3,
+# ansible/roles/seedbox/tasks/main.yml). See memory entry:
+# feedback_terraform_packer_lv_not_expanded.
+# Idempotent: if VFree < 0.5G (post-expansion), lvresize is skipped.
+- name: Check VG free space (OPS-929 — LV expansion idempotency check)
+  ansible.builtin.shell: >
+    vgs ubuntu-vg --noheadings --nosuffix --units g -o vg_free | tr -d ' '
+  register: _vg_free_gb
+  changed_when: false
+  tags: [wazuh-server]
+
+- name: Expand rootfs LV to fill VG free space (OPS-929 — cloud-init does not resize LV)
+  ansible.builtin.command:
+    cmd: lvresize -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+  when: (_vg_free_gb.stdout | float) > 0.5
+  register: _lv_resize
+  tags: [wazuh-server]
+
+- name: Online-resize ext4 filesystem after LV expansion (OPS-929)
+  ansible.builtin.command:
+    cmd: resize2fs /dev/mapper/ubuntu--vg-ubuntu--lv
+  when: _lv_resize is changed
+  tags: [wazuh-server]
+
+- name: Install dependencies
+  ansible.builtin.apt:
+    name:
+      - gnupg
+      - apt-transport-https
+      - curl
+    state: present
+    update_cache: true
+
+- name: Ensure keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Download Wazuh GPG key
+  ansible.builtin.get_url:
+    url: https://packages.wazuh.com/key/GPG-KEY-WAZUH
+    dest: /etc/apt/keyrings/wazuh.gpg
+    mode: '0644'
+
+- name: Add Wazuh repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main"
+    state: present
+
+- name: Install Wazuh manager
+  ansible.builtin.apt:
+    name: wazuh-manager
+    state: present
+
+- name: Install Wazuh indexer
+  ansible.builtin.apt:
+    name: wazuh-indexer
+    state: present
+
+- name: Install Wazuh dashboard
+  ansible.builtin.apt:
+    name: wazuh-dashboard
+    state: present
+
+- name: Configure Wazuh manager (ossec.conf)
+  ansible.builtin.template:
+    src: ossec-server.conf.j2
+    dest: "{{ wazuh_server_config_path }}"
+    owner: root
+    group: wazuh
+    mode: '0640'
+  notify: Restart wazuh-manager
+
+- name: Deploy local_rules.xml (custom Sentinel noise suppression rules)
+  ansible.builtin.copy:
+    src: local_rules.xml
+    dest: /var/ossec/etc/rules/local_rules.xml
+    owner: wazuh
+    group: wazuh
+    mode: "0660"
+  notify: Restart wazuh-manager
+
+- name: Deploy custom-matrix integration script
+  ansible.builtin.copy:
+    src: custom-matrix
+    dest: /var/ossec/integrations/custom-matrix
+    owner: root
+    group: wazuh
+    mode: "0750"
+  notify: Restart wazuh-manager
+
+- name: Deploy vault-probe-decoders.xml (OPS-144)
+  ansible.builtin.copy:
+    src: vault-probe-decoders.xml
+    dest: /var/ossec/etc/decoders/vault-probe-decoders.xml
+    owner: wazuh
+    group: wazuh
+    mode: "0660"
+  notify: Restart wazuh-manager
+
+- name: Deploy vault_decoder.xml (SEC-54)
+  ansible.builtin.copy:
+    src: vault_decoder.xml
+    dest: /var/ossec/etc/decoders/vault_decoder.xml
+    owner: wazuh
+    group: wazuh
+    mode: "0660"
+  notify: Restart wazuh-manager
+
+- name: Deploy local_unifi_decoders.xml — UDM Pro CEF parser (OPS-544)
+  # UDM Pro firmware 5.1.11+ emits ArcSight CEF (not Suricata eve.json) for
+  # IPS/threat events. Wazuh ships no UniFi-CEF decoder out-of-the-box; this
+  # custom decoder closes the IPS-dashboard gap that OPS-543 surfaced.
+  # Paired with local_unifi_rules.xml below.
+  ansible.builtin.copy:
+    src: local_unifi_decoders.xml
+    dest: /var/ossec/etc/decoders/local_unifi_decoders.xml
+    owner: wazuh
+    group: wazuh
+    mode: "0660"
+  notify: Restart wazuh-manager
+
+- name: Deploy local_unifi_rules.xml — UniFi 110000-series rule namespace (OPS-544)
+  # Rule IDs 110000-110999 chain off the ubiquiti-cef decoder. Separate
+  # namespace from Suricata (86600-86699) because UniFi CEF events are
+  # vendor-classification-based, not per-flow IDS alerts. Verified via
+  # wazuh-logtest against 5 captured event shapes during OPS-544 implementation.
+  ansible.builtin.copy:
+    src: local_unifi_rules.xml
+    dest: /var/ossec/etc/rules/local_unifi_rules.xml
+    owner: wazuh
+    group: wazuh
+    mode: "0660"
+  notify: Restart wazuh-manager
+
+- name: Raise analysisd JSON decoder field limit for verbose sources (OPS-543)
+  # UDM Pro eve.json (Suricata) events overflow the package-default
+  # analysisd.decoder_order_size=256 and are rejected with
+  # "Too many fields for JSON decoder" before any rule match.
+  #
+  # Bound source: src/analysisd/analysisd.c:553 reads this option via
+  #   getDefine_Int("analysisd", "decoder_order_size",
+  #                 MIN_ORDER_SIZE, MAX_DECODER_ORDER_SIZE)
+  # where MAX_DECODER_ORDER_SIZE=1024 (analysisd.h:101) and
+  # MIN_ORDER_SIZE=32 (headers/defs.h:64). Valid range: [32, 1024].
+  # Setting to the source-coded ceiling (1024) is a 4x bump over default.
+  #
+  # local_internal_options.conf is the upgrade-safe override path
+  # (file header self-declares "will not be overwritten during upgrades").
+  ansible.builtin.lineinfile:
+    path: /var/ossec/etc/local_internal_options.conf
+    regexp: '^analysisd\.decoder_order_size='
+    line: 'analysisd.decoder_order_size=1024'
+    owner: root
+    group: wazuh
+    mode: '0640'
+    create: false
+  notify: Restart wazuh-manager
+
+- name: Hold wazuh-indexer package version
+  ansible.builtin.dpkg_selections:
+    name: wazuh-indexer
+    selection: hold
+
+- name: Hold wazuh-dashboard package version
+  ansible.builtin.dpkg_selections:
+    name: wazuh-dashboard
+    selection: hold
+
+- name: Configure wazuh-indexer JVM heap initial size (OPS-985)
+  # jvm.options is a package-installed file not previously managed by IaC.
+  # lineinfile replaces only the -Xms line; all other tuning options untouched.
+  # Requires wazuh-indexer restart (handled by handler below).
+  ansible.builtin.lineinfile:
+    path: /etc/wazuh-indexer/jvm.options
+    regexp: '^-Xms'
+    line: "-Xms{{ wazuh_indexer_jvm_heap_size }}"
+  notify: Restart wazuh-indexer
+
+- name: Configure wazuh-indexer JVM heap maximum size (OPS-985)
+  # OpenSearch requires Xms == Xmx to prevent heap resizing at runtime.
+  ansible.builtin.lineinfile:
+    path: /etc/wazuh-indexer/jvm.options
+    regexp: '^-Xmx'
+    line: "-Xmx{{ wazuh_indexer_jvm_heap_size }}"
+  notify: Restart wazuh-indexer
+
+- name: Ensure services are started and enabled
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - wazuh-indexer
+    - wazuh-manager
+    - wazuh-dashboard
+
+# OPS-682: Ensure auth-next.208.haist.farm resolves on the Wazuh host.
+# The OIDC discovery URL points to auth-next.208.haist.farm (Pangolin VIP).
+# If the host's dnsmasq/resolver hasn't propagated this entry on fresh provisioning,
+# OIDC fails at startup. /etc/hosts is the reliable fallback — same pattern as
+# OPS-642 (forgejo_extra_hosts in docker-compose). Idempotent: lineinfile only
+# adds the entry if it is not already present.
+- name: Ensure auth-next.208.haist.farm resolves on wazuh host (OPS-682)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '.*auth-next\.208\.haist\.farm'
+    line: "{{ wazuh_authentik_ip }} auth-next.208.haist.farm"
+    state: present
+    owner: root
+    group: root
+    mode: '0644'
+  tags: [wazuh, oidc, hosts]
+
+# SEC-95: Read kibanaserver password from Vault before deploying dashboard config.
+# This task populates wazuh_dashboard_kibanaserver_password from Vault so the
+# template below never receives the well-known default "kibanaserver" value.
+- name: Read Wazuh dashboard secrets from Vault (SEC-95)
+  ansible.builtin.include_tasks: vault-secrets.yml
+  tags: [wazuh-server, vault-secrets]
+
+# OPS-631: Authentik OIDC integration
+- name: Deploy Wazuh Dashboard config (opensearch_dashboards.yml)
+  ansible.builtin.template:
+    src: opensearch_dashboards.yml.j2
+    dest: /etc/wazuh-dashboard/opensearch_dashboards.yml
+    owner: wazuh-dashboard
+    group: wazuh-dashboard
+    mode: '0640'
+  notify: Restart wazuh-dashboard
+
+- name: Deploy OpenSearch Security backend config (config.yml)
+  ansible.builtin.template:
+    src: opensearch-security-config.yml.j2
+    dest: /etc/wazuh-indexer/opensearch-security/config.yml
+    owner: wazuh-indexer
+    group: wazuh-indexer
+    mode: '0640'
+  register: opensearch_security_config
+  notify: Restart wazuh-indexer
+
+- name: Apply OpenSearch Security config via securityadmin
+  # noqa no-handler — securityadmin connects to the live wazuh-indexer API on port
+  # 9200; it must run while the indexer is still up. Deferring to a handler risks
+  # ordering conflicts with the Restart wazuh-indexer handler.
+  # securityadmin must be run after config.yml changes — a service restart alone
+  # does not reload the security plugin configuration.
+  # Verified: runs successfully with p=9200 on Wazuh 4.14.1 (OPS-631).
+  ansible.builtin.command:
+    cmd: >
+      /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh
+      -f /etc/wazuh-indexer/opensearch-security/config.yml
+      -t config
+      -icl -nhnv
+      -cacert /etc/wazuh-indexer/certs/root-ca.pem
+      -cert /etc/wazuh-indexer/certs/admin.pem
+      -key /etc/wazuh-indexer/certs/admin-key.pem
+      -h 127.0.0.1
+      -p 9200
+  environment:
+    JAVA_HOME: /usr/share/wazuh-indexer/jdk
+  when: opensearch_security_config.changed
+  changed_when: true

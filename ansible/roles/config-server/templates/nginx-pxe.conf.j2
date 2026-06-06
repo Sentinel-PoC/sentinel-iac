@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+# Nginx PXE server - serves ignition and SCOS files
+# Listens on port 8080 to avoid conflict with HAProxy (port 80)
+
+server {
+    listen 8080 default_server;
+    listen [::]:8080 default_server;
+
+    root /var/www/html;
+    index index.html;
+
+    server_name _;
+
+    location / {
+        autoindex on;
+        try_files $uri $uri/ =404;
+    }
+}

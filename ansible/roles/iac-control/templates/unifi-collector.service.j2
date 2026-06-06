@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+[Unit]
+Description=UniFi Network Data Collector
+After=network-online.target vault-agent-unifi-collector.service
+Wants=network-online.target
+# [OPS-169] Require vault-agent sidecar so the token sink file is populated
+# before the collector runs.  Timer unit activates this service which in turn
+# pulls in the agent.
+Requires=vault-agent-unifi-collector.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory={{ unifi_repo_dir }}
+# [OPS-169] Credential provided at runtime by vault-agent-unifi-collector.service.
+# VAULT_ADDR and VAULT_SKIP_VERIFY come from the static env file.
+# VAULT_TOKEN is read from the vault-agent token sink at {{ vault_agent_unifi_token_path }}.
+EnvironmentFile=/etc/sentinel-unifi/vault-token.env
+# Guard: fail fast if the vault-agent token sink is absent or empty.
+ExecStartPre=/usr/bin/test -s {{ vault_agent_unifi_token_path }}
+# Read the token from the sink file and pass it as an environment variable.
+ExecStart=/bin/sh -c 'VAULT_TOKEN="$(cat {{ vault_agent_unifi_token_path }})" exec /usr/bin/python3 {{ unifi_repo_dir }}/collector.py'
+StandardOutput=journal
+StandardError=journal

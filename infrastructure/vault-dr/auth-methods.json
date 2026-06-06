@@ -1,0 +1,44 @@
+{
+  "token/": {
+    "uuid": "863c166b-f6bf-f139-6ade-750f3773e753",
+    "type": "token",
+    "description": "token based credentials",
+    "accessor": "auth_token_ffa879c2",
+    "config": {
+      "default_lease_ttl": 0,
+      "max_lease_ttl": 0,
+      "force_no_cache": false,
+      "token_type": "default-service"
+    },
+    "options": null,
+    "local": false,
+    "seal_wrap": false,
+    "external_entropy_access": false,
+    "plugin_version": "",
+    "running_plugin_version": "v1.15.4+builtin.vault",
+    "running_sha256": "",
+    "deprecation_status": ""
+  },
+  "kubernetes/": {
+    "type": "kubernetes",
+    "description": "OKD cluster service account auth for ExternalSecrets and Sentinel-Ops",
+    "config": {
+      "kubernetes_host": "https://api.overwatch.haist.farm:6443"
+    },
+    "roles": [
+      "external-secrets (policy: eso-read-secrets, bound SA: external-secrets-sa/external-secrets)",
+      "sentinel-ops (policy: sentinel-ops-policy, bound SA: sentinel-ops-sa/sentinel-ops)"
+    ]
+  },
+  "approle/": {
+    "type": "approle",
+    "description": "AppRole auth for CI/CD automation pipelines",
+    "config": {
+      "default_lease_ttl": 0,
+      "max_lease_ttl": 0
+    },
+    "roles": [
+      "ci-automation (policy: claude-automation, token_ttl: 1h, token_max_ttl: 4h)"
+    ]
+  }
+}

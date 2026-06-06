@@ -1,0 +1,51 @@
+---
+# truenas-zfs-gather.yml — Read-only verification playbook (OPS-947)
+#
+# Runs the 'list' task group against the live TrueNAS to confirm connectivity
+# and gather current dataset + portal state. Makes NO changes.
+#
+# Usage:
+#   ansible-playbook ansible/playbooks/truenas-zfs-gather.yml \
+#     -e "truenas_api_token=$(vault kv get -field=api_token secret/truenas)" \
+#     -e "truenas_url=https://192.168.12.205"
+#
+# Requires: ansible host that can reach TrueNAS (iac-control or localhost w/ access).
+# TrueNAS creds: vault kv get secret/truenas  (fields: url, api_token)
+
+- name: TrueNAS ZFS gather — read-only state collection
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    # Override truenas_url if data.haist.farm not resolvable from runner
+    truenas_url: "https://data.haist.farm"
+    truenas_validate_certs: false
+    # truenas_api_token: set via -e or inventory (from Vault)
+
+    truenas_zfs_tasks:
+      - list
+
+  pre_tasks:
+    - name: Assert truenas_api_token is provided
+      ansible.builtin.assert:
+        that:
+          - truenas_api_token is defined
+          - truenas_api_token | length > 10
+        fail_msg: >
+          truenas_api_token must be set.
+          Pass with: -e "truenas_api_token=$(vault kv get -field=api_token secret/truenas)"
+
+  roles:
+    - role: truenas-zfs
+
+  post_tasks:
+    - name: Assert at least one dataset returned
+      ansible.builtin.assert:
+        that:
+          - truenas_zfs_datasets_result.json | length > 0
+        fail_msg: "No datasets returned — API connectivity issue or empty TrueNAS"
+        success_msg: >-
+          TrueNAS connectivity confirmed.
+          {{ truenas_zfs_datasets_result.json | length }} datasets found.
+          {{ truenas_zfs_portal_result.json | length }} iSCSI portal(s) found.

@@ -1,0 +1,635 @@
+---
+# Cron hardening
+- name: Set secure permissions on cron directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /etc/cron.d
+    - /etc/cron.daily
+    - /etc/cron.hourly
+    - /etc/cron.monthly
+    - /etc/cron.weekly
+  tags:
+    - common
+    - hardening
+    - cron
+
+- name: Set secure permissions on crontab
+  ansible.builtin.file:
+    path: /etc/crontab
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - common
+    - hardening
+    - cron
+
+# Su restriction
+- name: Restrict su to sudo group via pam_wheel
+  ansible.builtin.lineinfile:
+    path: /etc/pam.d/su
+    regexp: '^#?\s*auth\s+required\s+pam_wheel\.so'
+    line: "auth required pam_wheel.so use_uid group=sudo"
+    state: present
+  tags:
+    - common
+    - hardening
+    - pam
+
+# Sudo logging
+- name: Configure sudo logging
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/99-sentinel-logging
+    owner: root
+    group: root
+    mode: "0440"
+    content: |
+      Defaults logfile="/var/log/sudo.log"
+      Defaults log_input
+      Defaults log_output
+      Defaults loglinelen=0
+    validate: "visudo -cf %s"
+  tags:
+    - common
+    - hardening
+    - sudo
+
+# Sysctl hardening - deploy as file + reapply service for boot persistence
+- name: Deploy sysctl hardening configuration
+  ansible.builtin.template:
+    src: sentinel-sysctl-hardening.conf.j2
+    dest: /etc/sysctl.d/99-sentinel-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: sysctl_hardening_enabled
+  notify: Apply sysctl hardening
+  tags:
+    - common
+    - hardening
+    - sysctl
+
+- name: Deploy sysctl reapply service (boot persistence)
+  ansible.builtin.template:
+    src: sentinel-sysctl-reapply.service.j2
+    dest: /etc/systemd/system/sentinel-sysctl-reapply.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: sysctl_hardening_enabled
+  notify: Enable sysctl reapply service
+  tags:
+    - common
+    - hardening
+    - sysctl
+
+- name: Apply sysctl hardening values immediately
+  ansible.builtin.command:
+    cmd: sysctl -p /etc/sysctl.d/99-sentinel-hardening.conf
+  changed_when: false
+  when: sysctl_hardening_enabled
+  tags:
+    - common
+    - hardening
+    - sysctl
+
+# Core dump restriction (CIS 1.5.4)
+- name: Restrict core dumps via limits.conf
+  ansible.builtin.lineinfile:
+    path: /etc/security/limits.conf
+    regexp: '^\*\s+hard\s+core'
+    line: "* hard core 0"
+    insertbefore: '^# End of file'
+    state: present
+  tags:
+    - common
+    - hardening
+    - sysctl
+
+# Disable error reporting (CIS 1.3.2)
+- name: Disable apport error reporting
+  ansible.builtin.lineinfile:
+    path: /etc/default/apport
+    regexp: '^enabled='
+    line: "enabled=0"
+    state: present
+  failed_when: false
+  tags:
+    - common
+    - hardening
+
+- name: Stop and disable apport service
+  ansible.builtin.service:
+    name: apport
+    state: stopped
+    enabled: false
+  failed_when: false
+  tags:
+    - common
+    - hardening
+
+# Root umask (CIS 5.5.4)
+- name: Set root umask to 0027
+  ansible.builtin.lineinfile:
+    path: /root/.bashrc
+    regexp: '^umask'
+    line: "umask 0027"
+    state: present
+  tags:
+    - common
+    - hardening
+
+# Local login banner (CIS 1.7.1)
+- name: Deploy local login warning banner
+  ansible.builtin.template:
+    src: issue.net.j2
+    dest: /etc/issue
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - common
+    - hardening
+    - banner
+
+# Kernel module blacklisting (CIS 1.1.1)
+- name: Blacklist unused kernel modules (network + filesystem)
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/sentinel-cis-blacklist.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Sentinel CIS hardening - deployed by Ansible
+      # Disable unused network protocols (CIS 3.4)
+      install dccp /bin/false
+      install tipc /bin/false
+      install rds /bin/false
+      install sctp /bin/false
+      blacklist dccp
+      blacklist tipc
+      blacklist rds
+      blacklist sctp
+      # Disable unused filesystems (CIS 1.1.1)
+      install cramfs /bin/false
+      install freevxfs /bin/false
+      install hfs /bin/false
+      install hfsplus /bin/false
+      install jffs2 /bin/false
+      install udf /bin/false
+      blacklist cramfs
+      blacklist freevxfs
+      blacklist hfs
+      blacklist hfsplus
+      blacklist jffs2
+      blacklist udf
+  tags:
+    - common
+    - hardening
+    - kernel
+
+# AppArmor (CIS 1.3) - enforce mode
+- name: Install AppArmor packages
+  ansible.builtin.apt:
+    name:
+      - apparmor
+      - apparmor-utils
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_virtualization_type != 'lxc'
+  tags:
+    - common
+    - hardening
+    - apparmor
+
+- name: Enable and start AppArmor service
+  ansible.builtin.service:
+    name: apparmor
+    enabled: true
+    state: started
+  when: ansible_virtualization_type != 'lxc'
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - apparmor
+
+- name: Enforce all AppArmor profiles (CIS 1.3.1.4)
+  ansible.builtin.shell:
+    cmd: aa-enforce /etc/apparmor.d/*
+  changed_when: false
+  failed_when: false
+  when: ansible_virtualization_type != 'lxc'
+  tags:
+    - common
+    - hardening
+    - apparmor
+
+# Logging hardening (CIS 6.2)
+- name: Configure journald log rotation (CIS 6.2.1.1.4)
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    state: present
+  loop:
+    - {regexp: '^#?SystemMaxUse=', line: 'SystemMaxUse=256M'}
+    - {regexp: '^#?SystemKeepFree=', line: 'SystemKeepFree=512M'}
+    - {regexp: '^#?RuntimeMaxUse=', line: 'RuntimeMaxUse=64M'}
+    - {regexp: '^#?RuntimeKeepFree=', line: 'RuntimeKeepFree=128M'}
+    - {regexp: '^#?SystemMaxFileSize=', line: 'SystemMaxFileSize=32M'}
+    - {regexp: '^#?MaxFileSec=', line: 'MaxFileSec=86400'}
+    - {regexp: '^#?ForwardToSyslog=', line: 'ForwardToSyslog=yes'}
+    - {regexp: '^#?Compress=', line: 'Compress=yes'}
+  notify: Restart journald
+  tags:
+    - common
+    - hardening
+    - logging
+
+- name: Set rsyslog file creation mode in rsyslog.conf (CIS 6.2.2.5)
+  ansible.builtin.lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^\$FileCreateMode'
+    line: "$FileCreateMode 0640"
+    state: present
+  failed_when: false
+  notify: Restart rsyslog
+  tags:
+    - common
+    - hardening
+    - logging
+
+- name: Set rsyslog file creation mode in rsyslog.d (CIS 6.2.2.5)
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/50-sentinel-filecreatemode.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      $FileCreateMode 0640
+  notify: Restart rsyslog
+  tags:
+    - common
+    - hardening
+    - logging
+
+# CIS 6.2.4.1 — restrict existing log files (named set)
+- name: Set restrictive permissions on log files (CIS 6.2.4.1)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0640"
+  loop:
+    - /var/log/syslog
+    - /var/log/auth.log
+    - /var/log/kern.log
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - logging
+
+# CIS 6.2.4.1 (OPS-1062) — broad find-based chmod for all /var/log files
+# Excludes utmp-group files (wtmp, btmp, lastlog) which need group-write by
+# design for login accounting utilities (last, lastb, w). Also excludes
+# systemd journal and audit directories which manage their own permissions.
+- name: Restrict all /var/log files to 0640 max (CIS 6.2.4.1, OPS-1062)
+  ansible.builtin.shell:
+    cmd: >-
+      find /var/log -type f
+      ! -name 'wtmp' ! -name 'wtmp.*'
+      ! -name 'btmp' ! -name 'btmp.*'
+      ! -name 'lastlog'
+      -perm /0137
+      -exec chmod g-wx,o-rwx {} +
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - logging
+
+# CIS 6.2.4.1 (OPS-1062) — fix sysstat file creation mode
+# Default sysstat UMASK=0022 creates sa/sar files as 0644.
+# Setting UMASK=0027 ensures new sar/sa files are created as 0640.
+- name: Set sysstat UMASK to 0027 for CIS-compliant log file creation (OPS-1062)
+  ansible.builtin.lineinfile:
+    path: /etc/sysstat/sysstat
+    regexp: '^UMASK='
+    line: 'UMASK=0027'
+    state: present
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - logging
+
+# CIS 6.2.4.1 (OPS-1062) — fix dpkg/apt log file creation mode via logrotate
+# dpkg creates /var/log/dpkg.log and /var/log/alternatives.log with mode 0644
+# by default. Logrotate's "create" directive overrides the mode for rotated
+# files. A logrotate drop-in is the standard CIS remediation pattern.
+- name: Deploy logrotate override for dpkg logs (CIS 6.2.4.1, OPS-1062)
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/dpkg-sentinel
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Sentinel CIS hardening - deployed by Ansible (OPS-1062)
+      # Override default dpkg log permissions to comply with CIS 6.2.4.1
+      /var/log/dpkg.log {
+          monthly
+          rotate 12
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 root root
+      }
+      /var/log/alternatives.log {
+          monthly
+          rotate 12
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 root root
+      }
+  tags:
+    - common
+    - hardening
+    - logging
+
+# CIS 6.2.4.1 (OPS-1062) — fix apt log file creation mode via logrotate
+- name: Deploy logrotate override for apt logs (CIS 6.2.4.1, OPS-1062)
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/apt-sentinel
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Sentinel CIS hardening - deployed by Ansible (OPS-1062)
+      # Override default apt log permissions to comply with CIS 6.2.4.1
+      /var/log/apt/history.log {
+          rotate 12
+          monthly
+          compress
+          missingok
+          notifempty
+          create 0640 root root
+      }
+      /var/log/apt/eipp.log.xz {
+          rotate 12
+          monthly
+          missingok
+          notifempty
+          create 0640 root root
+      }
+  tags:
+    - common
+    - hardening
+    - logging
+
+# Inactive password lock (CIS 5.4.1.5)
+- name: Set default inactive password lock to 30 days
+  ansible.builtin.command:
+    cmd: useradd -D -f 30
+  changed_when: false
+  tags:
+    - common
+    - hardening
+    - pam
+
+# Cron/at access restrictions (CIS 5.1.8-9)
+- name: Create /etc/cron.allow with root only
+  ansible.builtin.copy:
+    dest: /etc/cron.allow
+    owner: root
+    group: root
+    mode: "0640"
+    content: |
+      root
+  tags:
+    - common
+    - hardening
+    - cron
+
+- name: Create /etc/at.allow with root only
+  ansible.builtin.copy:
+    dest: /etc/at.allow
+    owner: root
+    group: root
+    mode: "0640"
+    content: |
+      root
+  tags:
+    - common
+    - hardening
+    - cron
+
+- name: Remove cron.deny and at.deny if they exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/cron.deny
+    - /etc/at.deny
+  tags:
+    - common
+    - hardening
+    - cron
+
+# Password aging for existing human accounts (CIS 5.5.1.1-2)
+- name: Get human user accounts (UID >= 1000)
+  ansible.builtin.shell:
+    cmd: "awk -F: '$3 >= 1000 && $1 != \"nobody\" {print $1}' /etc/passwd"
+  register: human_users
+  changed_when: false
+  tags:
+    - common
+    - hardening
+    - pam
+
+# OPS-512: defensive lastchg-reset before applying password-aging policy.
+# Without this, hosts where a human account has lastchg=0 (the /etc/shadow
+# sentinel meaning "must change at next login") get an instant past-date
+# expiration when chage --maxdays N runs: 0 + N days since epoch = 1971-ish,
+# which combined with --inactive 30 puts the account into PAM "expired"
+# state immediately. PAM blocks ALL auth methods (key, password, tailscale-
+# ssh) — no remote recovery, requires SD-card / disk surgery.
+#
+# Setting lastchg to today explicitly first means subsequent --maxdays
+# computation produces today + 365, which is a future date. Safe regardless
+# of bootstrap-user starting state. Idempotent: chage -d on today's date
+# twice in the same UTC day is a no-op.
+- name: Force lastchg to today before applying password-aging policy (OPS-512)
+  ansible.builtin.command:
+    cmd: "chage -d {{ ansible_date_time.date }} {{ item }}"
+  loop: "{{ human_users.stdout_lines + ['root'] }}"
+  changed_when: false
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - pam
+
+- name: Set password aging for human users
+  ansible.builtin.command:
+    cmd: "chage --maxdays {{ password_max_days }} --mindays {{ password_min_days }} --inactive 30 {{ item }}"
+  loop: "{{ human_users.stdout_lines + ['root'] }}"
+  changed_when: false
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - pam
+
+# Remove insecure packages (CIS 2.2.4-5)
+- name: Remove insecure network packages
+  ansible.builtin.apt:
+    name: "{{ item }}"
+    state: absent
+    purge: true
+  loop:
+    - telnet
+    - inetutils-telnet
+    - ftp
+    - tnftp
+    - rsh-client
+    - rsh-redone-client
+  failed_when: false
+  when: remove_insecure_packages
+  tags:
+    - common
+    - hardening
+    - packages
+
+# Install at package for cron/at restriction (CIS 5.1.9)
+- name: Ensure at package is installed
+  ansible.builtin.apt:
+    name: at
+    state: present
+  tags:
+    - common
+    - hardening
+    - cron
+
+# Sudo logfile in main sudoers (CIS 5.2.3)
+- name: Configure sudo logfile in sudoers
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers
+    regexp: '^\s*Defaults\s+logfile='
+    line: 'Defaults logfile="/var/log/sudo.log"'
+    insertafter: '^Defaults'
+    state: present
+    validate: "visudo -cf %s"
+  tags:
+    - common
+    - hardening
+    - sudo
+
+# AppArmor bootloader configuration (CIS 1.3.1.2)
+# OPS-514: gate on /etc/default/grub existence. Hosts that boot via U-Boot +
+# firmware cmdline.txt (Raspberry Pi class) don't have GRUB, so the lineinfile
+# task hard-fails with "Destination /etc/default/grub does not exist". The
+# AppArmor LSM is still enforced at runtime via apparmor.service (tasks
+# above); the GRUB cmdline params are defense-in-depth for explicit-at-boot
+# enforcement. Pi loses the boot-cmdline layer of enforcement but keeps the
+# runtime layer — minor security delta.
+# Follow-up issue: add a parallel task that writes equivalent params to
+# /boot/firmware/cmdline.txt when present, to restore boot-cmdline parity
+# on Pi-class hosts.
+- name: Check if GRUB default config is present
+  ansible.builtin.stat:
+    path: /etc/default/grub
+  register: grub_default_stat
+  tags:
+    - common
+    - hardening
+    - apparmor
+
+- name: Enable AppArmor in GRUB bootloader
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX='
+    line: 'GRUB_CMDLINE_LINUX="apparmor=1 security=apparmor audit=1 audit_backlog_limit=8192"'
+    state: present
+  when:
+    - ansible_virtualization_type != 'lxc'
+    - grub_default_stat.stat.exists
+  notify: Update grub
+  tags:
+    - common
+    - hardening
+    - apparmor
+
+# Mask rsync daemon service (CIS 2.2.2)
+- name: Mask rsync service
+  ansible.builtin.systemd:
+    name: rsync.service
+    masked: true
+  failed_when: false
+  tags:
+    - common
+    - hardening
+    - services
+
+# Lock system account passwords (CIS 5.4.1.2)
+- name: Get system accounts with password hashes
+  ansible.builtin.shell:
+    cmd: >-
+      awk -F: '($2 ~ /^\$/ && $3 < 1000 && $1 != "root") {print $1}' /etc/shadow
+  register: system_accounts_with_hash
+  changed_when: false
+  tags:
+    - common
+    - hardening
+    - pam
+
+- name: Lock system account passwords
+  ansible.builtin.command:
+    cmd: "passwd -l {{ item }}"
+  loop: "{{ system_accounts_with_hash.stdout_lines }}"
+  changed_when: true
+  failed_when: false
+  when: system_accounts_with_hash.stdout_lines | length > 0
+  tags:
+    - common
+    - hardening
+    - pam
+
+# Set password aging for system accounts with hashes (CIS 5.5.1.1-2)
+- name: Set password aging for system accounts with hashes
+  ansible.builtin.command:
+    cmd: "chage --mindays {{ password_min_days }} --warndays {{ password_warn_age }} --inactive 30 {{ item }}"
+  loop: "{{ system_accounts_with_hash.stdout_lines }}"
+  changed_when: false
+  failed_when: false
+  when: system_accounts_with_hash.stdout_lines | length > 0
+  tags:
+    - common
+    - hardening
+    - pam
+
+# Remote syslog forwarding (CIS 6.2.2.7)
+- name: Deploy remote rsyslog forwarding configuration
+  ansible.builtin.template:
+    src: rsyslog-remote.conf.j2
+    dest: /etc/rsyslog.d/60-sentinel-remote.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - rsyslog_remote_enabled
+    - inventory_hostname != 'wazuh-server'
+  notify: Restart rsyslog
+  tags:
+    - common
+    - hardening
+    - logging

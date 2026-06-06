@@ -1,0 +1,6 @@
+---
+- name: Test wazuh-agent role
+  hosts: localhost
+  connection: local
+  roles:
+    - wazuh-agent

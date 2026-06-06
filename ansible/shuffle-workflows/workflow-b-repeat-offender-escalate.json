@@ -1,0 +1,273 @@
+{
+  "id": "wf-b-repeat-offender-escalate",
+  "name": "repeat-offender-escalate",
+  "description": "G'-prime Workflow B: Adaptive threshold escalation. 1st hit: log only. 5th hit: 1h block + Telegram confirm. 20th hit: 1d block + Telegram confirm. 100th hit: permanent block + AbuseIPDB report + Telegram confirm. Block step requires Telegram operator confirmation. Tracking: OPS-573.",
+  "tags": ["g-prime", "blocking", "telegram-confirm", "escalation"],
+  "status": "active",
+  "start": "trigger-repeat-offender",
+  "triggers": [
+    {
+      "id": "trigger-repeat-offender",
+      "name": "Repeat Offender Webhook",
+      "app_name": "Webhook",
+      "app_version": "1.0.0",
+      "trigger_type": "webhook",
+      "label": "Wazuh alert - repeat attacker",
+      "description": "Receives Wazuh alert for repeat attacker IP. Expected field: data.srcip, rule.description.",
+      "parameters": []
+    }
+  ],
+  "actions": [
+    {
+      "id": "get-hit-count",
+      "name": "Get hit count from attacker-intel DB",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Query hit count for IP",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "SELECT COALESCE(hit_count, 0) AS hit_count FROM attacker_intel.profiles WHERE ip = '$exec.body.data.srcip';"
+        }
+      ]
+    },
+    {
+      "id": "increment-hit",
+      "name": "Increment hit counter",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Increment and return new hit count",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "UPDATE attacker_intel.profiles SET hit_count = hit_count + 1, last_seen = NOW() WHERE ip = '$exec.body.data.srcip' RETURNING hit_count;"
+        }
+      ]
+    },
+    {
+      "id": "threshold-check",
+      "name": "Determine escalation tier",
+      "app_name": "Shuffle Tools",
+      "app_version": "1.2.0",
+      "label": "Classify tier: log / 1h-block / 1d-block / perm-block",
+      "parameters": [
+        {
+          "name": "input",
+          "value": "$increment-hit.hit_count"
+        }
+      ],
+      "execution_variable": {
+        "name": "hit_count",
+        "value": "$increment-hit.hit_count"
+      }
+    },
+    {
+      "id": "log-only",
+      "name": "Log first hit",
+      "app_name": "Shuffle Tools",
+      "app_version": "1.2.0",
+      "label": "Log: first occurrence - no block",
+      "parameters": [
+        {
+          "name": "input",
+          "value": "First hit logged for $exec.body.data.srcip - no action taken."
+        }
+      ]
+    },
+    {
+      "id": "telegram-confirm-1h",
+      "name": "Telegram confirm: 1h block",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Request operator confirmation: 1h block",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "BLOCK REQUEST (1h)\\nIP: $exec.body.data.srcip\\nHit count: $hit_count\\nReply YES to confirm block, NO to skip."
+        }
+      ]
+    },
+    {
+      "id": "udm-block-1h",
+      "name": "UDM block IP (1 hour)",
+      "app_name": "HTTP",
+      "app_version": "1.0.0",
+      "label": "POST block rule to UniFi UDM via local API",
+      "parameters": [
+        {
+          "name": "url",
+          "value": "https://192.168.12.1/proxy/network/api/s/default/rest/firewallrule"
+        },
+        {
+          "name": "method",
+          "value": "POST"
+        },
+        {
+          "name": "headers",
+          "value": "{\"Content-Type\": \"application/json\"}"
+        },
+        {
+          "name": "body",
+          "value": "{\"name\": \"shuffle-block-$exec.body.data.srcip-1h\", \"action\": \"drop\", \"enabled\": true, \"protocol\": \"all\", \"src_address\": \"$exec.body.data.srcip/32\", \"dst_networkconf_type\": \"NETv4\", \"ruleset\": \"WAN_IN\"}"
+        }
+      ]
+    },
+    {
+      "id": "telegram-confirm-1d",
+      "name": "Telegram confirm: 1d block",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Request operator confirmation: 1d block",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "BLOCK REQUEST (24h)\\nIP: $exec.body.data.srcip\\nHit count: $hit_count\\nReply YES to confirm block, NO to skip."
+        }
+      ]
+    },
+    {
+      "id": "udm-block-1d",
+      "name": "UDM block IP (24 hours)",
+      "app_name": "HTTP",
+      "app_version": "1.0.0",
+      "label": "POST 24h block rule to UniFi UDM",
+      "parameters": [
+        {
+          "name": "url",
+          "value": "https://192.168.12.1/proxy/network/api/s/default/rest/firewallrule"
+        },
+        {
+          "name": "method",
+          "value": "POST"
+        },
+        {
+          "name": "headers",
+          "value": "{\"Content-Type\": \"application/json\"}"
+        },
+        {
+          "name": "body",
+          "value": "{\"name\": \"shuffle-block-$exec.body.data.srcip-1d\", \"action\": \"drop\", \"enabled\": true, \"protocol\": \"all\", \"src_address\": \"$exec.body.data.srcip/32\", \"dst_networkconf_type\": \"NETv4\", \"ruleset\": \"WAN_IN\"}"
+        }
+      ]
+    },
+    {
+      "id": "telegram-confirm-perm",
+      "name": "Telegram confirm: permanent block + report",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Request operator confirmation: permanent block + AbuseIPDB report",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "BLOCK REQUEST (PERMANENT + AbuseIPDB report)\\nIP: $exec.body.data.srcip\\nHit count: $hit_count\\nReply YES to confirm, NO to skip."
+        }
+      ]
+    },
+    {
+      "id": "udm-block-perm",
+      "name": "UDM permanent block",
+      "app_name": "HTTP",
+      "app_version": "1.0.0",
+      "label": "POST permanent block rule to UniFi UDM",
+      "parameters": [
+        {
+          "name": "url",
+          "value": "https://192.168.12.1/proxy/network/api/s/default/rest/firewallrule"
+        },
+        {
+          "name": "method",
+          "value": "POST"
+        },
+        {
+          "name": "headers",
+          "value": "{\"Content-Type\": \"application/json\"}"
+        },
+        {
+          "name": "body",
+          "value": "{\"name\": \"shuffle-block-$exec.body.data.srcip-perm\", \"action\": \"drop\", \"enabled\": true, \"protocol\": \"all\", \"src_address\": \"$exec.body.data.srcip/32\", \"dst_networkconf_type\": \"NETv4\", \"ruleset\": \"WAN_IN\"}"
+        }
+      ]
+    },
+    {
+      "id": "abuseipdb-report",
+      "name": "Report to AbuseIPDB",
+      "app_name": "AbuseIPDB",
+      "app_version": "1.0.0",
+      "label": "Submit confirmed-malicious report to AbuseIPDB",
+      "parameters": [
+        {
+          "name": "ip",
+          "value": "$exec.body.data.srcip"
+        },
+        {
+          "name": "categories",
+          "value": "14,18,22"
+        },
+        {
+          "name": "comment",
+          "value": "Repeat offender: $hit_count hits. Last rule: $exec.body.rule.description. Automated report from HAIST sentinel."
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {"source_id": "trigger-repeat-offender", "destination_id": "get-hit-count", "has_errors": false, "conditions": []},
+    {"source_id": "get-hit-count", "destination_id": "increment-hit", "has_errors": false, "conditions": []},
+    {"source_id": "increment-hit", "destination_id": "threshold-check", "has_errors": false, "conditions": []},
+    {
+      "source_id": "threshold-check",
+      "destination_id": "log-only",
+      "has_errors": false,
+      "conditions": [{"condition": "$hit_count < 5", "source": "threshold-check"}]
+    },
+    {
+      "source_id": "threshold-check",
+      "destination_id": "telegram-confirm-1h",
+      "has_errors": false,
+      "conditions": [{"condition": "$hit_count >= 5 && $hit_count < 20", "source": "threshold-check"}]
+    },
+    {
+      "source_id": "threshold-check",
+      "destination_id": "telegram-confirm-1d",
+      "has_errors": false,
+      "conditions": [{"condition": "$hit_count >= 20 && $hit_count < 100", "source": "threshold-check"}]
+    },
+    {
+      "source_id": "threshold-check",
+      "destination_id": "telegram-confirm-perm",
+      "has_errors": false,
+      "conditions": [{"condition": "$hit_count >= 100", "source": "threshold-check"}]
+    },
+    {"source_id": "telegram-confirm-1h", "destination_id": "udm-block-1h", "has_errors": false,
+      "conditions": [{"condition": "$telegram-confirm-1h.result == 'YES'", "source": "telegram-confirm-1h"}]},
+    {"source_id": "telegram-confirm-1d", "destination_id": "udm-block-1d", "has_errors": false,
+      "conditions": [{"condition": "$telegram-confirm-1d.result == 'YES'", "source": "telegram-confirm-1d"}]},
+    {"source_id": "telegram-confirm-perm", "destination_id": "udm-block-perm", "has_errors": false,
+      "conditions": [{"condition": "$telegram-confirm-perm.result == 'YES'", "source": "telegram-confirm-perm"}]},
+    {"source_id": "udm-block-perm", "destination_id": "abuseipdb-report", "has_errors": false, "conditions": []}
+  ]
+}

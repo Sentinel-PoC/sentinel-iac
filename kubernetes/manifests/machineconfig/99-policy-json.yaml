@@ -1,0 +1,164 @@
+# OPS-179 — MW1.5: Interim pull-time signature enforcement via MachineConfig
+#
+# PURPOSE:
+#   Delivers the security intent of MW1 (image signature enforcement) on the
+#   supported OKD 4.19 path. ClusterImagePolicy (the MW1.0 declarative target)
+#   is TechPreview-only on 4.19; enabling TechPreviewNoUpgrade is a one-way door
+#   that blocks security-backport upgrades. This MachineConfig is the bridge.
+#
+# WHAT THIS DOES:
+#   Drops three files onto every OKD node (master + worker pools):
+#   1. /etc/containers/cosign-sentinel.pub  — ECDSA P-256 public key used by
+#      the CI cosign-sign workflow (same key as in verify-image-signatures Kyverno
+#      policy, sourced from OPS-179 commit).
+#   2. /etc/containers/policy.json  — containers/image pull policy. Default is
+#      insecureAcceptAnything (keeps OKD system images working). Adds
+#      sigstoreSigned rules for harbor.208.haist.farm/sentinel/* and
+#      mirror.208.haist.farm:8443/sentinel/* — cri-o will reject pulls from
+#      these paths that lack a valid cosign signature.
+#   3. /etc/containers/registries.d/sigstore-sentinel.yaml — enables
+#      use-sigstore-attachments for the sentinel/* scopes so cri-o reads
+#      OCI 1.1 cosign attachment signatures alongside the policy.json rules.
+#
+# TYPE IDENTIFIER NOTE (Judge FAIL fix 2026-05-29):
+#   The correct containers/image type for cosign/sigstore signature checking is
+#   "sigstoreSigned" (containers/image policy_types.go:49). "sigstoreSignedBy"
+#   does not exist in the upstream codebase and causes policy.json to be rejected
+#   as malformed at cri-o load time. This commit corrects that error.
+#
+# USE-SIGSTORE-ATTACHMENTS NOTE (Judge FAIL fix 2026-05-29):
+#   Per containers-policy.json(5) and containers-registries.d(5): to use
+#   sigstoreSigned with images hosted on OCI registries (cosign OCI 1.1 referrers),
+#   use-sigstore-attachments must be enabled in registries.d for the relevant
+#   registry scope. Without it, cri-o will not find the OCI attachment signatures
+#   even if the policy.json type is correct.
+#
+# TRANSITION CONTEXT:
+#   After MCO rolls all nodes and cri-o enforcement is verified (Judge gate),
+#   the Kyverno verify-image-signatures policy is intentionally downgraded from
+#   Enforce to Audit (parallel change in overwatch-gitops, same OPS-179 branch).
+#   Kyverno remains as defense-in-depth audit signal. OPS-149 (MW1.0) will
+#   introduce ClusterImagePolicy (GA in OKD 4.20) as the declarative successor.
+#
+# NIST CONTROLS: SI-7(1) continuous integrity at pull-time, SI-7(15) code
+#   authentication prior to install, SR-4, SR-11.
+#
+# MCO BEHAVIOR:
+#   - Targets: worker MachineConfigPool (workers only — masters are separate pool)
+#   - MCO rolls nodes one at a time (maxUnavailable: 1 by default)
+#   - PLAN AS MAINTENANCE WINDOW: MCO will drain and reboot each worker node
+#   - Masters use a separate MachineConfigPool; a companion 99-master-policy-json
+#     resource below covers the master pool.
+#     NOTE: On standard OKD, master and worker pools do NOT share rendered configs.
+#
+# VERIFICATION (Judge gate):
+#   oc debug node/<worker-node> -- chroot /host cat /etc/containers/policy.json
+#   oc debug node/<worker-node> -- chroot /host cat /etc/containers/cosign-sentinel.pub
+#   oc debug node/<worker-node> -- chroot /host cat /etc/containers/registries.d/sigstore-sentinel.yaml
+#   Force-pull an unsigned image to a sandbox NS — cri-o should reject it with
+#   a policy-rejection log line regardless of Kyverno admission state.
+---
+# Worker pool MachineConfig
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-worker-policy-json
+  labels:
+    machineconfiguration.openshift.io/role: worker
+  annotations:
+    # OPS-179: MW1.5 — pull-time cosign signature enforcement
+    # Author: sentinel-worker agent 2026-05-29
+    # Corrected: 2026-05-29 (Judge FAIL — sigstoreSigned type fix + registries.d)
+    ops-179: "MW1.5 worker pool"
+spec:
+  config:
+    ignition:
+      version: "3.4.0"
+    storage:
+      files:
+        # File 1: cosign-sentinel.pub
+        # ECDSA P-256 public key (PKIX PEM format) — matches CI cosign-sign workflow
+        # Same key as verify-image-signatures Kyverno ClusterPolicy (OPS-179)
+        - path: /etc/containers/cosign-sentinel.pub
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFZW9aNnVHMlpKaG1maXhLK2txcGlLUWxXd0pJYgpuL0I3b3JzYjJiQWs4bC9tbG1zZDFqZWJiZHROTG9HMUY2cWdidnFPWExEd3dTcWxTL3FYUjVrVXJnPT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
+
+        # File 2: /etc/containers/policy.json
+        # containers/image pull policy:
+        #   default: insecureAcceptAnything (required for OKD system registries:
+        #     quay.io, registry.access.redhat.com, registry.ci.openshift.org, etc.)
+        #   harbor.208.haist.farm/sentinel/*: sigstoreSigned (cosign key above)
+        #   mirror.208.haist.farm:8443/sentinel/*: sigstoreSigned (same key)
+        #
+        # IMPORTANT: The default is intentionally insecureAcceptAnything because
+        #   OKD pulls many system images from quay.io and internal registries that
+        #   are not cosign-signed by this workflow. A "reject" default would break
+        #   MCO, OLM, and cluster upgrade. Enforcement is scoped to sentinel/*
+        #   paths only. This is defense-in-depth alongside Kyverno audit (OPS-179)
+        #   and future OPS-149 ClusterImagePolicy (OKD 4.20 GA path).
+        #
+        # TYPE: "sigstoreSigned" — correct identifier per containers/image
+        #   policy_types.go:49. DO NOT use "sigstoreSignedBy" (nonexistent).
+        - path: /etc/containers/policy.json
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,ewogICJkZWZhdWx0IjogWwogICAgewogICAgICAidHlwZSI6ICJpbnNlY3VyZUFjY2VwdEFueXRoaW5nIgogICAgfQogIF0sCiAgInRyYW5zcG9ydHMiOiB7CiAgICAiZG9ja2VyIjogewogICAgICAiaGFyYm9yLjIwOC5oYWlzdC5mYXJtL3NlbnRpbmVsIjogWwogICAgICAgIHsKICAgICAgICAgICJ0eXBlIjogInNpZ3N0b3JlU2lnbmVkIiwKICAgICAgICAgICJrZXlQYXRoIjogIi9ldGMvY29udGFpbmVycy9jb3NpZ24tc2VudGluZWwucHViIiwKICAgICAgICAgICJzaWduZWRJZGVudGl0eSI6IHsKICAgICAgICAgICAgInR5cGUiOiAibWF0Y2hSZXBvRGlnZXN0T3JFeGFjdCIKICAgICAgICAgIH0KICAgICAgICB9CiAgICAgIF0sCiAgICAgICJtaXJyb3IuMjA4LmhhaXN0LmZhcm06ODQ0My9zZW50aW5lbCI6IFsKICAgICAgICB7CiAgICAgICAgICAidHlwZSI6ICJzaWdzdG9yZVNpZ25lZCIsCiAgICAgICAgICAia2V5UGF0aCI6ICIvZXRjL2NvbnRhaW5lcnMvY29zaWduLXNlbnRpbmVsLnB1YiIsCiAgICAgICAgICAic2lnbmVkSWRlbnRpdHkiOiB7CiAgICAgICAgICAgICJ0eXBlIjogIm1hdGNoUmVwb0RpZ2VzdE9yRXhhY3QiCiAgICAgICAgICB9CiAgICAgICAgfQogICAgICBdCiAgICB9LAogICAgImRvY2tlci1kYWVtb24iOiB7CiAgICAgICIiOiBbCiAgICAgICAgewogICAgICAgICAgInR5cGUiOiAiaW5zZWN1cmVBY2NlcHRBbnl0aGluZyIKICAgICAgICB9CiAgICAgIF0KICAgIH0KICB9Cn0K"
+
+        # File 3: /etc/containers/registries.d/sigstore-sentinel.yaml
+        # Enables use-sigstore-attachments for sentinel scopes so cri-o can
+        # read OCI 1.1 cosign attachment signatures from the registries.
+        # Required per containers-policy.json(5): "To use this with images
+        # hosted on image registries, the use-sigstore-attachments option
+        # needs to be enabled for the relevant registry or repository in the
+        # client's containers-registries.d(5)."
+        - path: /etc/containers/registries.d/sigstore-sentinel.yaml
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,ZG9ja2VyOgogIGhhcmJvci4yMDguaGFpc3QuZmFybS9zZW50aW5lbDoKICAgIHVzZS1zaWdzdG9yZS1hdHRhY2htZW50czogdHJ1ZQogIG1pcnJvci4yMDguaGFpc3QuZmFybTo4NDQzL3NlbnRpbmVsOgogICAgdXNlLXNpZ3N0b3JlLWF0dGFjaG1lbnRzOiB0cnVlCg=="
+---
+# Master pool MachineConfig (identical content, different role label)
+# NOTE: Master pool is managed separately in OKD. Changes apply to master nodes
+# via this MC. MCO will roll masters one at a time (pausing OKD control plane
+# briefly during each node restart — schedule during a maintenance window).
+# PLAN as a separate MW from the worker pool rollout.
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-master-policy-json
+  labels:
+    machineconfiguration.openshift.io/role: master
+  annotations:
+    # OPS-179: MW1.5 — pull-time cosign signature enforcement
+    # Author: sentinel-worker agent 2026-05-29
+    # Corrected: 2026-05-29 (Judge FAIL — sigstoreSigned type fix + registries.d)
+    ops-179: "MW1.5 master pool"
+spec:
+  config:
+    ignition:
+      version: "3.4.0"
+    storage:
+      files:
+        # Same files as worker pool — see worker MC above for full inline docs
+        - path: /etc/containers/cosign-sentinel.pub
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFZW9aNnVHMlpKaG1maXhLK2txcGlLUWxXd0pJYgpuL0I3b3JzYjJiQWs4bC9tbG1zZDFqZWJiZHROTG9HMUY2cWdidnFPWExEd3dTcWxTL3FYUjVrVXJnPT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
+
+        # policy.json: sigstoreSigned (corrected from sigstoreSignedBy)
+        - path: /etc/containers/policy.json
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,ewogICJkZWZhdWx0IjogWwogICAgewogICAgICAidHlwZSI6ICJpbnNlY3VyZUFjY2VwdEFueXRoaW5nIgogICAgfQogIF0sCiAgInRyYW5zcG9ydHMiOiB7CiAgICAiZG9ja2VyIjogewogICAgICAiaGFyYm9yLjIwOC5oYWlzdC5mYXJtL3NlbnRpbmVsIjogWwogICAgICAgIHsKICAgICAgICAgICJ0eXBlIjogInNpZ3N0b3JlU2lnbmVkIiwKICAgICAgICAgICJrZXlQYXRoIjogIi9ldGMvY29udGFpbmVycy9jb3NpZ24tc2VudGluZWwucHViIiwKICAgICAgICAgICJzaWduZWRJZGVudGl0eSI6IHsKICAgICAgICAgICAgInR5cGUiOiAibWF0Y2hSZXBvRGlnZXN0T3JFeGFjdCIKICAgICAgICAgIH0KICAgICAgICB9CiAgICAgIF0sCiAgICAgICJtaXJyb3IuMjA4LmhhaXN0LmZhcm06ODQ0My9zZW50aW5lbCI6IFsKICAgICAgICB7CiAgICAgICAgICAidHlwZSI6ICJzaWdzdG9yZVNpZ25lZCIsCiAgICAgICAgICAia2V5UGF0aCI6ICIvZXRjL2NvbnRhaW5lcnMvY29zaWduLXNlbnRpbmVsLnB1YiIsCiAgICAgICAgICAic2lnbmVkSWRlbnRpdHkiOiB7CiAgICAgICAgICAgICJ0eXBlIjogIm1hdGNoUmVwb0RpZ2VzdE9yRXhhY3QiCiAgICAgICAgICB9CiAgICAgICAgfQogICAgICBdCiAgICB9LAogICAgImRvY2tlci1kYWVtb24iOiB7CiAgICAgICIiOiBbCiAgICAgICAgewogICAgICAgICAgInR5cGUiOiAiaW5zZWN1cmVBY2NlcHRBbnl0aGluZyIKICAgICAgICB9CiAgICAgIF0KICAgIH0KICB9Cn0K"
+
+        # registries.d/sigstore-sentinel.yaml: use-sigstore-attachments (added 2026-05-29)
+        - path: /etc/containers/registries.d/sigstore-sentinel.yaml
+          mode: 0644
+          overwrite: true
+          contents:
+            source: "data:text/plain;charset=utf-8;base64,ZG9ja2VyOgogIGhhcmJvci4yMDguaGFpc3QuZmFybS9zZW50aW5lbDoKICAgIHVzZS1zaWdzdG9yZS1hdHRhY2htZW50czogdHJ1ZQogIG1pcnJvci4yMDguaGFpc3QuZmFybTo4NDQzL3NlbnRpbmVsOgogICAgdXNlLXNpZ3N0b3JlLWF0dGFjaG1lbnRzOiB0cnVlCg=="

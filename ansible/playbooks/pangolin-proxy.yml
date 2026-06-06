@@ -1,0 +1,25 @@
+---
+# pangolin-proxy playbook — deploys Traefik + oauth2-proxy via Docker Compose.
+#
+# OPS-818: oauth2-proxy secrets are now read from Vault at deploy time.
+# vault_token MUST be passed or the playbook will fail fast (assert task).
+#
+# Usage:
+#   ansible-playbook -i inventory/hosts.yml playbooks/pangolin-proxy.yml \
+#     -e vault_token=<scoped-vault-token>
+#
+# To fetch only secrets and redeploy env file (no full role run):
+#   ansible-playbook -i inventory/hosts.yml playbooks/pangolin-proxy.yml \
+#     -e vault_token=<scoped-vault-token> \
+#     --tags secrets
+#
+# vault_addr defaults to https://192.168.12.206:8200 (direct Vault IP, bypasses Pangolin SSO).
+# Override with -e vault_addr=<url> if needed.
+- name: Configure Pangolin reverse proxy
+  hosts: pangolin
+  become: true
+  roles:
+    - role: common
+      tags: [common]
+    - role: pangolin-proxy
+      tags: [pangolin]

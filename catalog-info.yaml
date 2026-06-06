@@ -1,0 +1,30 @@
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: sentinel-iac
+  description: Infrastructure-as-Code for Project Sentinel (Ansible, Terraform, Packer)
+  annotations:
+    backstage.io/source-location: url:http://192.168.12.68/admin1/sentinel-iac
+  links:
+    - url: http://192.168.12.68/admin1/sentinel-iac/-/pipelines
+      title: CI Pipeline
+      icon: dashboard
+  tags:
+    - iac
+    - ansible
+    - terraform
+spec:
+  type: library
+  lifecycle: production
+  owner: platform-team
+  system: sentinel-platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Location
+metadata:
+  name: compliance-pipeline-docs
+  description: Compliance Pipeline TechDocs entity
+spec:
+  type: url
+  target: ./techdocs/compliance-pipeline/catalog-info.yaml

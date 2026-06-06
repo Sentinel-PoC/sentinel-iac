@@ -1,0 +1,255 @@
+---
+# forgejo-runner.yml — OPS-319 / OPS-773
+# Version-controlled binary management for the Forgejo Actions runner on iac-control.
+#
+# Before IaC adoption the binary at /usr/local/bin/forgejo-runner was installed manually
+# on 2026-03-07 (v12.7.1). This tasks file ensures the binary matches the pinned version
+# + SHA256 in defaults/main.yml, atomically replacing it when stale.
+#
+# Idempotency:
+#   stat existing binary SHA256 vs. forgejo_runner_sha256 in defaults.
+#   If match  → download/install/cleanup all skip; no handler notified.
+#   If mismatch (or absent) → get_url downloads + sha256-verifies → copy atomically
+#     → notify: Restart forgejo-runner → handler fires at end of play.
+#
+# CAUTION: restarting forgejo-runner kills in-flight CI jobs (no graceful drain).
+# DO NOT APPLY without operator-pause confirmation. Restarting runner during
+# in-flight CI causes failed jobs.
+#
+# Targeted apply command (post-merge, operator-authorised low-CI window only):
+#   ansible-playbook ansible/playbooks/iac-control.yml --tags forgejo-runner
+#
+# Pre-apply safety check:
+#   ssh ubuntu@192.168.12.210 "journalctl -u forgejo-runner.service -n 10 --no-pager"
+#   Confirm no long-running jobs active (trivy DB download ~38 min, supply-chain-scan ~60 min).
+
+# ── 0. Forgejo /etc/hosts pin — bypass Pangolin VIP (OPS-773) ────────────────
+# OPS-773: iac-control's /etc/hosts must route forgejo.208.haist.farm to the
+# Forgejo server's internal IP (192.168.12.70), not the Pangolin edge VIP (.168).
+# The Pangolin long-poll path can sever the runner's task-poll connection, causing
+# the RESULT_CANCELLED wedge. Direct HTTP :3000 to Forgejo bypasses Pangolin entirely.
+#
+# This task removes any stale .168 entry and ensures the correct .70 pin is present.
+# harbor.208.haist.farm resolves correctly via dnsmasq wildcard → .168 (Pangolin, correct for HTTPS).
+#
+# The runner daemon address is set in /opt/forgejo-runner/.runner (runner-generated file).
+# See forgejo_runner_instance_url in defaults/main.yml. OPS-1028 enforces that field below
+# (step 0a), ensuring re-registration cannot silently revert to the Pangolin HTTPS URL.
+
+- name: Remove stale Pangolin-routed forgejo /etc/hosts entry (OPS-773)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^192\.168\.12\.168\s.*forgejo\.208\.haist\.farm'
+    state: absent
+  tags:
+    - services
+    - forgejo-runner
+
+- name: Ensure forgejo.208.haist.farm resolves to Forgejo server direct IP in /etc/hosts (OPS-773)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "192.168.12.70 forgejo.208.haist.farm  # OPS-773: Forgejo server direct (not Pangolin VIP)"
+    regexp: '^192\.168\.12\.70\s.*forgejo\.208\.haist\.farm'
+    state: present
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 0a. Enforce .runner address field — bypass Pangolin URL (OPS-1028) ────────
+# /opt/forgejo-runner/.runner is runner-generated and re-created on every
+# registration. If re-registration occurs (e.g. runner reset, token expiry),
+# the address field reverts to the FQDN used at registration time. If that was
+# the Pangolin HTTPS URL (https://forgejo.208.haist.farm) the runner silently
+# wedges — Pangolin severs long-poll connections without notifying the runner
+# (TCP keepalive default 2 h), runner appears active but picks up no jobs.
+#
+# This task patches the JSON "address" field to the internal HTTP:3000 URL
+# whenever the file exists and contains the wrong address. The /etc/hosts pin
+# above (step 0) ensures http://forgejo.208.haist.farm:3000 → 192.168.12.70
+# (Forgejo server direct, not Pangolin VIP).
+#
+# Idempotency: replace only fires when the pattern matches. If the address is
+# already correct, the file is untouched and no handler is notified.
+# CAUTION: handler restart kills in-flight CI jobs. Apply during low-CI window.
+
+- name: Check if .runner file exists (OPS-1028)
+  ansible.builtin.stat:
+    path: /opt/forgejo-runner/.runner
+  register: runner_dot_runner_stat
+  tags:
+    - services
+    - forgejo-runner
+
+- name: Enforce internal Forgejo URL in .runner address field (OPS-1028)
+  # Replaces the "address" field only when it contains any URL other than
+  # forgejo_runner_instance_url. The regexp matches the JSON address field whose
+  # value is NOT the internal http:3000 URL. Regex uses a negative lookahead so
+  # the task is idempotent — if the address is already correct, no match, no change,
+  # no handler notification.
+  # forgejo_runner_instance_url = http://forgejo.208.haist.farm:3000 (defaults/main.yml)
+  ansible.builtin.replace:
+    path: /opt/forgejo-runner/.runner
+    regexp: '"address":\s*"(?!http://forgejo\.208\.haist\.farm:3000)[^"]*"'
+    replace: '"address": "{{ forgejo_runner_instance_url }}"'
+  when: runner_dot_runner_stat.stat.exists
+  notify: Restart forgejo-runner
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 1. Stat existing binary ───────────────────────────────────────────────────
+
+- name: Stat existing forgejo-runner binary (OPS-319)
+  ansible.builtin.stat:
+    path: /usr/local/bin/forgejo-runner
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: forgejo_runner_stat
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 2. Download + SHA256 verify to temp ──────────────────────────────────────
+# get_url with checksum: aborts if download SHA differs from forgejo_runner_sha256.
+# Skipped entirely if existing binary already matches the pinned SHA.
+
+- name: Download forgejo-runner (OPS-319) v{{ forgejo_runner_version }}
+  ansible.builtin.get_url:
+    url: "{{ forgejo_runner_url_template }}"
+    dest: "/tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+    checksum: "sha256:{{ forgejo_runner_sha256 }}"
+    mode: "0644"
+  when: >
+    not forgejo_runner_stat.stat.exists or
+    (forgejo_runner_stat.stat.checksum | default('')) != forgejo_runner_sha256
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 3. Atomic install ─────────────────────────────────────────────────────────
+# copy with remote_src replaces /usr/local/bin/forgejo-runner in one operation.
+# Notifies restart handler — handler fires at end of play.
+
+- name: Install forgejo-runner to /usr/local/bin (OPS-319) v{{ forgejo_runner_version }}
+  ansible.builtin.copy:
+    src: "/tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+    dest: /usr/local/bin/forgejo-runner
+    owner: root
+    group: root
+    mode: "0755"
+    remote_src: true
+  when: >
+    not forgejo_runner_stat.stat.exists or
+    (forgejo_runner_stat.stat.checksum | default('')) != forgejo_runner_sha256
+  notify: Restart forgejo-runner
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 4. Cleanup temp download ──────────────────────────────────────────────────
+
+- name: Clean up forgejo-runner temp download (OPS-319)
+  ansible.builtin.file:
+    path: "/tmp/forgejo-runner-{{ forgejo_runner_version }}-linux-amd64"
+    state: absent
+  when: >
+    not forgejo_runner_stat.stat.exists or
+    (forgejo_runner_stat.stat.checksum | default('')) != forgejo_runner_sha256
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 5. Working directory ──────────────────────────────────────────────────────
+
+- name: Create forgejo-runner working directory
+  ansible.builtin.file:
+    path: /opt/forgejo-runner
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 6. Systemd service unit ───────────────────────────────────────────────────
+
+- name: Deploy forgejo-runner systemd service
+  ansible.builtin.copy:
+    src: forgejo-runner.service
+    dest: /etc/systemd/system/forgejo-runner.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart forgejo-runner
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 7. Ensure service is enabled and running ──────────────────────────────────
+
+- name: Enable and start forgejo-runner
+  ansible.builtin.systemd:
+    name: forgejo-runner
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - forgejo-runner
+
+# ── 8. Wedge watchdog — RESULT_CANCELLED auto-recovery (OPS-775) ──────────────
+# Detects RESULT_CANCELLED/RESULT_UNSPECIFIED desync in the journal every 5 min
+# and auto-restarts forgejo-runner if the wedge pattern is present.
+# Idle runners produce no such log line → no false-positive restarts.
+
+- name: Deploy forgejo-runner-watchdog script (OPS-775)
+  ansible.builtin.copy:
+    src: forgejo-runner-watchdog.sh
+    dest: /usr/local/bin/forgejo-runner-watchdog.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - services
+    - forgejo-runner
+    - watchdog
+
+- name: Deploy forgejo-runner-watchdog systemd service (OPS-775)
+  ansible.builtin.copy:
+    src: forgejo-runner-watchdog.service
+    dest: /etc/systemd/system/forgejo-runner-watchdog.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - forgejo-runner
+    - watchdog
+
+- name: Deploy forgejo-runner-watchdog systemd timer (OPS-775)
+  ansible.builtin.copy:
+    src: forgejo-runner-watchdog.timer
+    dest: /etc/systemd/system/forgejo-runner-watchdog.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - services
+    - forgejo-runner
+    - watchdog
+
+- name: Enable and start forgejo-runner-watchdog timer (OPS-775)
+  ansible.builtin.systemd:
+    name: forgejo-runner-watchdog.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - services
+    - forgejo-runner
+    - watchdog

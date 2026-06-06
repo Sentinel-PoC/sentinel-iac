@@ -1,0 +1,42 @@
+---
+# chrony-client role tasks — OPS-288
+# Configures all non-NTP-server hosts to use iac-control + vault-server for NTP
+# NIST: AU-8, AU-8(1), SC-45
+
+- name: Install chrony
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == 'Debian'
+  tags:
+    - chrony-client
+    - ntp
+
+- name: Deploy chrony client configuration
+  ansible.builtin.template:
+    src: chrony-client.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chronyd
+  tags:
+    - chrony-client
+    - ntp
+
+- name: Enable and start chronyd
+  ansible.builtin.service:
+    name: chrony
+    enabled: true
+    state: started
+  tags:
+    - chrony-client
+    - ntp
+
+- name: Force immediate clock step after config change (flush handlers first)
+  ansible.builtin.meta: flush_handlers
+  tags:
+    - chrony-client
+    - ntp

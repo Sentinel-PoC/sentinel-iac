@@ -1,0 +1,6 @@
+---
+- name: Restart pangolin
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ pangolin_dir }}"
+  changed_when: true

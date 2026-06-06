@@ -1,0 +1,10 @@
+[Unit]
+Description=UniFi → NetBox drift detection every {{ unifi_netbox_drift_schedule }}
+
+[Timer]
+OnCalendar={{ unifi_netbox_drift_schedule }}
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Harbor image mirror sweep — daily at 03:00 UTC (SEC-64)
+Documentation=https://192.168.12.68/sentinel/sentinel-iac/-/blob/main/docs/runbooks/12-upstream-image-trust.md
+
+[Timer]
+# Run daily at 03:00 UTC — outside business hours, after nist-compliance-check (06:00)
+# and before evidence-pipeline (07:00). This ensures fresh images for morning scans.
+OnCalendar=*-*-* 03:00:00 UTC
+# Randomize start within 10 minutes to avoid thundering herd with other timers
+RandomizedDelaySec=600
+# Run immediately on boot if the last run was missed (e.g., host was down)
+Persistent=true
+Unit=harbor-sweep.service
+
+[Install]
+WantedBy=timers.target

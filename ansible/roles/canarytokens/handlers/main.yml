@@ -1,0 +1,21 @@
+---
+- name: Restart canarytokens
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ canarytokens_dir }}/src"
+  changed_when: false
+  tags: [canarytokens]
+
+- name: Reload canarytokens frontend
+  ansible.builtin.command:
+    cmd: docker compose restart frontend
+    chdir: "{{ canarytokens_dir }}/src"
+  changed_when: false
+  tags: [canarytokens]
+
+- name: Restart webhook receiver
+  ansible.builtin.systemd:
+    name: canarytokens-webhook
+    state: restarted
+    daemon_reload: true
+  tags: [canarytokens, webhook]

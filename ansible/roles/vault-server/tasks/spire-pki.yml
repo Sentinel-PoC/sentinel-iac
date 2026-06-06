@@ -1,0 +1,682 @@
+---
+# vault-server role — SPIRE PKI provisioning (OPS-352)
+#
+# Bootstraps the Vault infrastructure required for SPIRE Server's upstream authority:
+#   0. Enable spire-root/ PKI mount — self-signed root CA (fully independent of production PKI)
+#   1. Enable spire-pki/ PKI mount (intermediate CA)
+#   2. Generate an intermediate CA CSR from spire-pki/
+#   3. Sign the CSR with spire-root/ (chain: SPIRE Root → spire-pki → SPIRE Server CA)
+#      NOT pki_int/ — fully decoupled from Vault production PKI tree (OPS-352 B+C fix)
+#   4. Set the signed cert back in spire-pki/
+#   5. Configure issuer/CRL URLs for spire-pki/
+#   6. Create Vault role spire-upstream-authority on spire-pki/
+#   7. Create Vault policy spire-upstream-authority
+#   8. Enable AppRole auth method (no-op if already enabled)
+#   9. Create AppRole role spire-server-upstream-authority bound to that policy
+#  10. Read role_id; generate secret_id if not already stored; persist to
+#      secret/spire-server/approle-credentials (fields: role_id, secret_id)
+#
+# Security model (post-OPS-352 fix):
+#   - No long-lived token on disk. SPIRE authenticates via AppRole at startup.
+#   - role_id is semi-public; secret_id is the credential (stored in Vault KV,
+#     written to disk at /etc/spire-server/vault-secret-id mode 0600).
+#   - secret_id can be rotated independently without touching SPIRE config.
+#     To rotate: delete secret/spire-server/approle-credentials and re-run
+#     --tags spire-pki, then re-run iac-control --tags spire-server.
+#   - Trust chain: spire-root (self-signed, 10y) → spire-pki (intermediate, 5y)
+#     → SPIRE Server CA → workload SVIDs. Decoupled from Vault production PKI.
+#
+# All Vault API calls delegate to localhost (the Ansible controller) so they
+# execute from wherever ansible-playbook is invoked — the controller must have
+# a valid Vault token at ~/.vault-token with sufficient privileges.
+#
+# USAGE (one-time bootstrap — run before deploying the SPIRE container):
+#   ansible-playbook -i inventory/hosts.yml playbooks/vault-server.yml --tags spire-pki
+#
+# IDEMPOTENCY: each step checks current state before acting. Safe to re-run.
+# NOTE: if spire-pki/ CA is already configured with the old pki_int/ chain,
+# run with --extra-vars 'spire_force_intermediate_resign=true' to force re-signing.
+
+# ── Shared vars ──────────────────────────────────────────────────────────────
+
+- name: SPIRE-PKI | Read Vault token from controller
+  ansible.builtin.set_fact:
+    _vault_root_token: "{{ lookup('file', '~/.vault-token') | trim }}"
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Set Vault API base URL
+  ansible.builtin.set_fact:
+    _vault_api: "https://vault.208.haist.farm/v1"
+  delegate_to: localhost
+  run_once: true
+  tags: [vault, spire-pki]
+
+# ── Step 0 — Enable spire-root/ self-signed root PKI ─────────────────────────
+# spire-root/ is a fully isolated trust root — not chained to Vault pki/ or pki_int/.
+# Compromise of SPIRE Server does NOT allow minting certs trusted by Vault production PKI.
+
+- name: SPIRE-PKI | Check if spire-root/ mount exists
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/mounts"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: 200
+  register: _vault_mounts
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Enable spire-root/ PKI secrets engine (self-signed root)
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/mounts/spire-root"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      type: "pki"
+      description: "SPIRE root CA (self-signed, isolated from production PKI) — OPS-352"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: "'spire-root/' not in (_vault_mounts.json | default({}))"
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Tune spire-root/ mount (max_lease_ttl 10 years)
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/mounts/spire-root/tune"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      max_lease_ttl: "87600h"
+      default_lease_ttl: "87600h"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Check if spire-root/ CA is already configured
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-root/ca/pem"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: [200, 204, 400, 404]
+    return_content: true
+  register: _spire_root_ca_check
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  failed_when: false
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Generate spire-root/ self-signed root CA
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-root/root/generate/internal"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      common_name: "SPIRE Root CA — agents.haist.farm"
+      organization: "HAIST"
+      country: "US"
+      key_type: "rsa"
+      key_bits: 4096
+      ttl: "87600h"
+    validate_certs: true
+    status_code: 200
+  register: _spire_root_gen
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  when: >
+    _spire_root_ca_check.status in [400, 404] or
+    (_spire_root_ca_check.content | default('')) | length < 100
+  tags: [vault, spire-pki]
+
+# ── Step 1 — Enable spire-pki/ PKI mount ─────────────────────────────────────
+
+- name: SPIRE-PKI | Enable spire-pki/ PKI secrets engine
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/mounts/spire-pki"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      type: "pki"
+      description: "SPIRE Server upstream authority PKI — OPS-352"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: "'spire-pki/' not in (_vault_mounts.json | default({}))"
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Tune spire-pki/ mount (max_lease_ttl 10 years)
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/mounts/spire-pki/tune"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      max_lease_ttl: "87600h"
+      default_lease_ttl: "8760h"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, spire-pki]
+
+# ── Step 2-4 — Intermediate CA chain ─────────────────────────────────────────
+
+- name: SPIRE-PKI | Check if spire-pki/ CA is already configured
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-pki/ca/pem"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: [200, 204, 400, 404]
+    return_content: true
+  register: _spire_pki_ca_check
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  failed_when: false
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Generate intermediate CA CSR from spire-pki/
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-pki/intermediate/generate/internal"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      common_name: "SPIRE PKI Intermediate — agents.haist.farm"
+      organization: "HAIST"
+      country: "US"
+      key_type: "rsa"
+      key_bits: 4096
+      max_path_length: 1
+    validate_certs: true
+    status_code: 200
+  register: _spire_pki_csr
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  when: >
+    (spire_force_intermediate_resign | default(false) | bool) or
+    _spire_pki_ca_check.status in [400, 404] or
+    (_spire_pki_ca_check.content | default('')) | length < 100
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Sign intermediate CSR with spire-root/ (isolated SPIRE trust root)
+  # Signs spire-pki/ intermediate with the dedicated spire-root/ CA — NOT pki_int/.
+  # This decouples the SPIRE trust chain from Vault production PKI entirely.
+  # A compromised SPIRE Server cannot mint certs trusted by anything outside agents.haist.farm.
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-root/root/sign-intermediate"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      csr: "{{ _spire_pki_csr.json.data.csr }}"
+      common_name: "SPIRE PKI Intermediate — agents.haist.farm"
+      ttl: "43800h"
+      max_path_length: 1
+      use_csr_values: true
+    validate_certs: true
+    status_code: 200
+  register: _spire_pki_signed_cert
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  when: _spire_pki_csr is not skipped and _spire_pki_csr.json is defined
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Set signed certificate in spire-pki/
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-pki/intermediate/set-signed"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      certificate: "{{ _spire_pki_signed_cert.json.data.certificate }}"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  when: _spire_pki_signed_cert is not skipped and _spire_pki_signed_cert.json is defined
+  tags: [vault, spire-pki]
+
+# ── Step 5 — Configure URLs ───────────────────────────────────────────────────
+
+- name: SPIRE-PKI | Configure spire-pki/ issuer and CRL URLs
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-pki/config/urls"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      issuing_certificates: "https://vault.208.haist.farm/v1/spire-pki/ca"
+      crl_distribution_points: "https://vault.208.haist.farm/v1/spire-pki/crl"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [vault, spire-pki]
+
+# ── Step 6 — Create Vault role for SPIRE upstream-authority ──────────────────
+
+- name: SPIRE-PKI | Create spire-pki/ role spire-upstream-authority
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-pki/roles/spire-upstream-authority"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      # SPIRE generates its own CSRs with any CN; allow_any_name is required
+      allow_any_name: true
+      enforce_hostnames: false
+      # SPIRE CA certs need cert_sign and crl_sign key usage
+      key_usage:
+        - "CertSign"
+        - "CRLSign"
+      # SPIRE CA certs ARE CAs — disable the is-not-CA constraint
+      basic_constraints_valid_for_non_ca: false
+      is_ca: true
+      key_type: "rsa"
+      key_bits: 2048
+      max_ttl: "87600h"
+      ttl: "8760h"
+      not_before_duration: "30s"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [vault, spire-pki]
+
+# ── Step 7 — Vault policy ─────────────────────────────────────────────────────
+
+- name: SPIRE-PKI | Write Vault policy spire-upstream-authority
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/policies/acl/spire-upstream-authority"
+    method: PUT
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      policy: |
+        # Allow SPIRE Server to use spire-pki/ as upstream CA authority
+        # Used by the UpstreamAuthority "vault" plugin in SPIRE Server config
+        # Auth: AppRole (role spire-server-upstream-authority)
+        # Provisioned by Ansible OPS-352
+
+        # Read CA cert chain
+        path "spire-pki/cert/ca" {
+          capabilities = ["read"]
+        }
+
+        # Sign intermediate CAs — CA signing endpoint (SPIRE UpstreamAuthority calls this
+        # to issue its own intermediate CA via PUT /v1/spire-pki/root/sign-intermediate)
+        path "spire-pki/root/sign-intermediate" {
+          capabilities = ["create", "update"]
+        }
+
+        # Sign leaf certs via PKI role (for SVID issuance)
+        path "spire-pki/sign/spire-upstream-authority" {
+          capabilities = ["create", "update"]
+        }
+
+        # Issue certificates via the role
+        path "spire-pki/issue/spire-upstream-authority" {
+          capabilities = ["create", "update"]
+        }
+
+        # Read CRL for validation
+        path "spire-pki/crl" {
+          capabilities = ["read"]
+        }
+
+        # Root bundle access
+        path "spire-pki/ca/pem" {
+          capabilities = ["read"]
+        }
+
+        # Token self-renew (AppRole service token can renew itself to avoid re-auth churn)
+        path "auth/token/renew-self" {
+          capabilities = ["update"]
+        }
+
+        path "auth/token/lookup-self" {
+          capabilities = ["read"]
+        }
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [vault, spire-pki]
+
+# ── Step 8 — AppRole auth setup ───────────────────────────────────────────────
+# Replaces the long-lived periodic Vault token (OPS-352 fix B).
+# AppRole credentials: role_id (semi-public) + secret_id (rotatable credential).
+# No long-lived token written to disk. SPIRE re-authenticates via AppRole on startup.
+
+- name: SPIRE-PKI | Check if AppRole auth method is enabled
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/auth"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: 200
+  register: _vault_auth_methods
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Enable AppRole auth method (if not already enabled)
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/auth/approle"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      type: "approle"
+      description: "AppRole auth for service automation"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: "'approle/' not in (_vault_auth_methods.json | default({}))"
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Create AppRole role spire-server-upstream-authority
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/auth/approle/role/spire-server-upstream-authority"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      # Bind to the spire-upstream-authority policy
+      token_policies:
+        - "spire-upstream-authority"
+      # Service token: renewable, expires after max_ttl without renewal
+      token_type: "service"
+      token_ttl: "24h"
+      token_max_ttl: "87600h"
+      # secret_id: no TTL expiry (operator rotates via re-run); unlimited uses
+      secret_id_ttl: "0"
+      secret_id_num_uses: 0
+      # Require secret_id at login (do not allow secret_id-less logins)
+      bind_secret_id: true
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Read AppRole role_id for spire-server-upstream-authority
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/auth/approle/role/spire-server-upstream-authority/role-id"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: 200
+  register: _spire_approle_role_id
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Check if AppRole credentials are already stored in Vault KV
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/secret/data/spire-server/approle-credentials"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: true
+    status_code: [200, 404]
+  register: _spire_approle_creds_check
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  failed_when: false
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Generate AppRole secret_id for spire-server-upstream-authority
+  # Only generates a new secret_id if credentials are not already stored.
+  # To rotate: delete secret/spire-server/approle-credentials and re-run --tags spire-pki,
+  # then re-run iac-control --tags spire-server to write new files to disk.
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/auth/approle/role/spire-server-upstream-authority/secret-id"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      metadata: '{"managed_by": "ansible-ops-352", "purpose": "SPIRE Server upstream-authority AppRole auth"}'
+    validate_certs: true
+    status_code: 200
+  register: _spire_approle_secret_id
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: _spire_approle_creds_check.status == 404
+  tags: [vault, spire-pki]
+
+- name: SPIRE-PKI | Store AppRole credentials at secret/spire-server/approle-credentials
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/secret/data/spire-server/approle-credentials"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      data:
+        role_id: "{{ _spire_approle_role_id.json.data.role_id }}"
+        secret_id: "{{ _spire_approle_secret_id.json.data.secret_id }}"
+        secret_id_accessor: "{{ _spire_approle_secret_id.json.data.secret_id_accessor }}"
+        role_name: "spire-server-upstream-authority"
+        created_by: "ansible-ops-352"
+    validate_certs: true
+    status_code: 200
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+  when: _spire_approle_secret_id is not skipped and _spire_approle_secret_id.json is defined
+  tags: [vault, spire-pki]
+
+# ── Step 11 — Vault role + policy for x509pop node certs (OPS-553) ───────────
+# x509pop NodeAttestor requires each SPIRE Agent node to present a client-auth
+# certificate at attestation time. The SPIRE Server verifies the cert against
+# a trusted CA bundle. We re-use the existing spire-pki/ intermediate (already
+# the UpstreamAuthority) so the node certs are in the same isolated trust chain.
+#
+# A dedicated Vault PKI role "spire-node" is created with:
+#   - allow_any_name: true   (node certs can have any CN — workstation, iac-control)
+#   - client_flag: true      (x509pop requires client-auth Extended Key Usage)
+#   - server_flag: false     (not needed for node attestation)
+#   - key_type rsa 2048      (matches existing role posture)
+#   - max_ttl 8760h (1 year) — long-lived identity cert; Ansible renewal via
+#     --tags spire-node-certs. Short TTL would recreate the SVID-expiry problem.
+#   - not_before_duration 30s (clock-skew tolerance)
+#
+# The spire-upstream-authority policy is extended to allow signing via this role
+# so the SAME AppRole used for UpstreamAuthority can also be used (or a separate
+# Ansible-time Vault call with root token) to issue node certs. In practice,
+# Ansible issues the node certs at deploy time using the root token; they are
+# written to disk and the agent presents them at attestation. No runtime Vault
+# access needed for x509pop (unlike AppRole-based auth).
+
+- name: SPIRE-PKI | Create spire-pki/ role spire-node (x509pop node identity certs — OPS-553)
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/spire-pki/roles/spire-node"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      # Node identity certs — CN is the hostname; allow any name
+      allow_any_name: true
+      enforce_hostnames: false
+      # x509pop requires client-auth EKU
+      client_flag: true
+      server_flag: false
+      # Normal leaf cert (not a CA)
+      basic_constraints_valid_for_non_ca: true
+      is_ca: false
+      key_type: "rsa"
+      key_bits: 2048
+      # 1-year TTL — long-lived identity anchor. Rotate via --tags spire-node-certs.
+      max_ttl: "8760h"
+      ttl: "8760h"
+      not_before_duration: "30s"
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [vault, spire-pki, spire-node-pki]
+
+- name: SPIRE-PKI | Update policy spire-upstream-authority to include spire-node role
+  # Extends the existing policy to allow issuing/signing node identity certs
+  # via the spire-node role. Ansible uses this at deploy time (root token can
+  # also issue directly; this policy extension is for least-privilege future use).
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/sys/policies/acl/spire-upstream-authority"
+    method: PUT
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      policy: |
+        # Allow SPIRE Server to use spire-pki/ as upstream CA authority
+        # Used by the UpstreamAuthority "vault" plugin in SPIRE Server config
+        # Auth: AppRole (role spire-server-upstream-authority)
+        # Provisioned by Ansible OPS-352; extended OPS-553 (x509pop node certs)
+
+        # Read CA cert chain
+        path "spire-pki/cert/ca" {
+          capabilities = ["read"]
+        }
+
+        # Sign intermediate CAs — CA signing endpoint (SPIRE UpstreamAuthority calls this
+        # to issue its own intermediate CA via PUT /v1/spire-pki/root/sign-intermediate)
+        path "spire-pki/root/sign-intermediate" {
+          capabilities = ["create", "update"]
+        }
+
+        # Sign leaf certs via upstream-authority PKI role (for SVID issuance)
+        path "spire-pki/sign/spire-upstream-authority" {
+          capabilities = ["create", "update"]
+        }
+
+        # Issue certificates via the upstream-authority role
+        path "spire-pki/issue/spire-upstream-authority" {
+          capabilities = ["create", "update"]
+        }
+
+        # Issue node identity certificates via spire-node role (OPS-553 x509pop)
+        path "spire-pki/issue/spire-node" {
+          capabilities = ["create", "update"]
+        }
+
+        # Sign CSRs via spire-node role (alternative to issue for externally-generated keys)
+        path "spire-pki/sign/spire-node" {
+          capabilities = ["create", "update"]
+        }
+
+        # Read CRL for validation
+        path "spire-pki/crl" {
+          capabilities = ["read"]
+        }
+
+        # Root bundle access
+        path "spire-pki/ca/pem" {
+          capabilities = ["read"]
+        }
+
+        # Token self-renew (AppRole service token can renew itself to avoid re-auth churn)
+        path "auth/token/renew-self" {
+          capabilities = ["update"]
+        }
+
+        path "auth/token/lookup-self" {
+          capabilities = ["read"]
+        }
+    validate_certs: true
+    status_code: [200, 204]
+  delegate_to: localhost
+  run_once: true
+  no_log: false
+  tags: [vault, spire-pki, spire-node-pki]
+
+# ── Completion summary ────────────────────────────────────────────────────────
+
+- name: SPIRE-PKI | Report provisioning result
+  ansible.builtin.debug:
+    msg: >
+      SPIRE PKI provisioning complete (OPS-352 / OPS-553).
+      spire-root/ self-signed root CA: active (isolated from Vault production PKI).
+      spire-pki/ intermediate CA: active (signed by spire-root/, NOT pki_int/).
+      AppRole role spire-server-upstream-authority: created.
+      AppRole credentials: stored at secret/spire-server/approle-credentials.
+      spire-node PKI role: created on spire-pki/ for x509pop node identity certs (OPS-553).
+      Next step: run iac-control playbook with --tags spire-server to deploy the container.
+      To rotate secret_id: delete secret/spire-server/approle-credentials, re-run --tags spire-pki,
+      then re-run iac-control --tags spire-server.
+      To renew node certs: re-run iac-control + workstation playbooks with --tags spire-node-certs.
+  delegate_to: localhost
+  run_once: true
+  tags: [vault, spire-pki]

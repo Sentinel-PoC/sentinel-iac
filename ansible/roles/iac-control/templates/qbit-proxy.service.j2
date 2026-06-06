@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=qBittorrent TCP proxy to seedbox VM
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/socat TCP-LISTEN:{{ qbit_proxy_listen_port }},fork,reuseaddr TCP:{{ qbit_proxy_target }}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

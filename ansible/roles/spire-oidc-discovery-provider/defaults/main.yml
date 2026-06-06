@@ -1,0 +1,136 @@
+---
+# spire-oidc-discovery-provider role defaults
+# OPS-537 / OPS-351 Phase 4.4a — Deploy spire-oidc-discovery-provider sidecar
+#
+# This role deploys the SPIFFE-official oidc-discovery-provider container as
+# a sidecar to spire-server on iac-control. The provider serves
+#   /.well-known/openid-configuration
+#   /keys
+# over HTTPS, so Vault's JWT auth backend can consume SPIRE's JWKS via
+# standard OIDC discovery in Phase 4.4b (OPS-536).
+#
+# Why this exists — empirical findings captured in OPS-536 DESIGN-CALL and
+# OPS-537 PLAN comments:
+#   1. SPIRE 1.14.6 JWT-SVIDs emit no `iss` claim — Vault `bound_issuer`
+#      cannot be set against them, ruling out extending the existing
+#      OPS-345 jwt/ mount.
+#   2. SPIRE Server exposes JWKS only via the local gRPC API socket.
+#      The oidc-discovery-provider is the SPIFFE-canonical bridge to HTTP.
+#   3. Rotation-safe — SPIRE rotates JWT signing keys every 12h; the
+#      provider polls the server API and re-publishes keys automatically.
+#      Static-JWKS approaches in Vault would break on every rotation.
+#
+# Mode: server_api (reads spire-server's API socket via shared bind-mount).
+# Listen: serving_cert_file (Vault-PKI-issued cert on a distinct port; haproxy
+# already binds :443 on iac-control for OKD frontend, so we use :8443).
+#
+# Phase boundary: 4.4a authors "JWKS served over HTTP". 4.4b (OPS-536)
+# configures Vault's auth/jwt-spire/ mount to consume this endpoint.
+# Functional JWT-SVID auth against Vault is Phase 4.5 (OPS-NNN).
+
+# ── Image ──────────────────────────────────────────────────────────────────
+# ghcr.io/spiffe/oidc-discovery-provider:1.14.6 — multi-arch OCI image index
+# verified at ghcr.io/v2/spiffe/oidc-discovery-provider/manifests/1.14.6
+# (HTTP 200 with Accept: application/vnd.oci.image.index.v1+json).
+# Tag matched to spire-server tag for upstream coherence.
+spire_oidc_image: "ghcr.io/spiffe/oidc-discovery-provider"
+spire_oidc_image_version: "1.14.6"
+
+# ── Container identity ────────────────────────────────────────────────────
+spire_oidc_container_name: "spire-oidc-discovery-provider"
+
+# Runs as the same UID/GID as spire-server (currently 0) so it can read
+# the API socket spire-server creates. UID-0-in-container hardening is
+# tracked separately in OPS-358 for the broader SPIRE deployment.
+spire_oidc_uid: "{{ spire_server_uid }}"
+spire_oidc_gid: "{{ spire_server_gid }}"
+
+# ── Listen / serving ──────────────────────────────────────────────────────
+# Bind to a distinct port on iac-control's LAN IP. HAProxy on iac-control
+# already binds 0.0.0.0:443 for OKD; touching haproxy.cfg would expand scope.
+spire_oidc_lan_ip: "192.168.12.210"
+spire_oidc_host_port: "8443"
+spire_oidc_container_listen_port: "8443"
+
+# FQDN served. Must match the cert SAN and the Vault oidc_discovery_url
+# configured in Phase 4.4b. Locked here so 4.4b knows the exact host.
+spire_oidc_fqdn: "spire-oidc.208.haist.farm"
+
+# JWT issuer string published in /.well-known/openid-configuration as `issuer`.
+# Vault uses this as the canonical OIDC issuer for the discovery document.
+# Note: this is distinct from any JWT-SVID `iss` claim (SPIRE 1.14 emits none);
+# it is purely the OIDC document `issuer` field that Vault matches against
+# oidc_discovery_url. Locked here so 4.4b knows what to expect.
+spire_oidc_jwt_issuer: "https://{{ spire_oidc_fqdn }}:{{ spire_oidc_host_port }}"
+
+# Allowed Host headers. Provider rejects requests whose Host doesn't match.
+#
+# Each entry is validated through golang.org/x/net/idna and MUST be a bare
+# DNS hostname — host:port is rejected with "idna: disallowed rune U+003A"
+# and the container crash-loops. Upstream contract:
+#   github.com/spiffe/spire/support/oidc-discovery-provider/README.md
+#     > domains: One or more domains the provider is being served from
+# Reference: PR #188 review id 365 (Judge-019), OPS-537 revision.
+spire_oidc_domains:
+  - "{{ spire_oidc_fqdn }}"
+
+# ── Server API socket sharing ─────────────────────────────────────────────
+# Host directory bind-mounted into BOTH spire-server and oidc-discovery-provider
+# at /tmp/spire-server/private. spire-server creates api.sock here on startup
+# (its built-in default socket_path); provider reads via unix:// gRPC.
+#
+# Path matches the spire_server_admin_socket_container default already declared
+# in iac-control/defaults/main.yml — repo-precedent for this very use.
+spire_oidc_socket_host_dir: "/var/run/spire-server-api"
+spire_oidc_socket_container_dir: "/tmp/spire-server/private"
+spire_oidc_socket_container_path: "{{ spire_oidc_socket_container_dir }}/api.sock"
+spire_oidc_socket_address: "unix://{{ spire_oidc_socket_container_path }}"
+
+# Provider polls server for bundle/keys at this cadence. Default 10s.
+# Faster than X509 CA rotation cadence (12h) and JWT-SVID TTL (300s), so
+# new keys are picked up promptly. SPIRE upstream default.
+spire_oidc_poll_interval: "10s"
+
+# ── TLS cert source (Vault PKI) ───────────────────────────────────────────
+# Cert is issued at deploy time by POSTing to Vault PKI's issue endpoint.
+# PREREQ: the named PKI mount + role must exist with permitted CN
+# {{ spire_oidc_fqdn }} and ip_sans {{ spire_oidc_lan_ip }}. If absent,
+# the issue call returns 4xx and the task fails clearly; in that case
+# file an OPS-NNN-precursor PR to create the Vault role before re-running.
+#
+# Mount + role names are defaults; override via group_vars/host_vars if the
+# pki_int mount path or role naming convention differs in this environment.
+spire_oidc_vault_pki_mount: "pki_int"
+spire_oidc_vault_pki_role: "spire-oidc-discovery-provider"
+spire_oidc_vault_addr: "https://vault.208.haist.farm"
+
+# Cert lifecycle: issue 30d certs; reissue when remaining lifetime < 14d.
+# Renewal automation (Vault-PKI watch + auto-rotate) is a follow-up issue.
+spire_oidc_cert_ttl: "720h"          # 30 days
+spire_oidc_cert_renewal_threshold_days: 14
+
+# ── File paths (host) ─────────────────────────────────────────────────────
+spire_oidc_config_dir: "/etc/spire-oidc-discovery-provider"
+spire_oidc_tls_dir: "{{ spire_oidc_config_dir }}/tls"
+spire_oidc_cert_path: "{{ spire_oidc_tls_dir }}/cert.pem"
+spire_oidc_key_path: "{{ spire_oidc_tls_dir }}/key.pem"
+
+# Container paths (read-only mounts)
+spire_oidc_config_dir_container: "/etc/spire-oidc-discovery-provider"
+spire_oidc_tls_dir_container: "{{ spire_oidc_config_dir_container }}/tls"
+spire_oidc_cert_path_container: "{{ spire_oidc_tls_dir_container }}/cert.pem"
+spire_oidc_key_path_container: "{{ spire_oidc_tls_dir_container }}/key.pem"
+spire_oidc_config_path_container: "{{ spire_oidc_config_dir_container }}/oidc-discovery-provider.conf"
+
+# Modes
+spire_oidc_dir_mode: "0750"
+spire_oidc_secret_dir_mode: "0700"
+spire_oidc_secret_file_mode: "0600"
+
+# Log
+spire_oidc_log_level: "info"
+spire_oidc_log_format: "text"
+
+# Health check port (in-container). Provider built-in /ready and /live.
+spire_oidc_health_port_container: "8008"
+spire_oidc_health_port_host: "127.0.0.1:8009"   # loopback-only on host

@@ -1,0 +1,21 @@
+---
+# CrowdSec role defaults
+
+# Collections to install
+crowdsec_collections:
+  - crowdsecurity/traefik
+  - crowdsecurity/http-cve
+  - crowdsecurity/linux
+
+# Traefik access log path (set per-host)
+crowdsec_traefik_log_path: "/var/log/traefik/access.log"
+
+# Auth log path
+crowdsec_auth_log_path: "/var/log/auth.log"
+
+# Install firewall bouncer
+crowdsec_firewall_bouncer: true
+
+# Prometheus metrics
+crowdsec_prometheus_port: 6060
+crowdsec_prometheus_enabled: true

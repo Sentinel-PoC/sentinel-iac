@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# Chrony NTP client configuration — OPS-288
+# Synchronized to internal NTP infrastructure (iac-control + vault-server)
+# Internal servers upstream to time.nist.gov (authoritative)
+# AU-8 / AU-8(1) / SC-45 compliance
+
+# --- Internal NTP servers ---
+{% for entry in chrony_internal_servers %}
+server {{ entry.server }} {{ entry.options }}
+{% endfor %}
+
+# --- Drift and RTC ---
+driftfile /var/lib/chrony/chrony.drift
+
+# Step clock at any offset > threshold — defeats silent-drift failure mode
+# -1 = step at ANY time, not just the first N updates
+makestep {{ chrony_makestep_threshold }} {{ chrony_makestep_limit }}
+
+# Synchronise hardware (RTC) clock
+rtcsync
+
+# --- Client-only mode ---
+# Do not serve time to other hosts
+port 0
+cmdport 0
+
+# --- Logging ---
+logdir /var/log/chrony

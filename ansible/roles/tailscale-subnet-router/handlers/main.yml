@@ -1,0 +1,15 @@
+---
+# handlers/main.yml — tailscale-subnet-router role (OPS-671)
+
+- name: Reload sysctl
+  ansible.builtin.command:
+    cmd: sysctl --system
+  changed_when: false
+  listen: reload sysctl
+
+- name: Restart tailscaled
+  ansible.builtin.systemd:
+    name: tailscaled
+    state: restarted
+    daemon_reload: true
+  listen: restart tailscaled

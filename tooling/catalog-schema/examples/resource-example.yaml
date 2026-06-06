@@ -1,0 +1,32 @@
+---
+# Example: Resource entity (infrastructure — VM)
+# Validates against: tooling/catalog-schema/schema.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: vault-server
+  description: HashiCorp Vault secrets management and JIT SSH certificate authority
+  annotations:
+    backstage.io/techdocs-ref: "url:https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/raw/branch/main/techdocs/vault"
+    grafana/dashboard-url: https://grafana.208.haist.farm
+    sentinel.platform/lan-ip: "192.168.12.206"
+    sentinel.platform/vlan: servers
+    sentinel.platform/runbook-url: https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/src/branch/main/docs/runbooks/vault.md
+  links:
+    - url: https://vault.208.haist.farm
+      title: Vault UI
+      icon: dashboard
+  tags:
+    - secrets
+    - security
+    - vm-service
+    - overwatch
+spec:
+  type: vm
+  lifecycle: production
+  owner: platform-team
+  system: sentinel-platform
+  dependsOn:
+    - resource:proxmox-208-pve2
+  providesApis:
+    - vault-secrets-api

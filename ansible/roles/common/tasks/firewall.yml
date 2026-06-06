@@ -1,0 +1,141 @@
+---
+- name: Install ufw
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Set ufw default deny incoming
+  community.general.ufw:
+    direction: incoming
+    default: deny
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Set ufw default allow outgoing
+  community.general.ufw:
+    direction: outgoing
+    default: allow
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Allow SSH before enabling firewall
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    comment: "SSH access"
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Allow service-specific ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    comment: "Sentinel service port"
+  loop: "{{ firewall_allowed_ports | difference([22]) }}"
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+    - firewall_allowed_ports | length > 0
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Allow extra rules (with or without source IP restriction, non-FORWARD)
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto | default('tcp') }}"
+    src: "{{ item.from_ip | default(omit) }}"
+    comment: "{{ item.comment | default('') }}"
+  loop: "{{ firewall_extra_rules | default([]) }}"
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+    - firewall_extra_rules | default([]) | length > 0
+    - item.route is not defined or not item.route
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Allow extra FORWARD (route) rules
+  community.general.ufw:
+    rule: allow
+    route: true
+    port: "{{ item.port | default(omit) }}"
+    proto: "{{ item.proto | default('tcp') }}"
+    src: "{{ item.from_ip | default(omit) }}"
+    dest: "{{ item.to_ip | default(omit) }}"
+    comment: "{{ item.comment | default('') }}"
+  loop: "{{ firewall_extra_rules | default([]) }}"
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+    - firewall_extra_rules | default([]) | length > 0
+    - item.route is defined and item.route
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Enable ufw
+  community.general.ufw:
+    state: enabled
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Enable ufw logging
+  community.general.ufw:
+    logging: 'on'
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening
+
+- name: Ensure IPv6 is enabled in ufw config
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^IPV6='
+    line: 'IPV6=yes'
+  when:
+    - firewall_enabled
+    - ansible_os_family == 'Debian'
+  tags:
+    - common
+    - firewall
+    - hardening

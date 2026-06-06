@@ -1,0 +1,11 @@
+[Unit]
+Description=Check auto-unseal token TTL against Transit Vault
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vault-token-watchdog.sh
+User=root
+# Token stays in config.hcl (0644 root:root, readable by root only for secret)
+# Log file created by the script on first run

@@ -1,0 +1,116 @@
+---
+# OPS-370: Nightly gitleaks full-history sweep
+#
+# Context: the gitleaks job in security-scan.yml runs `gitleaks detect --source .`
+# which scans only the working tree (current HEAD content). It will NOT catch
+# secrets that were committed and later deleted or overwritten before gitleaks
+# was wired. This scheduled workflow adds full git history scanning with
+# `--log-opts="--all"` to cover that gap.
+#
+# Pattern: same DefectDojo upload pattern as security-scan.yml gitleaks job.
+# Non-blocking (exit-code 0): scheduled sweeps are visibility, not gates.
+# Cron offset from :00 to avoid peak load (30 2 * * * = 02:30 UTC daily).
+#
+# NIST controls: IA-5(6) (Authenticator Protection), AU-2 (Event Logging).
+name: gitleaks-full-history
+
+on:
+  schedule:
+    - cron: "30 2 * * *"  # OPS-370: nightly full-history sweep at 02:30 UTC
+  workflow_dispatch:  # break-glass + empirical verification
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false  # scheduled sweeps must not cancel each other
+
+jobs:
+  gitleaks-full-history:
+    runs-on: cpu-heavy  # [OPS-618] Route to pve4 pool — CPU-intensive scan, no iac-control local deps
+    # Non-blocking: full-history findings surface pre-gitleaks era secrets.
+    # They require operator triage (likely already rotated); hard-fail would
+    # permanently break the scheduled sweep. Set to false when baseline is clean.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: ${{ github.job }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ${{ github.job }}
+          # Full git history required for --log-opts="--all"
+          fetch-depth: 0
+
+      - name: Gitleaks full-history secret detection
+        run: |
+          echo "Running gitleaks full-history scan (--log-opts=--all)..."
+          # --log-opts="--all": scan ALL commits across ALL branches and tags,
+          # not just the current working tree. This catches secrets committed
+          # before gitleaks was wired that were later overwritten or deleted.
+          # --redact: replace secret value with REDACTED in the report so the
+          # report itself does not contain the leaked value.
+          # --exit-code 0: non-blocking; report is the artifact, not the gate.
+          # --no-banner: cleaner CI output.
+          gitleaks detect \
+            --source . \
+            --log-opts="--all" \
+            --redact \
+            --exit-code 0 \
+            --no-banner \
+            --report-format json \
+            --report-path gitleaks-full-history-report.json \
+          || true
+          FINDINGS=$(jq 'length' gitleaks-full-history-report.json 2>/dev/null || echo 0)
+          echo "Full-history scan complete. Findings: ${FINDINGS}"
+          if [ "${FINDINGS}" -gt 0 ]; then
+            echo "::warning::gitleaks found ${FINDINGS} secret(s) in git history. Review report artifact and confirm rotation status."
+          else
+            echo "No secrets found in full git history."
+          fi
+
+      - uses: actions/upload-artifact@v3
+        if: always() && hashFiles('gitleaks-full-history/gitleaks-full-history-report.json') != ''
+        with:
+          name: gitleaks-full-history-report-${{ github.run_id }}
+          path: ${{ github.job }}/gitleaks-full-history-report.json
+          retention-days: 90
+
+      - name: Upload to DefectDojo
+        # Upload on schedule or dispatch events (same guard as trivy-image-nightly).
+        # Non-blocking: warn on failure but do not fail the sweep.
+        if: >-
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+          hashFiles('gitleaks-full-history/gitleaks-full-history-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          FINDINGS=$(jq 'length' gitleaks-full-history-report.json 2>/dev/null || echo 0)
+          if [ "${FINDINGS}" -eq 0 ]; then
+            echo "No findings — skipping DefectDojo upload (empty payload rejected, OPS-185)"
+            exit 0
+          fi
+          echo "Uploading ${FINDINGS} gitleaks full-history finding(s) to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Gitleaks Scan" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Scheduled Sweeps — Secrets" \
+            -F "test_title=Gitleaks Full-History Secret Detection" \
+            -F "auto_create_context=true" \
+            -F "file=@gitleaks-full-history-report.json" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" \
+            -F "minimum_severity=Info" \
+            -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=gitleaks,secrets,full-history,scheduled" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "DefectDojo upload HTTP status: ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "::warning::DefectDojo upload failed (HTTP ${HTTP_CODE}): ${BODY}"
+            echo "::warning::Gitleaks full-history findings available as workflow artifact"
+          else
+            echo "Gitleaks full-history findings uploaded to DefectDojo (product: Sentinel IaC)"
+          fi

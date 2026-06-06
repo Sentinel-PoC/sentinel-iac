@@ -1,0 +1,163 @@
+---
+# docker_install.yml — Phase 2: Install Docker CE inside each runner LXC
+# OPS-582
+#
+# Mirrors docker_install.yml from ha-lxc (OPS-585).
+# Uses pct exec to run commands inside the LXC from the PVE host.
+# Docker CE from official apt repo; source: https://docs.docker.com/engine/install/ubuntu/
+#
+# Docker-in-LXC requirements (Proxmox 9.1.1, kernel 6.17+):
+#   - LXC must have features: nesting=1,keyctl=1 (set in lxc_provision.yml)
+#   - For unprivileged LXC: overlay2 storage driver works on kernel 6.17+ with nesting=1
+#   - If EPERM errors occur at Docker startup, see README.md for privileged LXC fallback
+
+# ── Check if Docker is already installed ─────────────────────────────────────
+
+- name: Check if Docker is installed inside runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- docker --version"
+  register: docker_installed
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, docker, install]
+
+# ── Install Docker CE via official apt repo ───────────────────────────────────
+
+- name: Update apt cache inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item.vmid }} -- apt-get update -qq"
+  when: item.rc != 0
+  changed_when: true
+  loop: "{{ docker_installed.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, docker, install]
+
+- name: Install prerequisite packages inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item.vmid }} -- apt-get install -y ca-certificates curl gnupg"
+  when: item.rc != 0
+  changed_when: true
+  loop: "{{ docker_installed.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, docker, install]
+
+- name: Add Docker GPG key inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.item.vmid }} -- bash -c
+      "install -m 0755 -d /etc/apt/keyrings &&
+       curl -fsSL https://download.docker.com/linux/ubuntu/gpg |
+       gpg --dearmor -o /etc/apt/keyrings/docker.gpg &&
+       chmod a+r /etc/apt/keyrings/docker.gpg"
+  when: item.rc != 0
+  changed_when: true
+  loop: "{{ docker_installed.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, docker, install]
+
+- name: Add Docker apt repository inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.item.vmid }} -- bash -c
+      "echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg]
+      https://download.docker.com/linux/ubuntu noble stable'
+      > /etc/apt/sources.list.d/docker.list"
+  when: item.rc != 0
+  changed_when: true
+  loop: "{{ docker_installed.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, docker, install]
+
+- name: Install Docker CE packages inside LXC
+  # Bug fix [OPS-740]: original used cmd: > with extra-indented package names.
+  # YAML fold preserves newlines for more-indented lines, so apt-get args landed
+  # on separate shell lines and bash executed 'docker-ce' as a command.
+  # Fix: all bash -c content at same base indentation so fold produces one line.
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.item.vmid }} -- bash -c
+      "apt-get update -qq &&
+      apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+  when: item.rc != 0
+  changed_when: true
+  loop: "{{ docker_installed.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, docker, install]
+
+# ── Enable Docker service ─────────────────────────────────────────────────────
+
+- name: Enable Docker service inside runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- systemctl enable --now docker"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, docker, service]
+
+- name: Add ubuntu user to docker group inside LXC
+  # Bug fix [OPS-740]: forgejo-runner service runs as User=ubuntu but ubuntu was
+  # not added to the docker group, causing permission-denied on /var/run/docker.sock.
+  # usermod -aG is safe to run repeatedly (no-op if already in group).
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- usermod -aG docker ubuntu"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, docker, service]
+
+- name: Deploy Docker daemon.json with internal DNS (OPS-697)
+  # Containers spawned by CI jobs must resolve *.208.haist.farm (e.g. defectdojo.208.haist.farm).
+  # Docker containers do NOT inherit LXC /etc/resolv.conf for container-internal DNS without
+  # an explicit daemon.json setting. Uses python3 -c via argv: to avoid shell quoting issues
+  # with embedded JSON. Only writes the file (and notifies restart docker) if content differs.
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid | string }}"
+      - "--"
+      - python3
+      - "-c"
+      - |
+          import json, os
+          desired = {"dns": {{ forgejo_runner_docker_dns | to_json }}}
+          path = "/etc/docker/daemon.json"
+          try:
+              with open(path) as f:
+                  current = json.load(f)
+          except Exception:
+              current = {}
+          if current != desired:
+              os.makedirs("/etc/docker", exist_ok=True)
+              with open(path, "w") as f:
+                  json.dump(desired, f)
+                  f.write("\n")
+              print("CHANGED")
+  register: daemon_json_result
+  changed_when: "'CHANGED' in daemon_json_result.stdout"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  notify: restart docker
+  tags: [forgejo-runner-pool, docker, config]
+
+- name: Verify Docker is running inside runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- docker info"
+  register: docker_info
+  changed_when: false
+  failed_when: docker_info.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, docker, verify]

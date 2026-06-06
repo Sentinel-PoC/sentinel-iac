@@ -1,0 +1,78 @@
+---
+# truenas-iscsi | target_destroy — delete iSCSI target by name (OPS-1011)
+#
+# SAFETY GATE: Requires confirm_destroy: true to execute any deletion.
+# Default confirm_destroy: false means this task logs a warning and skips.
+#
+# WARNING: TrueNAS will reject deletion if the target still has an associated
+# targetextent (LUN mapping). Run targetextent_destroy BEFORE target_destroy.
+#
+# Requires truenas_iscsi_target_name.
+
+- name: truenas-iscsi/target_destroy | validate target name is set
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_target_name | length > 0
+    fail_msg: "truenas_iscsi_target_name must be set"
+
+- name: truenas-iscsi/target_destroy | SAFETY GATE — warn and skip if confirm_destroy not set
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPING target deletion for '{{ truenas_iscsi_target_name }}'.
+      Set confirm_destroy: true to enable deletion.
+      WARNING: ensure targetextent_destroy has run first (TrueNAS rejects deleting
+      a target that still has an associated LUN mapping).
+  when: not confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/target_destroy | fetch all targets to find target by name
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/target"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_destroy_all_targets
+  when: confirm_destroy | bool
+  changed_when: false
+
+- name: truenas-iscsi/target_destroy | find target by name
+  ansible.builtin.set_fact:
+    truenas_iscsi_target_to_delete: >-
+      {{
+        truenas_iscsi_destroy_all_targets.json
+        | selectattr('name', 'equalto', truenas_iscsi_target_name)
+        | list
+      }}
+  when: confirm_destroy | bool
+
+- name: truenas-iscsi/target_destroy | report if target not found (skip)
+  ansible.builtin.debug:
+    msg: "Target '{{ truenas_iscsi_target_name }}' not found — nothing to delete (idempotent)"
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_target_to_delete | length == 0
+  changed_when: false
+
+- name: truenas-iscsi/target_destroy | delete target
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/target/id/{{ (truenas_iscsi_target_to_delete | first).id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: [200, 204]
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_target_to_delete | length > 0
+
+- name: truenas-iscsi/target_destroy | report deletion
+  ansible.builtin.debug:
+    msg: >-
+      Deleted target '{{ truenas_iscsi_target_name }}'
+      id={{ (truenas_iscsi_target_to_delete | first).id }}
+  when:
+    - confirm_destroy | bool
+    - truenas_iscsi_target_to_delete | length > 0
+  changed_when: false

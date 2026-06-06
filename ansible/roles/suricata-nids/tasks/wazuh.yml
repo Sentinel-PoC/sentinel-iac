@@ -1,0 +1,50 @@
+---
+# suricata-nids/tasks/wazuh.yml — OPS-569
+# Configure Wazuh agent to forward Suricata eve.json alerts
+# Adds a localfile stanza to ossec.conf using an agent config fragment.
+# Pattern mirrors existing host-specific blocks in wazuh-agent/templates/ossec.conf.j2.
+
+- name: Check if Wazuh agent is installed
+  ansible.builtin.stat:
+    path: "{{ wazuh_agent_config_path }}"
+  register: wazuh_ossec_conf
+  tags:
+    - suricata
+    - wazuh
+
+- name: Deploy Suricata eve.json Wazuh localfile fragment
+  ansible.builtin.blockinfile:
+    path: "{{ wazuh_agent_config_path }}"
+    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK suricata-nids OPS-569 -->"
+    insertbefore: "</ossec_config>"
+    block: |
+      <!-- OPS-569: Suricata eve.json alert forwarding -->
+      <!-- log_format=json: Wazuh parses eve.json natively as structured JSON events.
+           Suricata alert events appear in Wazuh Security Events under the NIDS category.
+           only-future-events: yes prevents replay of historical alerts on agent restart. -->
+      <localfile>
+        <log_format>json</log_format>
+        <location>{{ suricata_eve_json_path }}</location>
+        <label key="source">suricata-eve</label>
+        <only-future-events>yes</only-future-events>
+      </localfile>
+  when:
+    - suricata_wazuh_localfile_enabled
+    - wazuh_ossec_conf.stat.exists
+  notify: Restart wazuh-agent
+  tags:
+    - suricata
+    - wazuh
+
+- name: Warn if Wazuh agent not installed (eve.json forwarding skipped)
+  ansible.builtin.debug:
+    msg: >
+      WARNING: Wazuh agent ossec.conf not found at {{ wazuh_agent_config_path }}.
+      Suricata eve.json forwarding to Wazuh has been skipped.
+      Install the wazuh-agent role first, then re-run suricata-nids.
+  when:
+    - suricata_wazuh_localfile_enabled
+    - not wazuh_ossec_conf.stat.exists
+  tags:
+    - suricata
+    - wazuh

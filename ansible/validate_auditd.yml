@@ -1,0 +1,24 @@
+---
+- name: Validate auditd consistency
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Check auditd service status
+      ansible.builtin.systemd:
+        name: auditd
+      register: auditd_service
+      ignore_errors: true
+
+    - name: Assert correct auditd state for VMs
+      ansible.builtin.assert:
+        that:
+          - auditd_service.status.ActiveState == 'active'
+        fail_msg: "Auditd is not running on a VM: {{ inventory_hostname }}"
+      when: ansible_virtualization_type != 'lxc'
+
+    - name: Assert correct auditd state for LXCs
+      ansible.builtin.assert:
+        that:
+          - auditd_service.status.ActiveState != 'active' or auditd_service.status.LoadState == 'not-found'
+        fail_msg: "Auditd is active on an LXC: {{ inventory_hostname }} (not expected)"
+      when: ansible_virtualization_type == 'lxc'

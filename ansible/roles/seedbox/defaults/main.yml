@@ -1,0 +1,184 @@
+---
+# VPN provider — live uses "custom" for ProtonVPN WireGuard (custom config via env_file)
+vpn_provider: "custom"
+
+# wireguard_private_key + wireguard_public_key are NOT set here intentionally.
+# They are fetched at runtime from Vault (secret/seedbox/wireguard)
+# by the Vault fetch tasks in tasks/main.yml.
+# DO NOT set these variables inline, in extra-vars, or in inventory.
+# Doing so risks exposing the key in logs, agent telemetry, or version control.
+# See SEC-49 for the incident that motivated this requirement, SEC-62 for rotation procedure.
+wireguard_private_key: ""
+wireguard_public_key: ""
+
+# WireGuard non-secret configuration — set defaults matching current ProtonVPN config.
+# These are updated when rotating to a new ProtonVPN WireGuard config (new endpoint may differ).
+# Rotation: update Vault with all wireguard fields, then re-run Ansible (see gluetun-wg.env.j2).
+wireguard_addresses: "10.2.0.2/32"
+wireguard_endpoint_ip: "103.69.224.5"
+wireguard_endpoint_port: "51820"
+wireguard_keepalive_interval: "25s"
+wireguard_dns_address: "10.2.0.1"
+
+# vpn_countries retained for reference; not used in compose template (VPN_SERVICE_PROVIDER=custom
+# with ProtonVPN WireGuard uses server selection via the WireGuard endpoint in env_file, not
+# gluetun's server-country selection)
+vpn_countries: "Netherlands"
+
+# Directory paths
+seedbox_dir: "/home/koiakoia/seedbox"
+seedbox_config_dir: "/opt/seedbox_configs"
+seedbox_downloads_dir: "/home/koiakoia/seedbox/downloads"
+seedbox_qbittorrent_config_dir: "/opt/seedbox_configs/qbittorrent"
+seedbox_data_dir: "/mnt/data"
+
+# Port configuration
+qbittorrent_port: 8080
+seedbox_gluetun_control_port: 8000
+
+# Gluetun env_file (contains WIREGUARD_PRIVATE_KEY sourced from Vault — see SEC-49)
+seedbox_gluetun_env_file: "/etc/seedbox/gluetun-wg.env"
+
+# VPN port forwarding
+seedbox_vpn_port_forwarding: "on"
+seedbox_vpn_port_forwarding_provider: "protonvpn"
+
+# Firewall settings
+seedbox_firewall_outbound_subnets: "192.168.12.0/24,10.128.0.0/14"
+# SEC-73: 9696 (prowlarr) + 5454 (cross-seed) added — both services moved to gluetun namespace.
+# gluetun FIREWALL_INPUT_PORTS must list every port bound in the shared namespace.
+seedbox_firewall_input_ports: "8080,8000,9696,5454"
+
+# IPv6 blocking (ProtonVPN does not fully support IPv6 WireGuard; blocking prevents leaks)
+seedbox_block_ipv6: "on"
+
+# OPS-469: autobrr decommissioned 2026-05-09 (freeleech 3.7TiB incident).
+# Set to true to re-enable; false keeps the container out of docker-compose
+# and skips all autobrr Vault lookups and API configuration tasks.
+autobrr_enabled: false
+
+# autobrr — IRC announce / RSS push-based torrent grabber (OPS-321)
+# session_secret is NOT set here intentionally.
+# It is fetched at runtime from Vault (secret/seedbox/autobrr, key: session_secret).
+# DO NOT set inline or in extra-vars. Generate with: openssl rand -hex 32
+# Then: vault kv put secret/seedbox/autobrr session_secret="<value>"
+autobrr_session_secret: ""
+autobrr_port: 7474
+autobrr_config_dir: "/opt/seedbox_configs/autobrr"
+autobrr_env_file: "/etc/seedbox/autobrr.env"
+
+# cross-seed — cross-tracker torrent matching via Prowlarr (OPS-321 Phase 2)
+# prowlarr_api_key is NOT set here intentionally.
+# It is fetched at runtime from Vault (secret/seedbox/prowlarr, key: api_key).
+# DO NOT set inline or in extra-vars.
+# Source of truth: /opt/seedbox_configs/prowlarr/config.xml <ApiKey> element on VM.
+# Operator must stash BEFORE running this role:
+#   vault kv put secret/seedbox/prowlarr api_key="<value from prowlarr config.xml>"
+cross_seed_prowlarr_api_key: ""
+cross_seed_port: 5454
+cross_seed_config_dir: "/opt/seedbox_configs/cross-seed"
+cross_seed_config_file: "/etc/seedbox/cross-seed.config.js"
+
+# OPS-723: qBittorrent WebUI credentials for cross-seed authentication.
+# cross-seed connects to qBit at localhost:8080 from within the shared gluetun namespace.
+# qBit's bypass_auth_subnet_whitelist does not cover 127.0.0.0/8 by default, and
+# bypass_local_auth defaults to False — so credentials ARE required from loopback.
+# Two-layer fix: (1) these credentials in the URL, (2) qBit bypass_local_auth=True
+# set via the "Configure qBit loopback bypass" task below (belt-and-suspenders).
+# If qBit is ever given a real password, store in Vault secret/seedbox/qbittorrent
+# and fetch here (same pattern as prowlarr_api_key above). For now: seedbox-vm is
+# LAN-only, not internet-exposed, so defaults are operator-accepted risk.
+qbittorrent_username: "admin"
+qbittorrent_password: "adminadmin"
+
+# Prowlarr indexer IDs for private trackers — cross-seed searches ONLY these two.
+# Public trackers (YTS id=1, TPB id=2, EZTV id=4) are excluded: ratio there is irrelevant.
+# Confirmed from: curl -H "X-Api-Key: <key>" http://prowlarr:9696/api/v1/indexer
+# (use Docker DNS 'prowlarr:9696' inside seedbox_default network — NOT host IP)
+# If Prowlarr indexers are re-added/recreated, IDs may change — update here + re-run role.
+cross_seed_iptorrents_indexer_id: 7
+cross_seed_hdspace_indexer_id: 5
+
+# OPS-323: Sonarr/Radarr API keys — NOT set here intentionally.
+# Fetched at runtime from Vault (secret/seedbox/sonarr and secret/seedbox/radarr, key: api_key).
+# On first install: role reads key from container config.xml and writes to Vault.
+# On subsequent runs: Vault-stored key is rendered back into config.xml for rebuild-safety.
+# DO NOT set these inline or as extra-vars. Source of truth is Vault.
+sonarr_api_key: ""
+radarr_api_key: ""
+
+# OPS-321 Phase 1.5: autobrr API key — NOT set here intentionally.
+# Fetched at runtime from Vault (secret/seedbox/autobrr, key: api_key).
+# Created during Phase 1.5 API configuration session and stored alongside session_secret.
+# Used by autobrr API configuration tasks in tasks/main.yml.
+# DO NOT set inline or as extra-vars.
+autobrr_api_key: ""
+
+# OPS-321 Phase 1.5 — freeleech filter configuration
+# Filter "Freeleech - Private Trackers" targets IPTorrents and HD-Space RSS feeds.
+# autobrr indexer IDs (internal autobrr DB IDs, NOT Prowlarr IDs):
+#   autobrr indexer 1 → IPTorrents (Prowlarr ID 7)
+#   autobrr indexer 2 → HD-Space  (Prowlarr ID 5)
+# If autobrr indexers are recreated, IDs may change — query autobrr DB to confirm.
+autobrr_freeleech_filter_name: "Freeleech - Private Trackers"
+autobrr_freeleech_iptorrents_indexer_id: 1
+autobrr_freeleech_hdspace_indexer_id: 2
+autobrr_qbittorrent_client_id: 1
+autobrr_freeleech_category: "freeleech"
+autobrr_freeleech_save_path: "/mnt/data/torrents/freeleech"
+# Combined movie (2000-series) + TV (5000-series) categories for freeleech grabs.
+# Operator intent: passive ratio-building across all content types.
+autobrr_freeleech_match_categories: "2000,2010,2020,2030,2040,2045,2050,2060,2070,2080,5000,5010,5020,5030,5040,5045,5050,5060,5070,5080"
+
+# OPS-356: autobrr per-filter grab-volume cap — rate-limits the freeleech grab firehose.
+# max_downloads: maximum number of grabs allowed per max_downloads_unit window.
+# max_downloads_unit: HOUR | DAY | WEEK | MONTH | EVER
+# Start conservative at 10/HOUR; operator can tune up via Plane follow-up.
+autobrr_freeleech_max_downloads: 10
+autobrr_freeleech_max_downloads_unit: "HOUR"
+
+# OPS-356: qBit per-category save-path for freeleech (container-internal path).
+# Container path: /data maps to /mnt/data on host.
+# Setting this explicitly isolates freeleech grabs from the default /data/torrents
+# save path used by Sonarr/Radarr seeded library — a runaway grab cannot overwrite
+# committed seeds on a different sub-path.
+qbit_freeleech_save_path: "/data/torrents/freeleech"
+
+# OPS-356: TQM (Torrent Queue Manager — qbit_manage) configuration.
+# TQM removes freeleech torrents that have seeded long enough when disk is under pressure.
+# Removal condition: (ratio > tqm_max_ratio OR seeding_days >= tqm_max_seeding_days)
+#   AND free space on /data < tqm_min_free_space_gb GB.
+# DiskUsagePercent > tqm_max_disk_percent% is NOT a native qbit_manage field;
+# it is handled separately by Wazuh rule 101000 in local_rules.xml.
+tqm_config_dir: "/opt/seedbox_configs/tqm"
+tqm_config_file: "/opt/seedbox_configs/tqm/config.yml"
+tqm_schedule_minutes: 30
+tqm_max_ratio: 3.0
+tqm_max_seeding_days: 15
+tqm_min_free_space_gb: 50
+tqm_max_disk_percent: 85
+
+# OPS-1090: nohardlinks automation — H&R-safe seed floor for non-hardlinked torrent removal.
+# min_seeding_time for the noHL share_limits group: torrent must have seeded at least
+# this many minutes before qbit_manage will remove it.
+# Default: 20160 min = 14 days (covers all known private-tracker H&R requirements).
+# Operator may lower for public-only seedboxes; do NOT lower below 4320 (3d) for
+# any seedbox with private-tracker torrents.
+tqm_noHL_min_seeding_time: 20160
+
+# SEC-73: Arr stack service configuration — brought into IaC from OPS-180 override.
+# prowlarr moves to gluetun namespace (main docker-compose.yml.j2).
+# sonarr + radarr stay on bridge (docker-compose.override.yml.j2) — moving them requires
+# updating their internal Prowlarr indexer URL (sqlite DB) which is out of scope for SEC-73.
+#
+# POST-DEPLOYMENT MANUAL STEP: after Ansible run, update Prowlarr URL in sonarr AND radarr:
+#   Settings → Indexers → Prowlarr → URL: http://prowlarr:9696 → http://gluetun:9696
+# (gluetun exposes prowlarr's port on the bridge after this change)
+prowlarr_port: 9696
+prowlarr_config_dir: "/opt/seedbox_configs/prowlarr"
+
+sonarr_port: 8989
+sonarr_config_dir: "/opt/seedbox_configs/sonarr"
+
+radarr_port: 7878
+radarr_config_dir: "/opt/seedbox_configs/radarr"

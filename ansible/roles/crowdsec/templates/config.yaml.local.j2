@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+prometheus:
+  enabled: true
+  level: full
+  listen_addr: 0.0.0.0
+  listen_port: {{ crowdsec_prometheus_port }}

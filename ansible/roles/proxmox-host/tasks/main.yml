@@ -1,0 +1,274 @@
+---
+# Proxmox host nftables firewall
+# SEC-2: NIST SC-7(5) Deny by Default
+#
+# Safety: nftables.service loads /etc/nftables.conf on start.
+# If the config is invalid, the service fails and the previous
+# kernel ruleset remains. On reboot, no rules load = open access,
+# which is the current state anyway (fail-open baseline).
+#
+# Recovery mechanism (SEC-2 operator brief):
+# Before applying rules, a recovery cronjob is installed that flushes
+# nftables if /tmp/nftables-keep is not touched within 5 minutes.
+# This auto-reverts if the apply locks out SSH before verification.
+# The Ansible run touches the sentinel file at the end; the cron is
+# cleaned up after successful verification.
+
+# OPS-805: Kernel tuning — reduce swap pressure to keep VM pages in RAM
+# Writes /etc/sysctl.d/99-pve-tuning.conf and applies live via sysctl.
+# Default Debian/PVE swappiness is 60; 10 is appropriate for a hypervisor
+# where RAM must be reserved for guest workloads rather than kernel page cache.
+- name: Deploy PVE kernel tuning sysctl configuration
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-pve-tuning.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # OPS-805: PVE hypervisor kernel tuning
+      # Managed by Ansible — do not edit manually
+      vm.swappiness={{ pve_vm_swappiness }}
+  notify: Apply sysctl settings
+  tags:
+    - proxmox
+    - sysctl
+    - tuning
+
+- name: Pre-create nftables sentinel file (prevents recovery cron from triggering before rules are applied)
+  ansible.builtin.file:
+    path: /tmp/nftables-keep
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - recovery
+
+- name: Deploy nftables recovery script
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/nftables-recovery.sh
+    owner: root
+    group: root
+    mode: "0750"
+    content: |
+      #!/bin/bash
+      # nftables recovery: if /tmp/nftables-keep not touched in 5 min, flush rules.
+      # Installed by Ansible (SEC-2) during initial deploy. Self-removes on trigger.
+      SENTINEL=/tmp/nftables-keep
+      LOG=/var/log/nftables-recovery.log
+      NOW=$(date +%s)
+      if [ ! -f "$SENTINEL" ]; then
+          DELTA=9999
+      else
+          MTIME=$(stat -c %Y "$SENTINEL" 2>/dev/null || echo 0)
+          DELTA=$(( NOW - MTIME ))
+      fi
+      if [ "$DELTA" -gt 300 ]; then
+          echo "$(date --utc --iso-8601=seconds): RECOVERY TRIGGERED (sentinel ${DELTA}s stale) — flushing nftables" >> "$LOG"
+          nft flush ruleset
+          systemctl stop nftables
+          rm -f /etc/cron.d/nftables-recovery
+          echo "$(date --utc --iso-8601=seconds): Recovery complete — rules flushed, cron removed" >> "$LOG"
+      fi
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - recovery
+
+- name: Deploy nftables recovery cron job
+  ansible.builtin.copy:
+    dest: /etc/cron.d/nftables-recovery
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # SEC-2 nftables deployment safety net
+      # Auto-reverts if /tmp/nftables-keep is not touched within 5 minutes.
+      # Installed by Ansible before rule apply; remove after verification.
+      * * * * * root /usr/local/sbin/nftables-recovery.sh
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - recovery
+
+- name: Ensure nftables is installed
+  ansible.builtin.apt:
+    name: nftables
+    state: present
+    # update_cache disabled: nftables is pre-installed on PVE (Debian base pkg).
+    # Avoid cache update here — pve4-alienware has a broken NVIDIA apt repo
+    # (SHA1 key expired 2026-02-01) that fails apt-get update. Filed: OPS-733.
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+
+# OPS-494: CIS Debian 13 Benchmark — Ensure nftables is not in use with iptables
+# Debian 13 (trixie) ships iptables-nft as the default iptables provider but
+# update-alternatives may point to iptables-legacy if legacy was previously installed.
+# CIS rule 19011 (Wazuh SCA) fails when both iptables-legacy and nftables are active.
+# Fix: install iptables (pulls iptables-nft on Debian 13) and set alternatives so
+# both ipv4 and ipv6 iptables commands route through the nftables kernel backend.
+# Safety: update-alternatives only changes the userspace symlink; it does NOT affect
+# the kernel ruleset. PVE nftables rules (managed by nftables.service) are unaffected.
+- name: Ensure iptables package is installed (Debian 13 pulls iptables-nft)
+  ansible.builtin.apt:
+    name: iptables
+    state: present
+    # Same update_cache=false rationale as nftables task above (OPS-733).
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - cis
+
+- name: Set iptables alternative to iptables-nft (OPS-494 CIS Debian 13)
+  ansible.builtin.command:
+    cmd: update-alternatives --set iptables /usr/sbin/iptables-nft
+  register: iptables_alt_result
+  changed_when: "'update-alternatives: using' in iptables_alt_result.stdout or iptables_alt_result.rc == 0"
+  failed_when: iptables_alt_result.rc != 0
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - cis
+
+- name: Set ip6tables alternative to ip6tables-nft (OPS-494 CIS Debian 13)
+  ansible.builtin.command:
+    cmd: update-alternatives --set ip6tables /usr/sbin/ip6tables-nft
+  register: ip6tables_alt_result
+  changed_when: "'update-alternatives: using' in ip6tables_alt_result.stdout or ip6tables_alt_result.rc == 0"
+  failed_when: ip6tables_alt_result.rc != 0
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - cis
+
+- name: Verify iptables resolves to nft variant (OPS-494 CIS check)
+  ansible.builtin.command:
+    cmd: readlink -f /usr/sbin/iptables
+  register: iptables_link
+  changed_when: false
+  failed_when: "'nft' not in iptables_link.stdout"
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - cis
+    - verify
+
+- name: Deploy nftables configuration
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0600"
+    validate: "nft -c -f %s"
+  notify:
+    - Reload nftables
+    - Verify SSH connectivity
+    - Enable nftables on boot
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+
+- name: Ensure nftables service is enabled and started
+  ansible.builtin.systemd:
+    name: nftables
+    state: started
+    enabled: true
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+
+- name: Verify nftables is active
+  ansible.builtin.command:
+    cmd: nft list ruleset
+  register: nft_verify
+  changed_when: false
+  failed_when: "'table inet filter' not in nft_verify.stdout"
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - verify
+
+- name: Touch nftables sentinel file (keep rules active during verification window)
+  ansible.builtin.file:
+    path: /tmp/nftables-keep
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - recovery
+
+- name: Remove nftables recovery cron (rules verified active, safety net no longer needed)
+  ansible.builtin.file:
+    path: /etc/cron.d/nftables-recovery
+    state: absent
+  when: nft_verify.rc == 0
+  tags:
+    - proxmox
+    - firewall
+    - nftables
+    - recovery
+
+# ── Storage VLAN 30 jumbo bridge (OPS-1125) ──────────────────────────────────
+# Deploy /etc/network/interfaces.d/vlan30-storage.cfg when pve_vlan30_storage_cfg
+# is set in host_vars. Each PVE node has a different uplink NIC, so a per-host
+# file is used (see ansible/roles/proxmox-host/files/vlan30-storage-<host>.cfg).
+# The file is idempotent: ifup on already-up interfaces is a no-op.
+# Bring-up must be done with ifup, NOT ifreload -a (which would disrupt all VMs).
+- name: Deploy VLAN 30 storage bridge config (OPS-1125)
+  ansible.builtin.copy:
+    src: "{{ pve_vlan30_storage_cfg }}"
+    dest: /etc/network/interfaces.d/vlan30-storage.cfg
+    owner: root
+    group: root
+    mode: "0644"
+  when: pve_vlan30_storage_cfg is defined
+  tags:
+    - proxmox
+    - storage-vlan
+    - network
+
+# ── iSCSI Storage (OPS-972) ───────────────────────────────────────────────────
+# Expose TrueNAS SSD pool to pve4-alienware via raw iSCSI.
+# Guarded by pve4_iscsi_storage_enabled (default false) — only runs on pve4.
+# Existing PVE nodes (pve, pve2, pve3, pve5) do not set this var; unaffected.
+# Prerequisite: TrueNAS side provisioned (zvol + extent + named initiator group
+# + target). See OPS-972 for TrueNAS API provisioning steps.
+- name: Include iSCSI storage setup for pve4-alienware
+  ansible.builtin.include_tasks: iscsi_storage.yml
+  when: pve4_iscsi_storage_enabled | default(false)
+  tags:
+    - proxmox
+    - iscsi-storage
+
+# ── Authentik OIDC realm (OPS-981) ────────────────────────────────────────────
+# Register the Authentik OIDC realm on this PVE node for SSO login.
+# Standalone nodes (pve4-alienware) are not cluster members; realm must be added
+# locally. Guarded by pve4_authentik_realm_enabled (default false) so existing
+# cluster nodes (pve/pve2/pve3) that already have the realm via /etc/pve/ are
+# unaffected.
+# Prerequisite: vault_token must be set (read from secret/authentik/clients/pve).
+- name: Include Authentik OIDC realm setup
+  ansible.builtin.include_tasks: authentik_realm.yml
+  when: pve4_authentik_realm_enabled | default(false)
+  tags:
+    - proxmox
+    - authentik-realm

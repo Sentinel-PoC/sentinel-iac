@@ -1,0 +1,202 @@
+---
+# ollama_install.yml — Phase 3: Install Ollama inside ai-tier1 LXC + pull models
+# OPS-564
+#
+# All commands run via 'pct exec <vmid> -- <cmd>' from the PVE host (Ansible target).
+# The LXC must be running and have network access before this phase.
+#
+# Ollama architecture inside the LXC:
+#   - Runs as native binary (not in Docker) — no container-in-container needed
+#   - CUDA kernel modules provided by HOST via /dev/nvidia* bind mounts
+#   - Only user-space CUDA libraries (libcuda, libnvidia-compute) needed in LXC
+#   - Systemd service manages Ollama with GPU overhead env var
+
+# ── Add CUDA user-space libraries to LXC ──────────────────────────────────────
+# The LXC is Ubuntu 24.04. It needs CUDA user-space libraries (not kernel modules).
+# The HOST kernel module drives the GPU; the LXC only needs the runtime libraries
+# and nvidia-smi (userspace tool) for verification.
+
+- name: Update apt cache in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- apt-get update -qq"
+  changed_when: false
+  tags:
+    - ollama
+    - apt
+
+- name: Install curl and basic tools in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      apt-get install -y -qq curl ca-certificates gpg
+  changed_when: true
+  tags:
+    - ollama
+    - apt
+
+# Add CUDA apt repo inside LXC (Ubuntu 24.04 = ubuntu2404 in NVIDIA's scheme)
+# We need user-space libs: libnvidia-compute-XXX, nvidia-utils-XXX (nvidia-smi)
+# ubuntu2404 is the correct repo ID for Ubuntu 24.04 Noble.
+
+- name: Download CUDA keyring inside LXC (Ubuntu 24.04)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      curl -fsSL -o /tmp/cuda-keyring.deb
+      https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+  changed_when: true
+  tags:
+    - ollama
+    - apt
+
+- name: Install CUDA keyring inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      dpkg -i /tmp/cuda-keyring.deb
+  changed_when: true
+  tags:
+    - ollama
+    - apt
+
+- name: Update apt cache after CUDA repo in LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- apt-get update -qq"
+  changed_when: false
+  tags:
+    - ollama
+    - apt
+
+# Install CUDA user-space only (no kernel modules — host provides those via cgroup).
+# nvidia-utils-open: nvidia-smi + NVML (needed for ollama GPU detection + /api/ps).
+# libcuda1: CUDA runtime dispatch library (needed for CUDA app initialization).
+# cuda-toolkit is NOT installed in LXC — it's only needed for compilation, not inference.
+
+- name: Install NVIDIA user-space libraries inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      apt-get install -y -qq
+      libcuda1
+      libnvidia-compute-570
+      nvidia-utils-570-open
+  register: lxc_nvidia_libs
+  changed_when: true
+  failed_when: lxc_nvidia_libs.rc != 0
+  tags:
+    - ollama
+    - apt
+
+# ── Install Ollama ─────────────────────────────────────────────────────────────
+# Official install.sh from Ollama handles: binary download, systemd unit creation,
+# ollama user creation, and directory setup. Idempotent on re-run.
+
+- name: Check if Ollama is already installed in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- which ollama"
+  register: ollama_installed
+  failed_when: false
+  changed_when: false
+  tags:
+    - ollama
+    - install
+
+- name: Install Ollama via official install script
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      sh -c "curl -fsSL https://ollama.com/install.sh | sh"
+  when: ollama_installed.rc != 0
+  register: ollama_install_result
+  changed_when: ollama_installed.rc != 0   # Ollama was not installed → this is a real change
+  async: 300
+  poll: 15
+  tags:
+    - ollama
+    - install
+
+# ── Configure Ollama systemd service environment ────────────────────────────────
+# Override Ollama's default env to:
+#   1. Bind to all interfaces (not just localhost) — needed for host/network access
+#   2. Set GPU memory overhead (avoids OOM → CPU-only fallback)
+#   3. Set context length for classification prompts
+#
+# Per feedback_ollama_gpu_overhead_calibration: Ollama is "all-or-nothing" on
+# GPU placement. An over-conservative OLLAMA_GPU_OVERHEAD (like 3GB on 6800xt)
+# causes size_vram=0 in /api/ps (CPU fallback). RTX 3060 has 12GB VRAM;
+# llama3.2:3b is ~2GB. 1GiB overhead leaves 11GB — safe.
+
+- name: Ensure /etc/systemd/system/ollama.service.d directory exists in LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      mkdir -p /etc/systemd/system/ollama.service.d
+  changed_when: false
+  tags:
+    - ollama
+    - configure
+
+- name: Write Ollama GPU environment override in LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      sh -c "cat > /etc/systemd/system/ollama.service.d/gpu-env.conf << 'HEREDOC'
+      [Service]
+      Environment=OLLAMA_HOST={{ ollama_host }}:{{ ollama_port }}
+      Environment=OLLAMA_GPU_OVERHEAD={{ ollama_gpu_overhead }}
+      Environment=OLLAMA_CONTEXT_LENGTH={{ ollama_context_length }}
+      Environment=OLLAMA_NUM_PARALLEL=2
+      HEREDOC"
+  changed_when: true
+  notify: "Restart ollama"
+  tags:
+    - ollama
+    - configure
+
+- name: Reload systemd daemon in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- systemctl daemon-reload"
+  changed_when: false
+  tags:
+    - ollama
+    - configure
+
+- name: Enable and start Ollama service in ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- systemctl enable --now ollama"
+  register: ollama_enable_result
+  changed_when: "'Created symlink' in ollama_enable_result.stdout or ollama_enable_result.rc == 0"
+  tags:
+    - ollama
+    - configure
+
+- name: Wait for Ollama API to be listening (up to 30s)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ai_tier1_lxc_id }} --
+      curl -s --fail http://localhost:{{ ollama_port }}/api/tags
+  register: ollama_ready
+  until: ollama_ready.rc == 0
+  retries: 6
+  delay: 5
+  changed_when: false
+  tags:
+    - ollama
+    - configure
+
+# ── Pull inference models ──────────────────────────────────────────────────────
+# llama3.2:3b  — ~2.0 GB quantized. Primary classification model.
+# nomic-embed-text — ~274 MB. Embedding model for RAG / similarity search.
+# Pull is idempotent: ollama pull checks if model is current before downloading.
+
+- name: Pull Ollama models (may take several minutes on first run)
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- ollama pull {{ item }}"
+  loop: "{{ ollama_models }}"
+  register: model_pull_results
+  changed_when: "'pulling' in model_pull_results.stdout or 'success' in model_pull_results.stdout"
+  async: 600
+  poll: 15
+  tags:
+    - ollama
+    - models

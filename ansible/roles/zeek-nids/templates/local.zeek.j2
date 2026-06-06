@@ -1,0 +1,35 @@
+##! local.zeek — site-local Zeek policy
+##! Deployed by ansible/roles/zeek-nids (OPS-568)
+##! Enables JSON logging, required protocol scripts, and JA3/JA4 intel frameworks.
+
+# --- JSON output for all log writers (required for Wazuh ingestion) ---
+{% if zeek_json_logs | bool %}
+@load tuning/json-logs
+redef LogAscii::use_json = T;
+{% endif %}
+
+# --- Core protocol visibility scripts ---
+{% for script in zeek_load_scripts %}
+@load {{ script }}
+{% endfor %}
+
+# --- JA3 TLS fingerprinting ---
+# JA3 is included in Zeek >=5.x as policy/protocols/ssl/ja3.zeek
+# For older builds this is a no-op if the script doesn't exist.
+{% if zeek_enable_ja3 | bool %}
+@load policy/protocols/ssl/ja3
+{% endif %}
+
+# --- JA4 TLS fingerprinting ---
+# Loaded after zkg install zeek/ja4 (see tasks/intel.yml)
+{% if zeek_enable_ja4 | bool %}
+@load packages/ja4
+{% endif %}
+
+# --- Notice framework ---
+@load frameworks/notice/main
+
+# --- File extraction (bounded size; adjust as needed) ---
+redef FileExtract::prefix = "{{ zeek_spool_dir }}/extract_files/";
+
+# --- Log rotation via zeekctl (do not configure here) ---

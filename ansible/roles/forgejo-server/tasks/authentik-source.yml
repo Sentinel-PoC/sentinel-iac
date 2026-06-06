@@ -1,0 +1,112 @@
+---
+# authentik-source.yml — OPS-605 Phase 3
+# Idempotent provisioning of the Authentik OIDC auth source in Forgejo.
+# Mirrors the pattern in auth-source.yml (Keycloak) but uses authentik_oidc_*
+# variables. Both auth sources co-exist (dual-running per OPS-604).
+#
+# Callback URI registered in Authentik provider:
+#   https://forgejo.208.haist.farm/user/oauth2/Authentik/callback
+#   https://forgejo.208.haist.farm/user/oauth2/authentik/callback
+# The --name below uses "Authentik" (capital A) to match the registered redirect URI.
+
+- name: Assert vault_token is available for Authentik OIDC provisioning
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<scoped-vault-token>
+      or inject via environment before running the playbook.
+  when: authentik_oidc_enabled | default(true)
+  tags: [forgejo, authentik, oidc, auth-source]
+
+- name: Ensure hvac library is installed (required by vault_kv2_get)
+  ansible.builtin.apt:
+    name: python3-hvac
+    state: present
+    cache_valid_time: 3600
+  become: true
+  when: authentik_oidc_enabled | default(true)
+  tags: [forgejo, authentik, oidc, auth-source]
+
+- name: Read Authentik Forgejo OIDC credentials from Vault
+  community.hashi_vault.vault_kv2_get:
+    engine_mount_point: secret
+    path: authentik/clients/forgejo
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+    validate_certs: false
+  register: authentik_forgejo_vault_data
+  no_log: true
+  when: authentik_oidc_enabled | default(true)
+  tags: [forgejo, authentik, oidc, auth-source]
+
+- name: Set Authentik OIDC credential facts
+  ansible.builtin.set_fact:
+    authentik_oidc_client_id: "{{ authentik_forgejo_vault_data.secret.client_id }}"
+    authentik_oidc_client_secret: "{{ authentik_forgejo_vault_data.secret.client_secret }}"
+  no_log: true
+  when: authentik_oidc_enabled | default(true)
+  tags: [forgejo, authentik, oidc, auth-source]
+
+- name: List current Forgejo auth sources (for Authentik check)
+  ansible.builtin.command:
+    cmd: docker exec -u git forgejo forgejo admin auth list --vertical-bars
+  register: forgejo_auth_list_authentik
+  changed_when: false
+  failed_when: forgejo_auth_list_authentik.rc != 0
+  when:
+    - authentik_oidc_enabled | default(true)
+    - authentik_oidc_client_secret | default('') | length > 0
+  tags: [forgejo, authentik, oidc, auth-source]
+
+- name: Add Authentik OIDC auth source if not present
+  ansible.builtin.command:
+    cmd: >-
+      docker exec -u git forgejo forgejo admin auth add-oauth
+      --name "{{ authentik_oidc_provider }}"
+      --provider openidConnect
+      --key "{{ authentik_oidc_client_id }}"
+      --secret "{{ authentik_oidc_client_secret }}"
+      --auto-discover-url "{{ authentik_oidc_discovery_url }}"
+      --scopes "{{ authentik_oidc_scopes }}"
+  register: forgejo_authentik_add
+  changed_when: "'Authentication source added' in forgejo_authentik_add.stdout or forgejo_authentik_add.rc == 0"
+  failed_when: forgejo_authentik_add.rc != 0
+  when:
+    - authentik_oidc_enabled | default(true)
+    - authentik_oidc_client_secret | default('') | length > 0
+    - authentik_oidc_provider not in forgejo_auth_list_authentik.stdout
+  tags: [forgejo, authentik, oidc, auth-source]
+
+- name: Update Authentik OIDC auth source if present
+  when:
+    - authentik_oidc_enabled | default(true)
+    - authentik_oidc_client_secret | default('') | length > 0
+    - authentik_oidc_provider in forgejo_auth_list_authentik.stdout
+  tags: [forgejo, authentik, oidc, auth-source]
+  block:
+    - name: Extract auth source ID for {{ authentik_oidc_provider }}
+      ansible.builtin.set_fact:
+        forgejo_authentik_source_id: >-
+          {{ forgejo_auth_list_authentik.stdout_lines
+             | select('search', '\\|' ~ authentik_oidc_provider ~ '\\|')
+             | first
+             | regex_search('^\\s*(\\d+)\\s*\\|', '\\1')
+             | first }}
+
+    - name: Update Authentik OIDC auth source {{ authentik_oidc_provider }}
+      ansible.builtin.command:
+        cmd: >-
+          docker exec -u git forgejo forgejo admin auth update-oauth
+          --id "{{ forgejo_authentik_source_id }}"
+          --name "{{ authentik_oidc_provider }}"
+          --provider openidConnect
+          --key "{{ authentik_oidc_client_id }}"
+          --secret "{{ authentik_oidc_client_secret }}"
+          --auto-discover-url "{{ authentik_oidc_discovery_url }}"
+          --scopes "{{ authentik_oidc_scopes }}"
+      register: forgejo_authentik_update
+      changed_when: "'Authentication source updated' in forgejo_authentik_update.stdout"
+      failed_when: forgejo_authentik_update.rc != 0

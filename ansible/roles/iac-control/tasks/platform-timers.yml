@@ -1,0 +1,1244 @@
+---
+# iac-control role - platform timers and associated services
+# Codifies systemd timers/services that accumulated on iac-control without Ansible tracking.
+# All unit files copied from live system (iac-control) on 2026-04-10 via OPS-170.
+
+# --- Sentinel Agent (runs every 5 minutes) ---
+
+- name: Deploy sentinel-agent systemd service
+  ansible.builtin.template:
+    src: sentinel-agent.service.j2
+    dest: /etc/systemd/system/sentinel-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - sentinel-agent
+
+- name: Deploy sentinel-agent systemd timer
+  ansible.builtin.copy:
+    src: sentinel-agent.timer
+    dest: /etc/systemd/system/sentinel-agent.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - sentinel-agent
+
+- name: Enable and start sentinel-agent timer
+  ansible.builtin.systemd:
+    name: sentinel-agent.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - sentinel-agent
+
+# --- MinIO Replication (every 6h) ---
+# OPS-42: Migrated from OKD CronJob (sentinel-ops/minio-replicate) to iac-control
+# systemd timer because OKD pod-to-LXC (mgmt VLAN) connectivity is intermittent.
+# iac-control has reliable direct access to MinIO at 192.168.12.58 and .59.
+
+- name: Ensure /opt/sentinel-ops directory exists (OPS-42)
+  ansible.builtin.file:
+    path: /opt/sentinel-ops
+    state: directory
+    owner: sentinel-agent
+    group: sentinel-agent
+    mode: "0755"
+  tags:
+    - platform-timers
+    - minio-replicate
+
+- name: Ensure /etc/sentinel directory exists (OPS-42)
+  ansible.builtin.file:
+    path: /etc/sentinel
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - platform-timers
+    - minio-replicate
+
+- name: Deploy minio-replicate script to /opt/sentinel-ops (OPS-42)
+  ansible.builtin.copy:
+    src: minio-replicate.sh
+    dest: /opt/sentinel-ops/minio-replicate.sh
+    owner: sentinel-agent
+    group: sentinel-agent
+    mode: "0755"
+  tags:
+    - platform-timers
+    - minio-replicate
+
+- name: Deploy minio-replicate env file (OPS-42)
+  ansible.builtin.template:
+    src: minio-replicate.env.j2
+    dest: /etc/sentinel/minio-replicate.env
+    owner: root
+    group: sentinel-agent
+    mode: "0640"
+  tags:
+    - platform-timers
+    - minio-replicate
+
+- name: Deploy minio-replicate systemd service
+  ansible.builtin.copy:
+    src: minio-replicate.service
+    dest: /etc/systemd/system/minio-replicate.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - minio-replicate
+
+- name: Deploy minio-replicate systemd timer
+  ansible.builtin.copy:
+    src: minio-replicate.timer
+    dest: /etc/systemd/system/minio-replicate.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - minio-replicate
+
+- name: Enable and start minio-replicate timer
+  ansible.builtin.systemd:
+    name: minio-replicate.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - minio-replicate
+
+# --- Maintenance Mode Expiry Check (every 15 min) ---
+
+- name: Deploy maintenance-expire systemd service
+  ansible.builtin.copy:
+    src: maintenance-expire.service
+    dest: /etc/systemd/system/maintenance-expire.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - maintenance
+
+- name: Deploy maintenance-expire systemd timer
+  ansible.builtin.copy:
+    src: maintenance-expire.timer
+    dest: /etc/systemd/system/maintenance-expire.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - maintenance
+
+- name: Enable and start maintenance-expire timer
+  ansible.builtin.systemd:
+    name: maintenance-expire.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - maintenance
+
+# --- Drift Detection (weekly Sunday 4AM UTC) ---
+
+- name: Deploy drift-detection systemd service
+  ansible.builtin.copy:
+    src: drift-detection.service
+    dest: /etc/systemd/system/drift-detection.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - drift-detection
+
+- name: Deploy drift-detection systemd timer
+  ansible.builtin.copy:
+    src: drift-detection.timer
+    dest: /etc/systemd/system/drift-detection.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - drift-detection
+
+- name: Enable and start drift-detection timer
+  ansible.builtin.systemd:
+    name: drift-detection.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - drift-detection
+
+# --- Ansible Drift Check (daily 8AM UTC) ---
+# OPS-476: script was not previously tracked in IaC. Added here so every
+# ansible-playbook run self-heals the check script, closing the class of bug
+# where a PR fix lands in main but never reaches the live host filesystem.
+
+- name: Ensure /home/ubuntu/scripts directory exists (OPS-476)
+  ansible.builtin.file:
+    path: /home/ubuntu/scripts
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: "0755"
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Deploy ansible-drift-check script (OPS-476)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/ansible-drift-check.sh"
+    dest: /usr/local/bin/ansible-drift-check.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Deploy ansible-drift-check systemd service
+  ansible.builtin.copy:
+    src: ansible-drift-check.service
+    dest: /etc/systemd/system/ansible-drift-check.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Deploy ansible-drift-check systemd timer
+  ansible.builtin.copy:
+    src: ansible-drift-check.timer
+    dest: /etc/systemd/system/ansible-drift-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Enable and start ansible-drift-check timer
+  ansible.builtin.systemd:
+    name: ansible-drift-check.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - ansible-drift
+
+# --- Ansible Drift Remediation (daily 8:30AM UTC) ---
+# OPS-476: remediate script was not previously tracked in IaC. This is the
+# self-healing loop: each ansible run deploys this script, which in turn runs
+# ansible-playbook to pull + apply future changes within 24h of PR merge.
+
+- name: Deploy ansible-drift-remediate script (OPS-476)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/ansible-drift-remediate.sh"
+    dest: /usr/local/bin/ansible-drift-remediate.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Deploy ansible-drift-remediate systemd service
+  ansible.builtin.copy:
+    src: ansible-drift-remediate.service
+    dest: /etc/systemd/system/ansible-drift-remediate.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Deploy ansible-drift-remediate systemd timer
+  ansible.builtin.copy:
+    src: ansible-drift-remediate.timer
+    dest: /etc/systemd/system/ansible-drift-remediate.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - ansible-drift
+
+- name: Enable and start ansible-drift-remediate timer
+  ansible.builtin.systemd:
+    name: ansible-drift-remediate.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - ansible-drift
+
+# --- Evidence Pipeline (daily 7AM UTC) ---
+
+- name: Deploy evidence-pipeline systemd service
+  ansible.builtin.copy:
+    src: evidence-pipeline.service
+    dest: /etc/systemd/system/evidence-pipeline.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - evidence-pipeline
+
+- name: Deploy evidence-pipeline systemd timer
+  ansible.builtin.copy:
+    src: evidence-pipeline.timer
+    dest: /etc/systemd/system/evidence-pipeline.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - evidence-pipeline
+
+- name: Enable and start evidence-pipeline timer
+  ansible.builtin.systemd:
+    name: evidence-pipeline.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - evidence-pipeline
+
+# --- DefectDojo Trivy Import (SEC-50 Phase 1, daily 7:30 UTC) ---
+
+- name: Deploy defectdojo-trivy-import script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/defectdojo-trivy-import.py"
+    dest: /usr/local/bin/defectdojo-trivy-import.py
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - defectdojo
+
+- name: Deploy defectdojo-trivy-import systemd service
+  ansible.builtin.copy:
+    src: defectdojo-trivy-import.service
+    dest: /etc/systemd/system/defectdojo-trivy-import.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - defectdojo
+
+- name: Deploy defectdojo-trivy-import systemd timer
+  ansible.builtin.copy:
+    src: defectdojo-trivy-import.timer
+    dest: /etc/systemd/system/defectdojo-trivy-import.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - defectdojo
+
+- name: Enable and start defectdojo-trivy-import timer
+  ansible.builtin.systemd:
+    name: defectdojo-trivy-import.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - defectdojo
+
+# --- NIST Compliance Check (daily 6AM UTC) ---
+
+# OPS-737: upload-compliance-to-minio.sh was deployed manually and not tracked in IaC.
+# Add it here alongside the service that calls it (ExecStartPost).
+# The redundant `source /etc/sentinel/compliance.env` was removed — vars are already
+# injected by systemd EnvironmentFile= before the script runs.
+- name: Deploy upload-compliance-to-minio script
+  ansible.builtin.copy:
+    src: upload-compliance-to-minio.sh
+    dest: /usr/local/bin/upload-compliance-to-minio.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - nist-compliance
+
+- name: Deploy nist-compliance-check systemd service
+  ansible.builtin.copy:
+    src: nist-compliance-check.service
+    dest: /etc/systemd/system/nist-compliance-check.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - nist-compliance
+
+- name: Deploy nist-compliance-check systemd timer
+  ansible.builtin.copy:
+    src: nist-compliance-check.timer
+    dest: /etc/systemd/system/nist-compliance-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - nist-compliance
+
+- name: Enable and start nist-compliance-check timer
+  ansible.builtin.systemd:
+    name: nist-compliance-check.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - nist-compliance
+
+# --- Vault TLS Rotation (weekly Monday 3:30AM UTC) ---
+
+- name: Deploy vault-tls-rotate systemd service
+  ansible.builtin.copy:
+    src: vault-tls-rotate.service
+    dest: /etc/systemd/system/vault-tls-rotate.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-tls
+
+- name: Deploy vault-tls-rotate systemd timer
+  ansible.builtin.copy:
+    src: vault-tls-rotate.timer
+    dest: /etc/systemd/system/vault-tls-rotate.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-tls
+
+- name: Enable and start vault-tls-rotate timer
+  ansible.builtin.systemd:
+    name: vault-tls-rotate.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - vault-tls
+
+# --- Vault Unseal Transit (every 2 minutes) ---
+# Script was previously deployed manually with the unseal key embedded
+# in plaintext (OPS-224). Now script is in files/, key is sourced at
+# runtime from /etc/vault-unseal/transit.key (0400 root:root).
+#
+# The key file itself is NOT managed by this role — deploy it
+# out-of-band (ansible vault-kv lookup is the proper long-term path;
+# see OPS-224 follow-up TODO). The assertion below fails loudly if
+# the key file is missing, so this never silently "succeeds" without
+# the dependency in place.
+
+- name: Ensure /etc/vault-unseal directory exists (key file parent)
+  ansible.builtin.file:
+    path: /etc/vault-unseal
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+- name: Assert Transit Vault unseal key file is present and protected
+  ansible.builtin.stat:
+    path: /etc/vault-unseal/transit.key
+  register: transit_key_stat
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+- name: Fail if Transit Vault unseal key file is missing or not root-only
+  ansible.builtin.fail:
+    msg: >-
+      /etc/vault-unseal/transit.key must exist as 0400 root:root.
+      Deploy it out-of-band before running this role. See OPS-224.
+  when: >
+    not transit_key_stat.stat.exists
+    or transit_key_stat.stat.mode != '0400'
+    or transit_key_stat.stat.pw_name != 'root'
+    or transit_key_stat.stat.gr_name != 'root'
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+- name: Deploy vault-unseal-transit script
+  ansible.builtin.copy:
+    src: vault-unseal-transit.sh
+    dest: /usr/local/bin/vault-unseal-transit.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+- name: Deploy vault-unseal-transit systemd service
+  ansible.builtin.copy:
+    src: vault-unseal-transit.service
+    dest: /etc/systemd/system/vault-unseal-transit.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+- name: Deploy vault-unseal-transit systemd timer
+  ansible.builtin.copy:
+    src: vault-unseal-transit.timer
+    dest: /etc/systemd/system/vault-unseal-transit.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+- name: Enable and start vault-unseal-transit timer
+  ansible.builtin.systemd:
+    name: vault-unseal-transit.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - vault-unseal-transit
+
+# --- Vault Health Probe (external sealed-state, every 5 min) — OPS-143 / SEC-44 follow-up #2 ---
+# Probes https://vault.208.haist.farm/v1/sys/health from iac-control (not from vault-server).
+# Classifies: unreachable / sealed / standby / healthy. Appends JSON to /var/log/vault-health-probe.json.
+# No auth token used — sys/health is unauthenticated by design.
+# Wazuh rule wiring for alerting is a separate follow-up (see OPS-143 comment).
+
+- name: Deploy vault-health-probe script
+  ansible.builtin.copy:
+    src: vault-health-probe.sh
+    dest: /usr/local/bin/vault-health-probe.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - vault-health-probe
+
+- name: Deploy vault-health-probe systemd service
+  ansible.builtin.copy:
+    src: vault-health-probe.service
+    dest: /etc/systemd/system/vault-health-probe.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-health-probe
+
+- name: Deploy vault-health-probe systemd timer
+  ansible.builtin.copy:
+    src: vault-health-probe.timer
+    dest: /etc/systemd/system/vault-health-probe.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-health-probe
+
+- name: Enable and start vault-health-probe timer
+  ansible.builtin.systemd:
+    name: vault-health-probe.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - vault-health-probe
+
+# --- Vault auto-unseal token TTL monitor (daily) — OPS-190 / SEC-44 follow-up ---
+# Asks Transit Vault for the prod-Vault auto-unseal token's remaining lease.
+# WARN < 7d, CRIT < 24h. Designed to give the operator at least a week of
+# warning before a SEC-44-class outage.
+#
+# Required out-of-band files (NOT managed by this role; deploy them once via
+# ansible-vault or a one-shot playbook — same pattern as the transit unseal key):
+#   /etc/vault-unseal/autounseal-accessor.token   (mode 0644 root:root)
+#       — the accessor of the prod-Vault auto-unseal token.
+#   /etc/vault-unseal/lookup-token                (mode 0400 root:root)
+#       — a Transit Vault token bound to a tight policy that allows ONLY
+#         `update` on auth/token/lookup-accessor.
+#
+# Asserts both files exist before installing the timer; refuses to "succeed"
+# silently if the operator hasn't placed them.
+
+- name: Assert auto-unseal accessor file is present
+  ansible.builtin.stat:
+    path: /etc/vault-unseal/autounseal-accessor.token
+  register: autounseal_accessor_stat
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Fail if auto-unseal accessor file is missing or mis-permed
+  ansible.builtin.fail:
+    msg: >-
+      /etc/vault-unseal/autounseal-accessor.token must exist as 0644 root:root.
+      Capture the accessor at SEC-44 recovery time (or via
+      `vault list -format=json /auth/token/accessors` against the Transit Vault)
+      and write it before re-running this role. See OPS-190.
+  when: >
+    not autounseal_accessor_stat.stat.exists
+    or autounseal_accessor_stat.stat.mode != '0644'
+    or autounseal_accessor_stat.stat.pw_name != 'root'
+    or autounseal_accessor_stat.stat.gr_name != 'root'
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Assert auto-unseal lookup-token file is present and protected
+  ansible.builtin.stat:
+    path: /etc/vault-unseal/lookup-token
+  register: autounseal_lookup_stat
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Fail if lookup-token file is missing or not root-only
+  ansible.builtin.fail:
+    msg: >-
+      /etc/vault-unseal/lookup-token must exist as 0400 root:root and contain
+      a Transit Vault token bound to a tight policy that allows ONLY
+      `update` on auth/token/lookup-accessor. See OPS-190 for the policy.
+  when: >
+    not autounseal_lookup_stat.stat.exists
+    or autounseal_lookup_stat.stat.mode != '0400'
+    or autounseal_lookup_stat.stat.pw_name != 'root'
+    or autounseal_lookup_stat.stat.gr_name != 'root'
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Deploy vault-autounseal-token-ttl script
+  ansible.builtin.copy:
+    src: vault-autounseal-token-ttl.sh
+    dest: /usr/local/bin/vault-autounseal-token-ttl.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Deploy vault-autounseal-token-ttl systemd service
+  ansible.builtin.copy:
+    src: vault-autounseal-token-ttl.service
+    dest: /etc/systemd/system/vault-autounseal-token-ttl.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Deploy vault-autounseal-token-ttl systemd timer
+  ansible.builtin.copy:
+    src: vault-autounseal-token-ttl.timer
+    dest: /etc/systemd/system/vault-autounseal-token-ttl.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+- name: Enable and start vault-autounseal-token-ttl timer
+  ansible.builtin.systemd:
+    name: vault-autounseal-token-ttl.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - vault-autounseal-token-ttl
+
+# --- IaC drift detection (daily 05:00 UTC) — OPS-193 ---
+# Queries live config of Wazuh, Vault policies, Forgejo, etc. and compares
+# against a declarative rules manifest. Catches the audit-drift class that
+# motivated OPS-193: changes applied to live without IaC update OR vice versa.
+#
+# Required out-of-band file (NOT managed by this role; deploy once via
+# ansible-vault or one-shot playbook):
+#   /etc/iac-drift/env  (mode 0400 root:root)
+#       — must contain `VAULT_TOKEN=<scoped-token>` for the iac-drift Vault
+#         policy (read-only on the secret/data paths the rules.yaml references).
+#         Same security model as /etc/vault-unseal/lookup-token.
+
+- name: Ensure /etc/iac-drift directory exists
+  ansible.builtin.file:
+    path: /etc/iac-drift
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Assert iac-drift Vault token env file is present and protected
+  ansible.builtin.stat:
+    path: /etc/iac-drift/env
+  register: iac_drift_env_stat
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Fail if iac-drift env file is missing or mis-permed
+  ansible.builtin.fail:
+    msg: >-
+      /etc/iac-drift/env must exist as 0400 root:root containing
+      VAULT_TOKEN=<scoped-token>. The token policy must allow read on the
+      Vault paths referenced in rules.yaml (secret/wazuh/api,
+      secret/wazuh/indexer, sys/policies/acl/* read for vault-policy rules).
+      See OPS-193 runbook (docs/runbooks/14-iac-drift-detection.md).
+  when: >
+    not iac_drift_env_stat.stat.exists
+    or iac_drift_env_stat.stat.mode != '0400'
+    or iac_drift_env_stat.stat.pw_name != 'root'
+    or iac_drift_env_stat.stat.gr_name != 'root'
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Ensure iac-drift rules deploy directory exists
+  ansible.builtin.file:
+    path: /usr/local/share/iac-drift
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Deploy iac-drift rules.yaml
+  ansible.builtin.copy:
+    src: iac-drift-rules.yaml
+    dest: /usr/local/share/iac-drift/rules.yaml
+    owner: root
+    group: root
+    mode: "0644"
+    follow: true
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Deploy iac-drift-check.py
+  ansible.builtin.copy:
+    src: iac-drift-check.py
+    dest: /usr/local/bin/iac-drift-check.py
+    owner: root
+    group: root
+    mode: "0755"
+    follow: true
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Ensure PyYAML is installed (iac-drift dependency)
+  ansible.builtin.apt:
+    name: python3-yaml
+    state: present
+    update_cache: false
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Deploy iac-drift-check systemd service
+  ansible.builtin.copy:
+    src: iac-drift-check.service
+    dest: /etc/systemd/system/iac-drift-check.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Deploy iac-drift-check systemd timer
+  ansible.builtin.copy:
+    src: iac-drift-check.timer
+    dest: /etc/systemd/system/iac-drift-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+- name: Enable and start iac-drift-check timer
+  ansible.builtin.systemd:
+    name: iac-drift-check.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - iac-drift-check
+
+# --- JIT SSH cert renewal (OPS-198 / OPS-996 / OPS-470) — re-signs id_sentinel-cert.pub every 3h ---
+# OPS-996: script now also signs claude_jit-root-cert.pub (root,ubuntu,koiakoia principals)
+# for ansible inventory entries that connect as root via Vault-CA cert auth
+# (minio-bootstrap, minio-replica). claude_jit is a symlink to id_sentinel.
+# OPS-470: script now also signs judge_jit-cert.pub (ubuntu principal) so the Judge SSH
+# role has a distinct cert serial — Wazuh audit logs can distinguish Judge actions from
+# Worker/claude actions. judge_jit.pub is deployed here to /home/ubuntu/.ssh/.
+
+- name: Ensure claude_jit symlink exists pointing to id_sentinel (OPS-996)
+  ansible.builtin.file:
+    src: id_sentinel
+    dest: /home/ubuntu/.ssh/claude_jit
+    owner: ubuntu
+    group: ubuntu
+    state: link
+  tags:
+    - platform-timers
+    - jit-ssh-cert-renew
+
+- name: Deploy judge_jit public key for cert renewal (OPS-470)
+  ansible.builtin.copy:
+    src: judge_jit.pub
+    dest: /home/ubuntu/.ssh/judge_jit.pub
+    owner: ubuntu
+    group: ubuntu
+    mode: "0644"
+  tags:
+    - platform-timers
+    - jit-ssh-cert-renew
+
+- name: Deploy jit-ssh-cert-renew script
+  ansible.builtin.copy:
+    src: jit-ssh-cert-renew
+    dest: /usr/local/bin/jit-ssh-cert-renew
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - jit-ssh-cert-renew
+
+- name: Deploy jit-ssh-cert-renew systemd service
+  ansible.builtin.copy:
+    src: jit-ssh-cert-renew.service
+    dest: /etc/systemd/system/jit-ssh-cert-renew.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - jit-ssh-cert-renew
+
+- name: Deploy jit-ssh-cert-renew systemd timer
+  ansible.builtin.copy:
+    src: jit-ssh-cert-renew.timer
+    dest: /etc/systemd/system/jit-ssh-cert-renew.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - jit-ssh-cert-renew
+
+- name: Enable and start jit-ssh-cert-renew timer
+  ansible.builtin.systemd:
+    name: jit-ssh-cert-renew.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - jit-ssh-cert-renew
+
+# --- Harbor mirror sweep with upstream Cosign verification (SEC-64) ---
+# Runs daily at 03:00 UTC via harbor-sweep.timer.
+# Deploys harbor-mirror-sweep.sh (wrapper) and calls mirror-upstream-image.sh
+# for each entry in image-manifest.txt.
+# The Cosign key env file (/etc/harbor-sweep/env) is NOT Ansible-managed —
+# deploy it out-of-band with COSIGN_KEY_PATH and COSIGN_KEY_PASSWORD.
+
+- name: Ensure /etc/harbor-sweep directory exists (cosign key env parent)
+  ansible.builtin.file:
+    path: /etc/harbor-sweep
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+- name: Deploy harbor-mirror-sweep script
+  ansible.builtin.copy:
+    src: harbor-mirror-sweep.sh
+    dest: /usr/local/bin/harbor-mirror-sweep.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+# mirror-upstream-image.sh is called by harbor-mirror-sweep.sh for each image.
+# It handles per-image Cosign verification against the trust policy.
+# Deployed from scripts/ in the repo root (not files/ — it is not ansible-role-local).
+- name: Deploy mirror-upstream-image script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/mirror-upstream-image.sh"
+    dest: /usr/local/bin/mirror-upstream-image.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+# trust-policy.yaml defines which upstream registries and key fingerprints are
+# trusted for Cosign verification. Operator manages the cosign key env file
+# (/etc/harbor-sweep/env) out-of-band — do NOT deploy it from Ansible (it
+# contains COSIGN_KEY_PASSWORD and must not live in git).
+- name: Deploy supply-chain trust policy
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../config/supply-chain/trust-policy.yaml"
+    dest: /etc/harbor-sweep/trust-policy.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+# image-manifest.txt lists source→target pairs the sweep iterates each run.
+# Curated in scripts/ within the repo, deployed to /etc/harbor-sweep/ so the
+# script finds it without needing a full sentinel-iac checkout on-host.
+- name: Deploy image manifest
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/image-manifest.txt"
+    dest: /etc/harbor-sweep/image-manifest.txt
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+- name: Deploy harbor-sweep systemd service
+  ansible.builtin.copy:
+    src: harbor-sweep.service
+    dest: /etc/systemd/system/harbor-sweep.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+- name: Deploy harbor-sweep systemd timer
+  ansible.builtin.copy:
+    src: harbor-sweep.timer
+    dest: /etc/systemd/system/harbor-sweep.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+- name: Enable and start harbor-sweep timer
+  ansible.builtin.systemd:
+    name: harbor-sweep.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - harbor-sweep
+
+# --- Disk sweep: podman prune + journal vacuum (weekly Sat 02:00 UTC) — OPS-776 ---
+# Removes dangling podman images and unused volumes (ubuntu context) and vacuums
+# journald to 500 MiB. After cleanup, alerts via syslog crit if disk > threshold.
+# Wazuh monitors syslog and will page on user.crit from iac-disk-sweep.
+# Threshold: 75% (configurable via /etc/iac-disk-sweep/env DISK_ALERT_THRESHOLD_PCT).
+
+- name: Deploy iac-disk-sweep script
+  ansible.builtin.copy:
+    src: iac-disk-sweep.sh
+    dest: /usr/local/bin/iac-disk-sweep.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - disk-sweep
+
+- name: Deploy iac-disk-sweep systemd service
+  ansible.builtin.copy:
+    src: iac-disk-sweep.service
+    dest: /etc/systemd/system/iac-disk-sweep.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - disk-sweep
+
+- name: Deploy iac-disk-sweep systemd timer
+  ansible.builtin.copy:
+    src: iac-disk-sweep.timer
+    dest: /etc/systemd/system/iac-disk-sweep.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - disk-sweep
+
+- name: Enable and start iac-disk-sweep timer
+  ansible.builtin.systemd:
+    name: iac-disk-sweep.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - disk-sweep
+
+# --- Harbor→mirror-registry sync (daily 04:00 UTC) — OPS-624 ---
+# Syncs ALL images in harbor.208.haist.farm/sentinel/* to mirror-registry-01.
+# Runs after harbor-sweep (03:00) so the mirror reflects the latest Harbor content.
+# Purpose: populate mirror.208.haist.farm:8443 so OKD can pull signed images from
+# the mirror as a Harbor failover (Kyverno verify-image-signatures mirror attestor).
+#
+# Required out-of-band file (NOT managed by this role; operator deploys once):
+#   /etc/harbor-mirror-sync/env  (mode 0400 root:root)
+#       HARBOR_ROBOT_PASSWORD=<robot$ci-system password — Vault secret/harbor/robot>
+#       MIRROR_ADMIN_PASSWORD=<admin password — Vault secret/mirror-registry/admin>
+# The service unit has ConditionPathExists on this file — if missing, the service
+# won't start and will appear as a systemd condition failure in journalctl.
+
+- name: Ensure /etc/harbor-mirror-sync directory exists (env file parent)
+  ansible.builtin.file:
+    path: /etc/harbor-mirror-sync
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - platform-timers
+    - harbor-mirror-sync
+
+- name: Deploy harbor-to-mirror-sync script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/harbor-to-mirror-sync.sh"
+    dest: /usr/local/bin/harbor-to-mirror-sync.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - harbor-mirror-sync
+
+- name: Deploy harbor-mirror-sync systemd service
+  ansible.builtin.copy:
+    src: harbor-mirror-sync.service
+    dest: /etc/systemd/system/harbor-mirror-sync.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - harbor-mirror-sync
+
+- name: Deploy harbor-mirror-sync systemd timer
+  ansible.builtin.copy:
+    src: harbor-mirror-sync.timer
+    dest: /etc/systemd/system/harbor-mirror-sync.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - harbor-mirror-sync
+
+- name: Enable and start harbor-mirror-sync timer
+  ansible.builtin.systemd:
+    name: harbor-mirror-sync.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - harbor-mirror-sync
+
+# --- Vault auto-unseal token rotation (weekly Sunday 03:00 UTC) — OPS-191 ---
+# Rotates the periodic autounseal token embedded in /etc/vault/config/config.hcl
+# on vault-server (192.168.12.206). Prevents the SEC-44-class outage from
+# recurring if the token's periodic lease lapses (no-op TTL = expiry).
+#
+# Runs as ubuntu (needs ~/.ssh/id_sentinel + cert for SSH to vault-server).
+# Mirrors the vault-tls-rotate pattern exactly.
+#
+# Required out-of-band file (NOT managed by this role; deploy once per runbook 15):
+#   /etc/vault-unseal/rotation-token  (mode 0400 ubuntu:root)
+#       An orphan periodic token on the Transit Vault, policy autounseal-rotate
+#       (policies/vault/autounseal-rotate-policy.hcl).  Renewed on each weekly
+#       rotation run; safe as long as the timer fires at least once per 30 days.
+
+- name: Ensure /etc/vault-unseal directory exists (rotation-token parent)
+  ansible.builtin.file:
+    path: /etc/vault-unseal
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate
+
+- name: Assert vault-autounseal rotation-token file is present and protected
+  ansible.builtin.stat:
+    path: /etc/vault-unseal/rotation-token
+  register: autounseal_rotation_stat
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate
+
+- name: Fail if vault-autounseal rotation-token file is missing or mis-permed
+  ansible.builtin.fail:
+    msg: >-
+      /etc/vault-unseal/rotation-token must exist as 0400, owner ubuntu (group root or ubuntu).
+      Bootstrap it once per docs/runbooks/15-vault-autounseal-rotation.md before deploying
+      this timer. The file holds an orphan periodic token (policy autounseal-rotate) on the
+      Transit Vault; it is renewed on each weekly rotation run.
+  when: >
+    not autounseal_rotation_stat.stat.exists
+    or autounseal_rotation_stat.stat.mode != '0400'
+    or autounseal_rotation_stat.stat.pw_name != 'ubuntu'
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate
+
+- name: Deploy vault-autounseal-rotate script
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/vault-autounseal-rotate.sh"
+    dest: /usr/local/bin/vault-autounseal-rotate.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate
+
+- name: Deploy vault-autounseal-rotate systemd service
+  ansible.builtin.copy:
+    src: vault-autounseal-rotate.service
+    dest: /etc/systemd/system/vault-autounseal-rotate.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate
+
+- name: Deploy vault-autounseal-rotate systemd timer
+  ansible.builtin.copy:
+    src: vault-autounseal-rotate.timer
+    dest: /etc/systemd/system/vault-autounseal-rotate.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate
+
+- name: Enable and start vault-autounseal-rotate timer
+  ansible.builtin.systemd:
+    name: vault-autounseal-rotate.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - platform-timers
+    - vault-autounseal-rotate

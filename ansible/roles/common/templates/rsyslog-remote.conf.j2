@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Remote syslog forwarding to Wazuh SIEM
+
+# Disk-assisted queue for reliability
+$ActionQueueType LinkedList
+$ActionQueueFileName sentinel-remote
+$ActionResumeRetryCount -1
+$ActionQueueSaveOnShutdown on
+
+# Forward all logs via TCP
+*.* @@{{ rsyslog_remote_server }}:{{ rsyslog_remote_port }}

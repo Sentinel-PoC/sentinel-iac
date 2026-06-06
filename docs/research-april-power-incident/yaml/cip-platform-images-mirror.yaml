@@ -1,0 +1,40 @@
+# ClusterImagePolicy: platform-images-mirror-only
+#
+# Scope: every image pulled from the off-cluster mirror-registry
+# (mirror.208.haist.farm). These are platform/infra images: OKD release
+# content, operator catalog images, Kyverno, GitOps, cert-manager, Harbor's
+# own images, etc. They MUST be signed by the mirror-registry cosign key.
+#
+# Verification happens at cri-o pull-time on the node — no admission webhook,
+# no live registry call beyond the pull itself, no Kyverno dependency.
+#
+# Apply target: any OKD/OCP 4.13+ cluster. Our cluster is 4.19-okd-scos.19.
+# Schema: config.openshift.io/v1alpha1 (PublicKey policyType is GA in 4.19).
+#
+# Source key: generated during MW1 at mirror-registry stand-up,
+#   stored in Vault at secret/data/cosign/mirror-registry, public half
+#   inlined here (base64 of cosign.pub PEM).
+#
+# Replace KEYDATA_PLACEHOLDER with: base64 -w0 mirror-cosign.pub
+#
+apiVersion: config.openshift.io/v1alpha1
+kind: ClusterImagePolicy
+metadata:
+  name: platform-images-mirror-only
+  annotations:
+    sentinel.haist.farm/issue: OPS-147
+    sentinel.haist.farm/purpose: |
+      Pull-time signature verification for platform/infra images served by
+      the off-cluster mirror-registry. Replaces the cryptographic check that
+      Kyverno verify-image-signatures was doing at admission time.
+    sentinel.haist.farm/key-source: vault:secret/data/cosign/mirror-registry
+spec:
+  scopes:
+    - mirror.208.haist.farm
+  policy:
+    rootOfTrust:
+      policyType: PublicKey
+      publicKey:
+        keyData: KEYDATA_PLACEHOLDER_BASE64_OF_MIRROR_COSIGN_PUB
+    signedIdentity:
+      matchPolicy: MatchRepoDigestOrExact

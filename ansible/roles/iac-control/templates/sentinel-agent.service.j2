@@ -1,0 +1,47 @@
+[Unit]
+Description=Sentinel Agent — Autonomous Infrastructure Remediation
+Documentation=https://{{ forgejo_host }}/admin1/overwatch/src/branch/main/sentinel-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sentinel-agent
+Group=sentinel-agent
+WorkingDirectory=/opt/sentinel-agent
+
+ExecStart=/opt/sentinel-agent/.venv/bin/python3 /opt/sentinel-agent/agent.py \
+    --config /opt/sentinel-agent/config.yaml \
+    --once
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+
+ReadWritePaths=/var/log/sentinel-agent
+ReadWritePaths=/opt/sentinel-agent/.vault-secret-id
+ReadWritePaths=/opt/sentinel-agent/.kube
+ReadWritePaths=/opt/sentinel-agent/state
+
+TimeoutStartSec=300
+TimeoutStopSec=30
+
+Environment=PYTHONPATH=/opt/sentinel-agent
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-agent
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+---
+# OKD sandbox cluster — desired version declaration.
+#
+# Editing this file IS the operator-approved change request for an OKD
+# upgrade (NIST CM-3 / CM-3(4)). Push to `main` triggers
+# `.forgejo/workflows/okd-upgrade-sandbox.yaml`.
+#
+# Pin the FULL release-image digest, not just a version tag — this makes the
+# upgrade reproducible and immune to release-channel drift mid-upgrade.
+# Resolve the digest with:
+#
+#   oc adm release info --insecure=true \
+#     quay.io/okd/scos-release:4.20.0-okd-scos.0 \
+#     -o jsonpath='{.image}'
+#
+# `desiredVersion` is a human-readable label that must match the version
+# baked into the release-image (used in graph checks and Plane notifications).
+# `channel` is informational — the workflow always upgrades by digest.
+
+apiVersion: overwatch.haist.farm/v1
+kind: ClusterVersionTarget
+metadata:
+  name: okd-sandbox
+spec:
+  # Current cluster version (as of OPS-186 install). When the upgrade
+  # rehearsal task (#10) starts, bump these three fields together.
+  desiredVersion: "4.19.0-okd-scos.0"
+  desiredImage: "quay.io/okd/scos-release@sha256:58fbb82cb873eb7aad82307970951b4536f559d547b9bde2e8e888c2efe1e626"
+  channel: "stable-4.19"

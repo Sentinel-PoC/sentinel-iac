@@ -1,0 +1,27 @@
+---
+- name: Reload nftables
+  ansible.builtin.systemd:
+    name: nftables
+    state: restarted
+  register: nftables_reload_result
+  failed_when: nftables_reload_result.failed
+
+- name: Verify SSH connectivity
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ pve_ssh_port }}"
+    timeout: 10
+    state: started
+  delegate_to: localhost
+  become: false
+
+- name: Enable nftables on boot
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+
+# OPS-805: Apply kernel sysctl parameters live (without reboot)
+- name: Apply sysctl settings
+  ansible.builtin.command:
+    cmd: sysctl --system
+  changed_when: true

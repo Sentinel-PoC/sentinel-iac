@@ -1,0 +1,48 @@
+# {{ ansible_managed }}
+services:
+  vault:
+    image: hashicorp/vault:{{ vault_version }}
+    container_name: vault
+    restart: always
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_ADDR: "http://127.0.0.1:8200"
+      VAULT_API_ADDR: "http://127.0.0.1:8200"
+      # OPS-541: Vault's docker-entrypoint.sh runs
+      #   setcap cap_ipc_lock=+ep /bin/vault
+      # which hangs forever on Docker 29.x due to a capability-cgroup
+      # interaction. Skipping setcap is safe here because the container
+      # is already granted CAP_IPC_LOCK via `cap_add: [IPC_LOCK]` below,
+      # so the kernel allows mlock() without the file capability set.
+      # This is Vault's officially-supported escape hatch.
+      # Ref: https://developer.hashicorp.com/vault/docs/concepts/limits
+      SKIP_SETCAP: "true"
+    ports:
+      - "8200:8200"
+    volumes:
+      - {{ vault_data_dir }}:/vault/file
+      - {{ vault_config_dir }}:/vault/config
+      - {{ vault_log_dir }}:/vault/logs
+      # OPS-541 (L4 recovery): TLS cert+key files live at /etc/vault/tls
+      # on the host and are referenced by config.hcl as /vault/tls/cert.pem
+      # and /vault/tls/key.pem. This mount existed live on vault-server from
+      # an out-of-band setup, but was missing from this template back to
+      # commit bb994e1 — the drift hid until OPS-541's apply re-rendered
+      # the template and recreated the container. Codifying here so future
+      # apply runs don't break Vault's TLS listener.
+      - {{ vault_tls_dir }}:/vault/tls:ro
+    # extra_hosts entries route specific *.haist.farm names directly to
+    # iac-control's dnsmasq (.210) and bypass the gateway's DNS wildcard,
+    # which would otherwise return the Pangolin VIP (192.168.12.168) for
+    # any *.haist.farm query — see memory:feedback_pangolin_dns_wildcard.
+    #
+    # Docker rebuilds the container's /etc/hosts from this list on every
+    # start, so these mappings are durable across container restarts.
+    #
+    # OPS-541 added spire-oidc.208.haist.farm (SPIRE OIDC discovery URL
+    # for the auth/jwt-spire mount); api.overwatch.haist.farm predates it.
+    extra_hosts:
+      - "api.overwatch.haist.farm:192.168.12.210"
+      - "spire-oidc.208.haist.farm:192.168.12.210"
+    command: server

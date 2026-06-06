@@ -1,0 +1,136 @@
+---
+# lxc_provision.yml — Phase 1: Provision runner LXC containers on pve4
+# OPS-582
+#
+# Mirrors lxc_provision.yml from ha-lxc (OPS-585) and pve4-nvidia-gpu (OPS-564).
+# All pct commands run directly on the PVE host (ansible target = pve4-alienware root).
+#
+# Security: containers are UNPRIVILEGED (forgejo_runner_lxc_unprivileged: 1)
+# with features nesting=1,keyctl=1 to support Docker-in-LXC.
+# See README.md for Docker-in-LXC cgroup requirements and fallback instructions.
+
+# ── Download Ubuntu 24.04 LXC template ────────────────────────────────────────
+
+- name: Update Proxmox template list (pveam update)
+  ansible.builtin.command:
+    cmd: pveam update
+  register: pveam_update
+  changed_when: "'No updates available' not in pveam_update.stdout"
+  failed_when: false
+  tags: [forgejo-runner-pool, lxc, template]
+
+- name: Check if Ubuntu 24.04 template is already downloaded
+  ansible.builtin.command:
+    cmd: "pveam list {{ forgejo_runner_lxc_template_storage }}"
+  register: pveam_list
+  changed_when: false
+  tags: [forgejo-runner-pool, lxc, template]
+
+- name: Download Ubuntu 24.04 LXC template if not present
+  ansible.builtin.command:
+    cmd: >
+      pveam download {{ forgejo_runner_lxc_template_storage }}
+      {{ forgejo_runner_lxc_ostemplate }}
+  when: forgejo_runner_lxc_ostemplate not in pveam_list.stdout
+  register: pveam_download
+  changed_when: true
+  async: 300
+  poll: 10
+  tags: [forgejo-runner-pool, lxc, template]
+
+# ── Create runner LXC containers (idempotent) ─────────────────────────────────
+# Loop over all 3 runner instances.  Each runner is a separate LXC.
+
+- name: Check if runner LXC already exists
+  ansible.builtin.command:
+    cmd: "pct status {{ item.vmid }}"
+  register: lxc_exists
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, lxc, create]
+
+- name: Create runner LXC container
+  # Unprivileged LXC (--unprivileged 1) is the security default.
+  # --features nesting=1,keyctl=1 enables Docker-in-LXC on Proxmox 9.1.1 (kernel 6.17+):
+  #   nesting=1 → Linux namespace nesting required by Docker overlay2 storage driver
+  #   keyctl=1  → keyctl() syscall for Docker credential store helpers
+  # If Docker fails with EPERM at runtime, see README.md for privileged fallback.
+  ansible.builtin.command:
+    cmd: >
+      pct create {{ item.item.vmid }}
+      {{ forgejo_runner_lxc_template_storage }}:vztmpl/{{ forgejo_runner_lxc_ostemplate }}
+      --hostname {{ item.item.name }}
+      --cores {{ forgejo_runner_lxc_cores }}
+      --memory {{ forgejo_runner_lxc_memory }}
+      --swap {{ forgejo_runner_lxc_swap }}
+      --rootfs {{ forgejo_runner_lxc_rootfs_storage }}:{{ forgejo_runner_lxc_rootfs_size }}
+      --net0 name=eth0,bridge={{ forgejo_runner_lxc_bridge }},ip={{ item.item.ip }}/{{ forgejo_runner_lxc_cidr }},gw={{ forgejo_runner_lxc_gateway }}
+      --nameserver {{ forgejo_runner_lxc_nameserver }}
+      --searchdomain {{ forgejo_runner_lxc_searchdomain }}
+      --unprivileged {{ forgejo_runner_lxc_unprivileged }}
+      --features {{ forgejo_runner_lxc_features }}
+      --start 0
+  when: item.rc != 0
+  changed_when: item.rc != 0
+  loop: "{{ lxc_exists.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, lxc, create]
+
+# ── Start the LXC containers ──────────────────────────────────────────────────
+
+- name: Check runner LXC status
+  ansible.builtin.command:
+    cmd: "pct status {{ item.vmid }}"
+  register: lxc_status
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, lxc, start]
+
+- name: Start runner LXC if not running
+  ansible.builtin.command:
+    cmd: "pct start {{ item.item.vmid }}"
+  when: "'running' not in item.stdout"
+  changed_when: "'running' not in item.stdout"
+  loop: "{{ lxc_status.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, lxc, start]
+
+- name: Wait for runner LXC networking to be ready (30s max per LXC)
+  # Skipped in check mode: LXCs are not created in --check runs so pct exec would fail.
+  # In a live apply, this waits until the container's default route is established.
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- ip route show default"
+  register: lxc_network_ready
+  until: lxc_network_ready.rc == 0 and lxc_network_ready.stdout != ""
+  retries: 6
+  delay: 5
+  changed_when: false
+  when: not ansible_check_mode
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, lxc, start]
+
+# ── Create working directory inside each LXC ─────────────────────────────────
+
+- name: Create runner working directory inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} -- bash -c
+      "mkdir -p {{ forgejo_runner_workdir }} &&
+       id {{ forgejo_runner_user }} &>/dev/null ||
+       useradd -u {{ forgejo_runner_uid }} -m -s /bin/bash {{ forgejo_runner_user }} &&
+       chown {{ forgejo_runner_user }}:{{ forgejo_runner_user }} {{ forgejo_runner_workdir }}"
+  changed_when: false
+  when: not ansible_check_mode
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, lxc, workdir]

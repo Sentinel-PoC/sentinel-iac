@@ -1,0 +1,201 @@
+---
+# OPS-940: vault-agent now owns /run/minio-secrets population.
+# minio_root_password is no longer required as an Ansible var — vault-agent
+# fetches it from Vault at boot. The assertion below checks only B2 backup
+# secrets (which are still passed as Ansible vars).
+
+- name: Validate required B2 backup secrets are provided
+  ansible.builtin.assert:
+    that:
+      - minio_skip_b2_backup | default(false) or (b2_account_id | default('') | length > 0)
+      - minio_skip_b2_backup | default(false) or (b2_application_key | default('') | length > 0)
+      - minio_skip_b2_backup | default(false) or (rclone_crypt_password | default('') | length > 0)
+      - minio_skip_b2_backup | default(false) or (rclone_crypt_password2 | default('') | length > 0)
+    fail_msg: "B2 backup secrets must be provided (or set minio_skip_b2_backup: true). See roles/minio-server/defaults/main.yml."
+  tags: [minio, validation]
+
+- name: Create minio group
+  ansible.builtin.group:
+    name: minio-user
+    system: true
+  tags: [minio]
+
+- name: Create minio user
+  ansible.builtin.user:
+    name: minio-user
+    group: minio-user
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+  tags: [minio]
+
+- name: Download MinIO server binary
+  ansible.builtin.get_url:
+    url: "https://dl.min.io/server/minio/release/linux-amd64/archive/minio.{{ minio_version }}"
+    dest: /usr/local/bin/minio
+    mode: "0755"
+  tags: [minio]
+
+- name: Download MinIO client (mc)
+  ansible.builtin.get_url:
+    url: https://dl.min.io/client/mc/release/linux-amd64/mc
+    dest: /usr/local/bin/mc
+    mode: "0755"
+  tags: [minio]
+
+- name: Create MinIO data directory
+  ansible.builtin.file:
+    path: "{{ minio_data_dir }}"
+    state: directory
+    owner: minio-user
+    group: minio-user
+    mode: "0750"
+  tags: [minio]
+
+# OPS-940: vault-agent provisioning — installs vault binary, deploys AppRole
+# credentials + HCL config + CT template, starts vault-agent-minio.service.
+# vault-agent renders /run/minio-secrets from secret/minio/admin at boot.
+# Replaces the SEC-81 Pattern B "Deploy MinIO secrets to tmpfs" Ansible task.
+- name: MINIO-APPROLE | Provision vault-agent for boot-time credential fetch
+  ansible.builtin.include_tasks: vault-agent-approle.yml
+  tags: [minio, minio-approle]
+
+- name: Remove legacy on-disk credential file if present (SEC-81)
+  ansible.builtin.file:
+    path: /etc/default/minio
+    state: absent
+  tags: [minio]
+
+# SEC-88: Provision wildcard TLS cert BEFORE starting the service so that
+# MinIO can load --certs-dir on first start.  Tag: minio-tls for targeted re-run
+# after each Let's Encrypt renewal (~90 days).
+- name: SEC-88 | Provision TLS cert for MinIO S3 data-plane
+  ansible.builtin.include_tasks: tls-cert-provision.yml
+  tags: [minio, minio-tls]
+
+- name: Deploy MinIO systemd service
+  ansible.builtin.template:
+    src: minio.service.j2
+    dest: /etc/systemd/system/minio.service
+    mode: "0644"
+  notify:
+    - Daemon reload
+    - Restart minio
+  tags: [minio]
+
+- name: Enable and start MinIO
+  ansible.builtin.systemd:
+    name: minio
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [minio]
+
+- name: Install rclone
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      curl -fsSL https://rclone.org/install.sh | bash
+    executable: /bin/bash
+    creates: /usr/bin/rclone
+  tags: [minio]
+
+- name: Create rclone config directory
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.file:
+    path: /root/.config/rclone
+    state: directory
+    mode: "0700"
+  tags: [minio]
+
+- name: Deploy rclone configuration
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.template:
+    src: rclone.conf.j2
+    dest: /root/.config/rclone/rclone.conf
+    mode: "0600"
+  tags: [minio]
+
+- name: Deploy B2 backup script
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.template:
+    src: backup-to-b2.sh.j2
+    dest: /usr/local/bin/backup-to-b2.sh
+    mode: "0755"
+  tags: [minio]
+
+- name: Deploy B2 backup systemd service
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.template:
+    src: b2-backup.service.j2
+    dest: /etc/systemd/system/b2-backup.service
+    mode: "0644"
+  notify: Daemon reload
+  tags: [minio]
+
+- name: Deploy B2 backup systemd timer
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.template:
+    src: b2-backup.timer.j2
+    dest: /etc/systemd/system/b2-backup.timer
+    mode: "0644"
+  notify: Daemon reload
+  tags: [minio]
+
+- name: Enable B2 backup timer
+  when: not minio_skip_b2_backup | default(false)
+  ansible.builtin.systemd:
+    name: b2-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [minio]
+
+- name: Wait for MinIO to be ready
+  # SEC-88: probe via HTTPS FQDN so the cert chain is exercised at deploy time.
+  # public-root Let's Encrypt chain — no --insecure needed.
+  ansible.builtin.uri:
+    url: "https://{{ minio_server_url_fqdn }}:{{ minio_port }}/minio/health/live"
+    status_code: 200
+  register: minio_health
+  retries: 10
+  delay: 3
+  until: minio_health.status == 200
+  tags: [minio]
+
+- name: Configure mc alias for local MinIO
+  # OPS-940: minio_root_user and minio_root_password must be passed as extra-vars
+  # for mc alias setup (e.g., fetched from Vault before playbook run).
+  # After vault-agent is running, /run/minio-secrets contains the creds — but
+  # Ansible can't read them without becoming root and reading the tmpfs file.
+  # Recommended: pass -e minio_root_user=... -e minio_root_password=... from Vault.
+  # SEC-88: https FQDN — public-root cert, no --insecure.
+  ansible.builtin.command:
+    cmd: >
+      mc alias set local https://{{ minio_server_url_fqdn }}:{{ minio_port }}
+      {{ minio_root_user }} {{ minio_root_password }}
+  changed_when: false
+  no_log: true
+  when: minio_root_password | default('') | length > 0
+  tags: [minio]
+
+- name: Create MinIO buckets
+  ansible.builtin.command:
+    cmd: "mc mb --ignore-existing local/{{ item }}"
+  loop: "{{ minio_buckets }}"
+  changed_when: false
+  when: minio_root_password | default('') | length > 0
+  tags: [minio]
+
+- name: Enable versioning on core buckets
+  ansible.builtin.command:
+    cmd: "mc versioning enable local/{{ item }}"
+  loop:
+    - terraform-state
+    - vault-backups
+    - gitlab-backups
+    - etcd-backups
+  changed_when: false
+  when: minio_root_password | default('') | length > 0
+  tags: [minio]

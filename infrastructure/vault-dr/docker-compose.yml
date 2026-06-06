@@ -1,0 +1,30 @@
+# Vault Server Docker Compose
+# Reconstructed from running container (docker inspect)
+# VM 205 on 208-pve2 (192.168.12.206)
+
+services:
+  vault:
+    image: hashicorp/vault:1.15.4
+    container_name: vault
+    restart: always
+    cap_drop:
+      - ALL
+    cap_add:
+      - IPC_LOCK
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    environment:
+      VAULT_ADDR: "http://127.0.0.1:8200"
+      VAULT_API_ADDR: "http://127.0.0.1:8200"
+    ports:
+      - "8200:8200"
+    volumes:
+      - /opt/vault/data:/vault/file
+      - /etc/vault/config:/vault/config
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    command: server

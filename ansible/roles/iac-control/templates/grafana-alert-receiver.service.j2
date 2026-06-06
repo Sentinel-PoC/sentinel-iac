@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Grafana Alert Webhook Receiver
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/bin/python3 /usr/local/bin/grafana-alert-receiver.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

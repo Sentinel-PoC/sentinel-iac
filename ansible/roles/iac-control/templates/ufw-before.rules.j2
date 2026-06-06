@@ -1,0 +1,199 @@
+# {{ ansible_managed }}
+# UFW before.rules for iac-control
+# Standard UFW rules PLUS custom OKD FORWARD and NAT rules
+# NIST SC-7: Boundary Protection
+
+# Don't delete these required lines, otherwise there will be errors
+*filter
+:ufw-before-input - [0:0]
+:ufw-before-output - [0:0]
+:ufw-before-forward - [0:0]
+:ufw-not-local - [0:0]
+# End required lines
+
+
+# allow all on loopback
+-A ufw-before-input -i lo -j ACCEPT
+-A ufw-before-output -o lo -j ACCEPT
+
+# quickly process packets for which we already have a connection
+-A ufw-before-input -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-output -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A ufw-before-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+{% if sc5_connection_ratelimit_enabled | default(false) %}
+# SC-5 SEC-108: New-connection rate limiting via hashlimit (OPERATOR REVIEW REQUIRED)
+# This block is disabled by default (sc5_connection_ratelimit_enabled: false).
+# Set sc5_connection_ratelimit_enabled: true in host_vars/iac-control ONLY after
+# testing on a non-production host. Misconfiguration can lock out management.
+#
+# Design:
+#   - Management workstation 192.168.12.55 is UNCONDITIONALLY exempted (RETURN
+#     before any hashlimit rule); this host must NEVER be rate-limited.
+#   - NEW TCP connections from all other hosts: rate-limited to 30/sec with
+#     burst of 50. This threshold is intentionally high to avoid false-positive
+#     lockout of legitimate traffic while blocking flood-rate DoS.
+#   - Tracking by source IP (hashlimit-mode srcip); each source has its own bucket.
+#
+# PREREQUISITE: verify iptables hashlimit module is loaded: lsmod | grep hashlimit
+# TESTING: run ansible-playbook --check --diff before applying; confirm on test host.
+-A ufw-before-input -s 192.168.12.55 -j RETURN
+-A ufw-before-input -p tcp -m state --state NEW -m hashlimit \
+  --hashlimit-mode srcip --hashlimit-name ufw_sc5_conn_rate \
+  --hashlimit-above 30/second --hashlimit-burst 50 \
+  -j ufw-logging-deny
+-A ufw-before-input -p tcp -m state --state NEW -m hashlimit \
+  --hashlimit-mode srcip --hashlimit-name ufw_sc5_conn_rate \
+  --hashlimit-above 30/second --hashlimit-burst 50 \
+  -j DROP
+{% endif %}
+
+# drop INVALID packets (logs these in loglevel medium and higher)
+-A ufw-before-input -m conntrack --ctstate INVALID -j ufw-logging-deny
+-A ufw-before-input -m conntrack --ctstate INVALID -j DROP
+
+# ok icmp codes for INPUT
+-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT
+-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT
+-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT
+-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT
+
+# ok icmp code for FORWARD
+-A ufw-before-forward -p icmp --icmp-type destination-unreachable -j ACCEPT
+-A ufw-before-forward -p icmp --icmp-type time-exceeded -j ACCEPT
+-A ufw-before-forward -p icmp --icmp-type parameter-problem -j ACCEPT
+-A ufw-before-forward -p icmp --icmp-type echo-request -j ACCEPT
+
+# allow dhcp client to work
+-A ufw-before-input -p udp --sport 67 --dport 68 -j ACCEPT
+
+# VRRP for keepalived (IP protocol 112).
+# OPS-175: UFW itself doesn't understand numeric IP protocols, so VRRP rules
+# have to go in before.rules as raw iptables. Added 2026-04-19.
+-A ufw-before-input -p 112 -j ACCEPT
+-A ufw-before-output -p 112 -j ACCEPT
+
+#
+# ufw-not-local
+#
+-A ufw-before-input -j ufw-not-local
+
+# if LOCAL, RETURN
+-A ufw-not-local -m addrtype --dst-type LOCAL -j RETURN
+
+# if MULTICAST, RETURN
+-A ufw-not-local -m addrtype --dst-type MULTICAST -j RETURN
+
+# if BROADCAST, RETURN
+-A ufw-not-local -m addrtype --dst-type BROADCAST -j RETURN
+
+# all other non-local packets are dropped
+-A ufw-not-local -m limit --limit 3/min --limit-burst 10 -j ufw-logging-deny
+-A ufw-not-local -j DROP
+
+# allow MULTICAST mDNS for service discovery (be sure the MULTICAST line above
+# is uncommented)
+-A ufw-before-input -p udp -d 224.0.0.251 --dport 5353 -j ACCEPT
+
+# allow MULTICAST UPnP for service discovery (be sure the MULTICAST line above
+# is uncommented)
+-A ufw-before-input -p udp -d 239.255.255.250 --dport 1900 -j ACCEPT
+
+# --- OKD cluster network forwarding (SC-7) ---
+# DNS forwarding to upstream resolvers
+-A ufw-before-forward -d 1.1.1.1/32 -i {{ okd_interface }} -o {{ primary_interface }} -p udp -m udp --dport 53 -j ACCEPT
+-A ufw-before-forward -d 8.8.8.8/32 -i {{ okd_interface }} -o {{ primary_interface }} -p udp -m udp --dport 53 -j ACCEPT
+
+# NTP forwarding
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -p udp -m udp --dport 123 -j ACCEPT
+
+# HTTP + HTTPS forwarding for container image pulls and health checks
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m tcp --dport 80 -j ACCEPT
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m tcp --dport 443 -j ACCEPT
+
+# SMTP forwarding for email (Mailjet via Keycloak)
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m tcp --dport 587 -j ACCEPT
+
+# NFS access to storage server (TCP + UDP)
+-A ufw-before-forward -d {{ nfs_server }}/32 -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m multiport --dports 2049,111 -j ACCEPT
+-A ufw-before-forward -d {{ nfs_server }}/32 -i {{ okd_interface }} -o {{ primary_interface }} -p udp -m multiport --dports 2049,111 -j ACCEPT
+
+# iSCSI access to storage server (OPS-228: same host as nfs_server — TrueNAS)
+# Required for OKD database pods (plane-pg, harbor-pg, defectdojo-pg, etc).
+# Without this rule new iSCSI logins are dropped; existing sessions only survive
+# via conntrack RELATED,ESTABLISHED which resets whenever iptables rules reload.
+-A ufw-before-forward -d {{ nfs_server }}/32 -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m tcp --dport 3260 -j ACCEPT
+
+# MinIO access
+-A ufw-before-forward -d {{ minio_server }}/32 -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m tcp --dport 9000 -j ACCEPT
+-A ufw-before-forward -d {{ minio_replica_server }}/32 -i {{ okd_interface }} -o {{ primary_interface }} -p tcp -m tcp --dport 9000 -j ACCEPT
+
+# ICMP forwarding for diagnostics
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -p icmp -j ACCEPT
+
+# WireGuard forwarding (Newt tunnel)
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -p udp -m udp --dport 51820 -j ACCEPT
+
+# Return traffic (established connections back to OKD nodes)
+-A ufw-before-forward -i {{ primary_interface }} -o {{ okd_interface }} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+{% if enable_iptables_logging %}
+# Log denied egress attempts from OKD network
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -j LOG --log-prefix "OKD-EGRESS-DENY: "
+{% endif %}
+
+# Deny all other OKD egress
+-A ufw-before-forward -i {{ okd_interface }} -o {{ primary_interface }} -j DROP
+
+# don't delete the 'COMMIT' line or these rules won't be processed
+COMMIT
+
+# --- DOCKER-USER chain: restrict transit Vault port 8201 (SEC-89 Phase C) ---
+# Docker bypasses UFW INPUT via DNAT (iptables nat table), so plain UFW rules
+# cannot filter Docker-published ports. DOCKER-USER is the supported chain for
+# per-port allowlists that work WITH Docker's DNAT rules.
+#
+# Docker pre-creates DOCKER-USER; we inject rules via a second *filter stanza.
+# Do NOT declare :DOCKER-USER here — it is Docker-owned and pre-exists.
+#
+# Allowlist: only prod Vault (192.168.12.206) and local iac-control
+# (192.168.12.210) may reach port 8201. All other LAN hosts are dropped.
+# This closes the LAN-reachability exposure that TLS alone does not address.
+*filter
+
+# Allow loopback (local scripts on iac-control)
+-A DOCKER-USER -i lo -j RETURN
+
+# Allow ESTABLISHED/RELATED traffic (return path for already-established sessions).
+# DOCKER-USER sees both directions (host→container AND container→host); without this
+# rule the container-to-client SYN-ACK replies would hit the DROP below and break
+# connections from allowed sources.
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+
+{% for src in vault_unseal_allowed_sources %}
+# Allow NEW connections from {{ src }} to transit Vault :8201
+# ctorigdstport matches the original host-port before Docker's DNAT rewrites
+# the destination to the container port. This is container-IP-stable.
+-A DOCKER-USER -s {{ src }} -m conntrack --ctstate NEW --ctorigdstport 8201 -j RETURN
+{% endfor %}
+
+# Drop all other NEW connections to transit Vault port 8201
+-A DOCKER-USER -m conntrack --ctstate NEW --ctorigdstport 8201 -j DROP
+
+# All other Docker-forwarded traffic: RETURN (let DOCKER chain continue)
+-A DOCKER-USER -j RETURN
+
+COMMIT
+
+# --- NAT rules ---
+*nat
+:PREROUTING ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# Allow traffic within management network without NAT
+-A PREROUTING -d {{ management_network }} -i {{ okd_interface }} -j ACCEPT
+
+# Masquerade OKD cluster traffic for internet access
+-A POSTROUTING -s {{ okd_network }} -o {{ primary_interface }} -j MASQUERADE
+
+COMMIT

@@ -1,0 +1,10 @@
+---
+- name: Daemon-reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart spire-agent
+  ansible.builtin.systemd:
+    name: spire-agent
+    state: restarted
+    enabled: true

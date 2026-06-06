@@ -1,0 +1,100 @@
+---
+# iscsi_host_mount.yml — iSCSI host-side setup for Frigate recordings storage
+# OPS-956 Phase 2 (2026-05-26): manually applied; role codifies for re-apply
+#
+# Runs on: pve4-alienware (the Proxmox host, not inside LXC 203)
+# Effect: Discovers TrueNAS iSCSI target, mounts XFS filesystem, bind-mounts to LXC 203
+
+# ── 1. Ensure open-iscsi is installed ─────────────────────────────────────────
+
+- name: Ensure open-iscsi is installed on pve4 host
+  ansible.builtin.apt:
+    name: open-iscsi
+    state: present
+    update_cache: false
+  tags: [frigate-lxc, frigate-iscsi]
+
+# ── 2. Discover iSCSI target ──────────────────────────────────────────────────
+
+- name: Discover iSCSI target from TrueNAS portal
+  ansible.builtin.command:
+    cmd: "iscsiadm -m discovery -t sendtargets -p {{ frigate_iscsi_portal }}:{{ frigate_iscsi_port }}"
+  register: iscsi_discovery
+  changed_when: false
+  failed_when: iscsi_discovery.rc != 0
+  tags: [frigate-lxc, frigate-iscsi]
+
+- name: Log iSCSI discovery result
+  ansible.builtin.debug:
+    msg: "iSCSI discovery: {{ iscsi_discovery.stdout_lines }}"
+  tags: [frigate-lxc, frigate-iscsi]
+
+# ── 3. Login to iSCSI target ──────────────────────────────────────────────────
+
+- name: Login to iSCSI target (no-op if already logged in)
+  ansible.builtin.command:
+    cmd: "iscsiadm -m node --targetname {{ frigate_iscsi_iqn }} --portal {{ frigate_iscsi_portal }} --login"
+  register: iscsi_login
+  changed_when: "'successful' in iscsi_login.stdout"
+  failed_when: iscsi_login.rc != 0 and 'already present' not in iscsi_login.stderr
+  tags: [frigate-lxc, frigate-iscsi]
+
+# ── 4. Create mount point ─────────────────────────────────────────────────────
+
+- name: Create iSCSI mount point on pve4 host
+  ansible.builtin.file:
+    path: "{{ frigate_iscsi_mount_point }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+  tags: [frigate-lxc, frigate-iscsi]
+
+# ── 5. Persistent fstab entry ─────────────────────────────────────────────────
+# Device path via by-path (stable across reboots):
+# /dev/disk/by-path/ip-<portal>:<port>-iscsi-<iqn>-lun-0
+
+- name: Add iSCSI mount to /etc/fstab
+  ansible.posix.mount:
+    path: "{{ frigate_iscsi_mount_point }}"
+    src: "/dev/disk/by-path/ip-{{ frigate_iscsi_portal }}:{{ frigate_iscsi_port }}-iscsi-{{ frigate_iscsi_iqn }}-lun-0"
+    fstype: "{{ frigate_iscsi_fstype }}"
+    opts: "defaults,_netdev,x-systemd.requires=open-iscsi.service"
+    state: mounted
+    dump: "0"
+    passno: "0"
+  tags: [frigate-lxc, frigate-iscsi]
+
+# ── 6. Add mp0 bind mount to LXC 203 conf ────────────────────────────────────
+# Appends mp0 directive to /etc/pve/lxc/203.conf if not already present.
+# Requires pve4 host restart of LXC 203 to take effect (or shutdown/start).
+# CAUTION: Modifying LXC conf while container is running is safe for mp changes;
+# the mount takes effect on next start.
+
+- name: Check if mp0 bind mount is already in LXC 203 conf
+  ansible.builtin.command:
+    cmd: "grep -q 'mp=/opt/frigate/storage' /etc/pve/lxc/{{ frigate_lxc_id }}.conf"
+  register: mp0_check
+  changed_when: false
+  failed_when: false
+  tags: [frigate-lxc, frigate-iscsi]
+
+- name: Add mp0 bind mount directive to LXC 203 conf
+  ansible.builtin.lineinfile:
+    path: "/etc/pve/lxc/{{ frigate_lxc_id }}.conf"
+    line: "mp0: {{ frigate_iscsi_mount_point }},mp={{ frigate_storage_dir }}"
+    state: present
+  when: mp0_check.rc != 0
+  tags: [frigate-lxc, frigate-iscsi]
+
+- name: Confirm mp0 bind mount in LXC conf
+  ansible.builtin.command:
+    cmd: "grep 'mp0' /etc/pve/lxc/{{ frigate_lxc_id }}.conf"
+  register: mp0_result
+  changed_when: false
+  tags: [frigate-lxc, frigate-iscsi]
+
+- name: Show LXC mp0 config
+  ansible.builtin.debug:
+    msg: "LXC {{ frigate_lxc_id }} mp0: {{ mp0_result.stdout }}"
+  tags: [frigate-lxc, frigate-iscsi]

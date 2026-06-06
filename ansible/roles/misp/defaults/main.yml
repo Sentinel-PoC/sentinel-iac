@@ -1,0 +1,147 @@
+---
+# MISP role defaults — OPS-571
+# Tracking: https://plane.208.haist.farm OPS-571
+# Image/env names sourced from: https://github.com/MISP/misp-docker
+#
+# Sensitive values (db password, admin key, OIDC secret) are supplied at
+# runtime from Vault (secret/misp/*) — never set here.
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+misp_dir: "/opt/misp"
+misp_data_dir: "/opt/misp/data"
+misp_db_dir: "/opt/misp/db"       # MariaDB data (named 'db' per upstream service)
+misp_redis_dir: "/opt/misp/redis"
+
+# ── Images (upstream: MISP/misp-docker) ────────────────────────────────────
+# misp-core: ghcr.io/misp/misp-docker/misp-core  — EXISTS (verified)
+# misp-modules: ghcr.io/misp/misp-docker/misp-modules — EXISTS (verified)
+# misp-workers: does NOT exist — workers run inside misp-core via supervisord
+# db: mariadb:10.11 — upstream explicitly chooses MariaDB over PostgreSQL
+# redis: valkey/valkey:7.2 — upstream uses Valkey (Redis fork), NOT redis:alpine
+misp_core_image: "ghcr.io/misp/misp-docker/misp-core:latest"
+misp_modules_image: "ghcr.io/misp/misp-docker/misp-modules:latest"
+misp_db_image: "mariadb:10.11"
+misp_redis_image: "valkey/valkey:7.2"
+
+# ── Networking ─────────────────────────────────────────────────────────────
+# Pangolin reverse proxy terminates TLS and proxies to misp_http_port.
+# misp_https_port is bound for direct TLS access (optional; can be disabled
+# behind a reverse proxy by not exposing it via firewall_allowed_ports).
+misp_http_port: 8080
+misp_https_port: 8443
+misp_base_url: "https://misp.208.haist.farm"
+
+# ── Database (MariaDB) — upstream env prefix is MYSQL_* ────────────────────
+# Upstream template.env L128-134 documents MYSQL_* prefix.
+# DATABASE_* does NOT exist in upstream and will be silently ignored.
+misp_db_name: "misp"
+misp_db_user: "misp"
+misp_db_password: ""        # Vault: secret/misp.db_password
+misp_db_root_password: ""   # Vault: secret/misp.db_root_password
+misp_innodb_buffer_pool_size: "2048M"
+
+# ── MISP Admin ─────────────────────────────────────────────────────────────
+misp_admin_email: "admin@misp.haist.farm"
+misp_admin_password: ""  # Vault: secret/misp.admin_password
+misp_admin_key: ""        # Vault: secret/misp.admin_key (UUID format)
+misp_org_name: "HAIST"
+misp_org_uuid: ""         # auto-generated on first boot if empty
+
+# ── Redis ──────────────────────────────────────────────────────────────────
+# Upstream requires a password (env default: 'redispassword').
+# Must match REDIS_PASSWORD in misp.env.j2.
+misp_redis_password: ""  # Vault: secret/misp.redis_password
+
+# ── Keycloak OIDC ──────────────────────────────────────────────────────────
+# Variable names are EXACT matches to upstream template.env L180-196.
+# Operator must create "misp" client in Keycloak sentinel realm before deploy:
+#   standardFlowEnabled: true
+#   redirectUri: ["https://misp.208.haist.farm/*"]
+misp_oidc_enabled: true
+# OIDC_PROVIDER_URL (not OIDC_PROVIDER): base URL of the OIDC provider
+misp_oidc_provider_url: "https://auth.208.haist.farm"
+# OIDC_ISSUER: discovery endpoint URL
+misp_oidc_discovery_url: "https://auth.208.haist.farm/realms/sentinel/.well-known/openid-configuration"
+misp_oidc_client_id: "misp"
+misp_oidc_client_secret: ""  # Vault: secret/misp.oidc_client_secret
+misp_oidc_logout_url: "https://auth.208.haist.farm/realms/sentinel/protocol/openid-connect/logout"
+# OIDC_ROLES_PROPERTY: claim name containing role list from Keycloak
+misp_oidc_roles_property: "roles"
+# OIDC_ROLES_MAPPING (not OIDC_ROLES_MAP): JSON dict, Keycloak role → MISP role ID
+# MISP roles: 1=site_admin, 2=org_admin, 3=sync_user, 4=user, 5=publisher, 6=read_only
+misp_oidc_roles_mapping:
+  misp-admin: 1
+  misp-org-admin: 2
+  misp-user: 4
+  misp-readonly: 6
+# OIDC_MIXEDAUTH: when false, ONLY OIDC login is accepted (no local MISP accounts).
+# Set true for break-glass (allows local admin login alongside OIDC).
+misp_oidc_mixed_auth: false
+
+# Nginx trusted proxy CIDR (for X-Forwarded-For; Pangolin is 192.168.12.168)
+misp_trusted_proxies: "192.168.12.168"
+
+# ── Vault ──────────────────────────────────────────────────────────────────
+# vault_addr: cross-role shared variable (platform convention).
+# Same pattern in keycloak-agent-clients, seedbox roles.
+vault_addr: "https://192.168.12.206:8200"  # noqa: var-naming[no-role-prefix]
+misp_vault_path: "secret/misp"
+
+# ── Feed Configuration ─────────────────────────────────────────────────────
+# Configured via MISP REST API post-deploy.
+# source_format "csv" = plain text or delimiter-separated.
+# GreyNoise and AbuseIPDB are enrichment modules (on-demand), not cron feeds.
+misp_feeds:
+  - name: "Spamhaus DROP"
+    provider: "Spamhaus"
+    url: "https://www.spamhaus.org/drop/drop.txt"
+    source_format: "csv"
+    input_source: "network"
+    enabled: true
+    caching_enabled: true
+    distribution: 0
+    sharing_group_id: null
+    settings: '{"csv":{"value":"0","delimiter":";"}}'
+
+  - name: "Spamhaus EDROP"
+    provider: "Spamhaus"
+    url: "https://www.spamhaus.org/drop/edrop.txt"
+    source_format: "csv"
+    input_source: "network"
+    enabled: true
+    caching_enabled: true
+    distribution: 0
+    sharing_group_id: null
+    settings: '{"csv":{"value":"0","delimiter":";"}}'
+
+  - name: "CINS Score"
+    provider: "CINS Army"
+    url: "http://cinsscore.com/list/ci-badguys.txt"
+    source_format: "csv"
+    input_source: "network"
+    enabled: true
+    caching_enabled: true
+    distribution: 0
+    sharing_group_id: null
+    settings: '{"csv":{"value":"0","delimiter":" "}}'
+
+  - name: "EmergingThreats Open Block IPs"
+    provider: "EmergingThreats"
+    url: "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
+    source_format: "csv"
+    input_source: "network"
+    enabled: true
+    caching_enabled: true
+    distribution: 0
+    sharing_group_id: null
+    settings: '{"csv":{"value":"0","delimiter":" "}}'
+
+# ── misp-modules API keys ──────────────────────────────────────────────────
+misp_greynoise_api_key: ""  # Vault: secret/misp.greynoise_api_key
+misp_abuseipdb_api_key: ""  # Vault: secret/misp.abuseipdb_api_key
+
+# ── Wazuh integration ──────────────────────────────────────────────────────
+misp_wazuh_enabled: true
+misp_wazuh_host: "192.168.12.100"
+misp_wazuh_alert_level: 5
+misp_wazuh_verify_ssl: false

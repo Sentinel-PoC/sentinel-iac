@@ -1,0 +1,81 @@
+---
+# wazuh-integration.yml — OPS-571
+# Deploys the custom-misp Wazuh integration script to the Wazuh server and
+# injects an ossec.conf integration block.
+#
+# Upstream reference for integration protocol:
+#   https://documentation.wazuh.com/current/user-manual/capabilities/
+#   threat-intelligence/enrichment-using-threat-intelligence-apis.html
+#
+# All tasks delegate_to the Wazuh server (misp_wazuh_host).
+#
+# ── IMPORTANT LIMITATION ────────────────────────────────────────────────────
+# The ossec.conf integration block is added via blockinfile. If the
+# wazuh-server Ansible role is subsequently re-applied (template regeneration),
+# the blockinfile marker will be OVERWRITTEN. The correct long-term fix is to
+# add a misp_wazuh_integration_enabled conditional block to the wazuh-server
+# role's ossec-server.conf.j2 template.
+# Tracked as follow-up work in the wazuh-server role.
+# ────────────────────────────────────────────────────────────────────────────
+
+- name: Install Python3 requests on Wazuh server (required by custom-misp)
+  ansible.builtin.apt:
+    name:
+      - python3-requests
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  delegate_to: "{{ misp_wazuh_host }}"
+  tags: [misp, wazuh]
+
+- name: Deploy custom-misp integration script to Wazuh server
+  ansible.builtin.template:
+    src: custom-misp.py.j2
+    dest: /var/ossec/integrations/custom-misp
+    owner: root
+    group: wazuh
+    mode: "0750"
+  delegate_to: "{{ misp_wazuh_host }}"
+  notify: restart wazuh-manager
+  tags: [misp, wazuh]
+
+- name: Add MISP integration block to ossec.conf (blockinfile — idempotent marker)
+  # See IMPORTANT LIMITATION note above regarding template re-apply risk.
+  # The blockinfile marker "# BEGIN MISP OPS-571 / # END MISP OPS-571" ensures
+  # this block survives playbook re-runs and is removable cleanly.
+  ansible.builtin.blockinfile:
+    path: /var/ossec/etc/ossec.conf
+    marker: "  <!-- {mark} MISP integration — OPS-571 -->"
+    insertbefore: "</ossec_config>"
+    block: |
+      <integration>
+        <name>custom-misp</name>
+        <hook_url>{{ misp_base_url }}</hook_url>
+        <api_key>{{ misp_admin_key }}</api_key>
+        <level>{{ misp_wazuh_alert_level }}</level>
+        <alert_format>json</alert_format>
+      </integration>
+    owner: root
+    group: wazuh
+    mode: "0640"
+    validate: /var/ossec/bin/wazuh-analysisd -t -c %s
+  delegate_to: "{{ misp_wazuh_host }}"
+  notify: restart wazuh-manager
+  no_log: true
+  tags: [misp, wazuh]
+
+- name: Verify custom-misp script is executable
+  ansible.builtin.stat:
+    path: /var/ossec/integrations/custom-misp
+  register: misp_custom_misp_stat
+  delegate_to: "{{ misp_wazuh_host }}"
+  tags: [misp, wazuh, verify]
+
+- name: Assert custom-misp is executable
+  ansible.builtin.assert:
+    that:
+      - misp_custom_misp_stat.stat.exists
+      - misp_custom_misp_stat.stat.executable
+    fail_msg: "custom-misp script missing or not executable at /var/ossec/integrations/custom-misp"
+    success_msg: "custom-misp script present and executable"
+  tags: [misp, wazuh, verify]

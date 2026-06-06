@@ -1,0 +1,58 @@
+---
+# truenas-iscsi role — task dispatcher (OPS-1011)
+#
+# Includes task files based on truenas_iscsi_tasks list variable.
+# Default: [list] (read-only, always safe).
+# All API calls use Bearer token auth against truenas_url.
+#
+# IMPORTANT destroy order: targetextent → target → extent
+# See defaults/main.yml for full task list and notes.
+
+- name: truenas-iscsi | list extents, targets, and targetextents
+  ansible.builtin.include_tasks: list.yml
+  when: "'list' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-list
+
+- name: truenas-iscsi | create iSCSI extent
+  ansible.builtin.include_tasks: extent_create.yml
+  when: "'extent_create' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-create
+
+- name: truenas-iscsi | create iSCSI target
+  ansible.builtin.include_tasks: target_create.yml
+  when: "'target_create' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-create
+
+- name: truenas-iscsi | create target-to-extent association (LUN mapping)
+  ansible.builtin.include_tasks: targetextent_create.yml
+  when: "'targetextent_create' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-create
+
+- name: truenas-iscsi | destroy target-to-extent association
+  ansible.builtin.include_tasks: targetextent_destroy.yml
+  when: "'targetextent_destroy' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-destroy
+
+- name: truenas-iscsi | destroy iSCSI target
+  ansible.builtin.include_tasks: target_destroy.yml
+  when: "'target_destroy' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-destroy
+
+- name: truenas-iscsi | destroy iSCSI extent
+  ansible.builtin.include_tasks: extent_destroy.yml
+  when: "'extent_destroy' in truenas_iscsi_tasks"
+  tags:
+    - truenas-iscsi
+    - truenas-iscsi-destroy

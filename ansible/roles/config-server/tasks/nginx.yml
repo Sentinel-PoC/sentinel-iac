@@ -1,0 +1,56 @@
+---
+# config-server - Nginx PXE server
+# Listens on port 8080 (HAProxy uses 80/443)
+
+- name: Create Nginx PXE directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+  loop: "{{ nginx_pxe_dirs }}"
+  tags:
+    - config-server
+    - nginx
+    - pxe
+
+- name: Remove default nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Restart nginx
+  tags:
+    - config-server
+    - nginx
+
+- name: Deploy PXE nginx config
+  ansible.builtin.template:
+    src: nginx-pxe.conf.j2
+    dest: /etc/nginx/sites-available/pxe.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart nginx
+  tags:
+    - config-server
+    - nginx
+
+- name: Enable PXE nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/pxe.conf
+    dest: /etc/nginx/sites-enabled/pxe.conf
+    state: link
+  notify: Restart nginx
+  tags:
+    - config-server
+    - nginx
+
+- name: Enable and start Nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: started
+    enabled: true
+  tags:
+    - config-server
+    - nginx

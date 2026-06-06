@@ -1,0 +1,7 @@
+---
+# OPS-593: Restart sshd when CA pem or TrustedUserCAKeys directive changes.
+# Proxmox hosts use Debian sshd service name (ssh, not sshd).
+- name: Restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted

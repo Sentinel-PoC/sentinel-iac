@@ -1,0 +1,144 @@
+---
+# RETIRED — OPS-1163 step 2 (2026-06-03)
+# Keycloak (auth.208.haist.farm) is decommissioned. This role is retained for
+# history. The fail task below prevents accidental execution.
+#
+# Provision Keycloak service-account clients for Overwatch agent roles and
+# extend each agent's Vault credential path with keycloak_client_id +
+# keycloak_client_secret while preserving all existing fields (api_token,
+# username, etc.).
+#
+# Requires at runtime (pass via -e or environment — NOT in defaults):
+#   keycloak_admin_user      — Keycloak admin username
+#   keycloak_admin_password  — Keycloak admin password (Vault-sourced)
+#   vault_token              — Vault token with kv read+write on secret/forgejo-*
+#
+# Idempotent:
+#   - keycloak_client: checks by client_id, no-op if already present
+#   - keycloak_clientsecret_info: read-only, never rotates the secret
+#   - vault_kv2_write: guarded by when: that compares existing fields to desired;
+#     skipped (changed=0) if keycloak_client_id and keycloak_client_secret are
+#     already correct in Vault
+#
+# Tracking: OPS-335
+
+- name: RETIRED | abort — Keycloak is decommissioned (OPS-1163)
+  ansible.builtin.fail:
+    msg: >-
+      keycloak-agent-clients role is RETIRED (OPS-1163).
+      Keycloak (auth.208.haist.farm) is decommissioned.
+      Agent OIDC clients are now managed via Authentik (auth-next.208.haist.farm).
+      See vault-jwt-authentik role for the live agent JWT auth configuration.
+
+- name: Pre-flight | assert required credentials are provided
+  ansible.builtin.assert:
+    that:
+      - keycloak_admin_user | default('') | length > 0
+      - keycloak_admin_password | default('') | length > 0
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      Required credentials are missing. Pass via -e:
+        -e keycloak_admin_user=<user>
+        -e keycloak_admin_password=<pass>
+        -e vault_token=<token>
+  no_log: false
+
+# ─── Task 1 of 5 ────────────────────────────────────────────────────────────
+# Provision each service-account client in the sentinel realm.
+# - serviceAccountsEnabled: true   → client_credentials grant type
+# - standardFlowEnabled: false     → no browser redirect flow
+# - directAccessGrantsEnabled: false → no resource-owner password flow
+# - publicClient: false            → confidential; Keycloak generates a secret
+# - No redirectUris/webOrigins     → not needed for client_credentials
+#
+# Idempotent: keycloak_client checks current state by client_id.
+
+- name: "Task 1/5 | Provision Keycloak SA client | sentinel-{{ role_item }}"
+  community.general.keycloak_client:
+    auth_keycloak_url: "{{ keycloak_url }}"
+    auth_realm: "{{ keycloak_realm_admin }}"
+    auth_username: "{{ keycloak_admin_user }}"
+    auth_password: "{{ keycloak_admin_password }}"
+    realm: "{{ keycloak_realm_workload }}"
+    client_id: "sentinel-{{ role_item }}"
+    name: "Sentinel {{ role_item | capitalize }} Service Account"
+    description: "Overwatch agent role service account — OPS-335"
+    protocol: openid-connect
+    publicClient: false
+    standardFlowEnabled: false
+    directAccessGrantsEnabled: false
+    serviceAccountsEnabled: true
+    clientAuthenticatorType: client-secret
+    state: present
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+
+# ─── Task 2 of 5 ────────────────────────────────────────────────────────────
+# Read the Keycloak-generated client secret (read-only; does NOT rotate it).
+# Results indexed by role position for cross-task matching in task 5.
+
+- name: "Task 2/5 | Read Keycloak client secret | sentinel-{{ role_item }}"
+  community.general.keycloak_clientsecret_info:
+    auth_keycloak_url: "{{ keycloak_url }}"
+    auth_realm: "{{ keycloak_realm_admin }}"
+    auth_username: "{{ keycloak_admin_user }}"
+    auth_password: "{{ keycloak_admin_password }}"
+    realm: "{{ keycloak_realm_workload }}"
+    client_id: "sentinel-{{ role_item }}"
+  register: kc_secrets_results
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  no_log: true
+
+# ─── Task 3 of 5 ────────────────────────────────────────────────────────────
+# Read the current Vault KV2 data for each agent path.
+# Captures both the data dict (for merge) and the metadata.version (for CAS).
+
+- name: "Task 3/5 | Read existing Vault data | forgejo-{{ role_item }}"
+  community.hashi_vault.vault_kv2_get:
+    engine_mount_point: secret
+    path: "forgejo-{{ role_item }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  register: vault_reads_results
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+  no_log: true
+
+# ─── Tasks 4+5 combined: conditional write ──────────────────────────────────
+# Merge the existing Vault data with the new keycloak fields using combine().
+# This preserves ALL existing fields (api_token, username, note, scopes, and
+# for the judge path: email, password, purpose).
+#
+# CAS (compare-and-swap): vault_kv2_write will only succeed if the current
+# KV version matches cas. Prevents race-clobber if another process wrote
+# between our read (task 3) and this write.
+#
+# when: guard ensures this is a no-op on re-runs when the fields are already
+# correct — giving changed=0 on the second run (idempotency requirement).
+
+- name: "Task 5/5 | Write merged Vault data | forgejo-{{ role_item }}"
+  community.hashi_vault.vault_kv2_write:
+    engine_mount_point: secret
+    path: "forgejo-{{ role_item }}"
+    data: "{{ vault_reads_results.results[role_idx].secret | combine({
+        'keycloak_client_id': 'sentinel-' ~ role_item,
+        'keycloak_client_secret': kc_secrets_results.results[role_idx].clientsecret_info.value
+      }) }}"
+    cas: "{{ vault_reads_results.results[role_idx].metadata.version | int }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  when: >-
+    (vault_reads_results.results[role_idx].secret.keycloak_client_id | default('')) != ('sentinel-' ~ role_item)
+    or
+    (vault_reads_results.results[role_idx].secret.keycloak_client_secret | default('')) != kc_secrets_results.results[role_idx].clientsecret_info.value
+  loop: "{{ agent_roles }}"
+  loop_control:
+    loop_var: role_item
+    index_var: role_idx
+  no_log: true

@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Sync PXE artifacts from iac-control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+{% for dir in pxe_sync_dirs %}
+ExecStart=/usr/bin/rsync -avz --delete -e "ssh -i {{ pxe_sync_ssh_key }} -o StrictHostKeyChecking=no" {{ pxe_sync_source }}:{{ dir }} {{ dir }}
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

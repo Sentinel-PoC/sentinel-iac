@@ -1,0 +1,15 @@
+---
+# OPS-593: Minimal composable role — deploys Vault SSH CA trust for JIT cert auth.
+# No role dependencies; intentionally narrow scope to limit PVE blast radius.
+galaxy_info:
+  role_name: jit_ssh_trust
+  author: sentinel-iac
+  description: >-
+    Deploys /etc/ssh/trusted-ca.pem (Vault SSH CA public key) and sets
+    TrustedUserCAKeys directive in /etc/ssh/sshd_config. Enables JIT SSH
+    certificate authentication signed by the platform Vault CA.
+    Shape #2 from OPS-593: minimal, composable, no sshd hardening side-effects.
+  license: proprietary
+  min_ansible_version: "2.15"
+
+dependencies: []

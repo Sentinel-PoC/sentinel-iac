@@ -1,0 +1,40 @@
+# Ansible managed — OPS-585 zwave-js-ui-host role
+# Z-Wave JS UI systemd service
+# Upstream: https://github.com/zwave-js/zwave-js-ui
+#
+# Bridge pattern: zwave-js-ui runs on the host with the ZWA-2 USB radio.
+# Home Assistant connects via WebSocket ws://{{ ansible_host }}:{{ zwavejs_ws_port }}
+# Web UI available at http://{{ ansible_host }}:{{ zwavejs_ui_port }}
+
+[Unit]
+Description=Z-Wave JS UI
+Documentation=https://zwave-js.github.io/zwave-js-ui/
+After=network.target
+
+[Service]
+Type=simple
+User={{ zwavejs_user }}
+Group={{ zwavejs_group }}
+
+# STORE_DIR: persistent state — Z-Wave node DB, security keys, session data.
+# Upstream: "You MUST configure a custom storage path using an environment
+# variable, otherwise settings will be lost on updates."
+Environment=STORE_DIR={{ zwavejs_store_dir }}
+
+# EnvironmentFile carries the Z-Wave network security keys (no plaintext in repo).
+EnvironmentFile={{ zwavejs_store_dir }}/.env
+
+# ExecStart: zwave-js-ui binary installed globally by npm install -g.
+# /usr/bin/zwave-js-ui is the standard npm global bin path on Arch/CachyOS.
+ExecStart=/usr/bin/zwave-js-ui
+
+Restart=on-failure
+RestartSec=5s
+
+# Log via journald only; no duplicate file logging.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zwave-js-ui
+
+[Install]
+WantedBy=multi-user.target

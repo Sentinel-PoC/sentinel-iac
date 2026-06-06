@@ -1,0 +1,95 @@
+---
+# deploy.yml — OPS-571
+# Creates directories, writes Docker Compose + env file, starts MISP stack.
+# Service names match upstream MISP/misp-docker: "db" (MariaDB), "redis" (Valkey).
+
+- name: Create MISP base directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ misp_dir }}"
+    - "{{ misp_data_dir }}"
+    - "{{ misp_data_dir }}/configs"
+    - "{{ misp_data_dir }}/logs"
+    - "{{ misp_data_dir }}/files"
+    - "{{ misp_data_dir }}/ssl"
+    - "{{ misp_data_dir }}/gnupg"
+    - "{{ misp_db_dir }}"
+    - "{{ misp_redis_dir }}"
+  tags: [misp, deploy]
+
+- name: Deploy MISP docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ misp_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: restart misp-full
+  tags: [misp, deploy]
+
+- name: Deploy MISP environment file
+  ansible.builtin.template:
+    src: misp.env.j2
+    dest: "{{ misp_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart misp-full
+  no_log: true
+  tags: [misp, deploy]
+
+- name: Pull MISP images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ misp_dir }}"
+  register: misp_docker_pull_result
+  changed_when: "'Pull complete' in misp_docker_pull_result.stdout or 'Downloaded newer image' in misp_docker_pull_result.stdout"
+  tags: [misp, deploy]
+
+- name: Start MISP stack
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ misp_dir }}"
+  register: misp_compose_up_result
+  changed_when: >-
+    'Started' in misp_compose_up_result.stderr or
+    'Creating' in misp_compose_up_result.stderr or
+    'Recreating' in misp_compose_up_result.stderr
+  tags: [misp, deploy]
+
+- name: Wait for MariaDB to be healthy
+  # Service name "db" matches upstream docker-compose.yml service name.
+  # Uses mysqladmin (not pg_isready — this is MariaDB, not PostgreSQL).
+  ansible.builtin.command:
+    cmd: >-
+      docker compose exec -T db
+      mysqladmin --user={{ misp_db_user }} --password={{ misp_db_password }} status
+    chdir: "{{ misp_dir }}"
+  register: misp_db_ready
+  retries: 18
+  delay: 5
+  until: misp_db_ready.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, deploy]
+
+- name: Wait for MISP core to be healthy (heartbeat endpoint)
+  # Upstream healthcheck uses /users/heartbeat (not /users/login).
+  # /users/heartbeat returns 200 JSON when MISP is fully initialized.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/users/heartbeat"
+    method: GET
+    status_code: 200
+    validate_certs: false
+  register: misp_health
+  retries: 30
+  delay: 10
+  until: misp_health.status == 200
+  when: not ansible_check_mode
+  tags: [misp, deploy, verify]

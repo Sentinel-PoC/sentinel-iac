@@ -1,0 +1,31 @@
+---
+# [OPS-566] postgres-attacker-intel — main tasks orchestrator
+
+- name: Assert required variables are provided
+  ansible.builtin.assert:
+    that:
+      - attacker_db_superpass | default('') | length > 0
+      - attacker_db_ro_password | default('') | length > 0
+      - attacker_db_rw_password | default('') | length > 0
+      - attacker_db_migrate_password | default('') | length > 0
+    fail_msg: >
+      Required secrets must be provided.
+      Pull from Vault: secret/attacker-db/{superuser,ro_user,rw_user,migrate_user}
+  tags: [attacker-db, validation]
+
+- name: Include deploy tasks
+  ansible.builtin.include_tasks: deploy.yml
+  tags: [attacker-db, deploy]
+
+- name: Include migration tasks
+  ansible.builtin.include_tasks: migrate.yml
+  tags: [attacker-db, migrate]
+
+- name: Include RBAC tasks
+  ansible.builtin.include_tasks: rbac.yml
+  tags: [attacker-db, rbac]
+
+- name: Include backup tasks
+  ansible.builtin.include_tasks: backup.yml
+  when: attacker_db_backup_enabled | bool
+  tags: [attacker-db, backup]

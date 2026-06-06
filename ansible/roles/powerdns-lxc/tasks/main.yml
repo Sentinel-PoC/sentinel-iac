@@ -1,0 +1,8 @@
+---
+# tasks/main.yml — powerdns-lxc role (OPS-673)
+# Provision a PowerDNS nameserver LXC on a Proxmox host.
+# All pct commands run directly on the PVE host (ansible target = pve/pve3 as root).
+
+- name: Include LXC provisioning tasks
+  ansible.builtin.import_tasks: provision.yml
+  tags: [powerdns-lxc, lxc, provision]

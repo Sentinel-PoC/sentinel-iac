@@ -1,0 +1,32 @@
+# {{ ansible_managed }}
+# [OPS-566] Attacker Intelligence DB — pgvector PostgreSQL 16
+# Deployed by: ansible/roles/postgres-attacker-intel
+
+services:
+  postgres:
+    image: "{{ attacker_db_image }}"
+    container_name: "{{ attacker_db_container_name }}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "{{ attacker_db_superuser }}"
+      POSTGRES_PASSWORD: "{{ attacker_db_superpass }}"
+      POSTGRES_DB: "{{ attacker_db_name }}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - "{{ attacker_db_data_dir }}:/var/lib/postgresql/data"
+    ports:
+      - "{{ attacker_db_host_bind }}:{{ attacker_db_port_host }}:{{ attacker_db_port_internal }}"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "pg_isready -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    shm_size: "256m"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

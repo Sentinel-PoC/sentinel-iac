@@ -1,0 +1,33 @@
+---
+collections:
+  - name: netbox.netbox
+    version: ">=3.16.0"
+  - name: ansible.utils
+    version: ">=2.12.0"
+  - name: community.general
+    version: ">=8.0.0"
+  # OPS-448: community.docker used in roles/iac-control (docker_container,
+  # docker_compose_v2) but was not declared — caused silent collection-missing
+  # failures in fresh environments and CI syntax-check (exit 4 on iac-control.yml).
+  # Declaring here makes it explicit and installable via ansible-galaxy.
+  - name: community.docker
+    version: ">=3.0.0"
+  # OPS-237: ansible.posix.firewalld used in roles/mirror-registry (Quay 8443/443
+  # firewall rules); same shape as the OPS-448 community.docker gap — undeclared
+  # but used. Declaring here makes fresh-environment / CI syntax-check work.
+  - name: ansible.posix
+    version: ">=1.5.0"
+  # OPS-657: community.hashi_vault used in roles/powerdns-auth, roles/keycloak-agent-clients,
+  # and now roles/proxmox-oidc-realms (vault_kv2_get module for secret fetch at play time).
+  # Previously undeclared — same gap pattern as OPS-448 (community.docker). Declaring here
+  # ensures fresh-environment / CI syntax-check works and ansible-galaxy install is complete.
+  - name: community.hashi_vault
+    version: ">=6.0.0"
+# OPS-670: PowerDNS Galaxy roles — used as dependencies by powerdns-auth
+# and powerdns-recursor sentinel-iac wrapper roles.
+# Install: ansible-galaxy role install -r ansible/requirements.yml
+roles:
+  - name: PowerDNS.pdns
+    version: "v1.10.0"
+  - name: PowerDNS.pdns_recursor
+    version: "v2.1.0"

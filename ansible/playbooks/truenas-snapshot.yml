@@ -1,0 +1,38 @@
+---
+# TrueNAS ZFS snapshot playbook — Layer 3 of Keycloak backup (OPS-632)
+#
+# Runs on iac-control (192.168.12.210) which has network access to TrueNAS .205
+# Scheduled: 04:00 UTC daily (1h after OKD CronJob Layers 1+2 at 03:00 UTC)
+#
+# Schedule via cron on iac-control:
+#   0 4 * * * ansible-playbook /opt/sentinel/ansible/playbooks/truenas-snapshot.yml
+#
+# One-shot manual run:
+#   ansible-playbook playbooks/truenas-snapshot.yml -e truenas_api_token=<token>
+
+- name: Keycloak backup — Layer 3 TrueNAS ZFS snapshot
+  hosts: iac-control
+  gather_facts: true
+  vars:
+    vault_addr: "https://192.168.12.206:8200"
+
+  pre_tasks:
+    - name: Fetch TrueNAS credentials from Vault (KV v2 raw API)
+      ansible.builtin.uri:
+        url: "{{ vault_addr }}/v1/secret/data/truenas"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+        validate_certs: false
+        status_code: 200
+      register: vault_truenas_raw
+      no_log: true
+
+    - name: Set TrueNAS credentials from Vault response
+      ansible.builtin.set_fact:
+        truenas_api_token: "{{ vault_truenas_raw.json.data.data.api_token }}"
+        truenas_url: "{{ vault_truenas_raw.json.data.data.url }}"
+      no_log: true
+
+  roles:
+    - role: truenas-backup

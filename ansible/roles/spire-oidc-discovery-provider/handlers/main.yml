@@ -1,0 +1,14 @@
+---
+# OPS-537 / OPS-351 Phase 4.4a
+# Handlers for spire-oidc-discovery-provider
+#
+# The container picks up cert + key file changes via the provider's built-in
+# file_sync_interval polling (serving_cert_file mode), so cert rotation does
+# not require a container restart. Config changes DO require restart.
+
+- name: Restart spire-oidc-discovery-provider
+  community.docker.docker_container:
+    name: "{{ spire_oidc_container_name }}"
+    state: started
+    restart: true
+  listen: "restart spire-oidc-discovery-provider"

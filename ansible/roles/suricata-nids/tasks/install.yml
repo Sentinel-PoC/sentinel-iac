@@ -1,0 +1,44 @@
+---
+# suricata-nids/tasks/install.yml — OPS-569
+# Install Suricata from OISF stable PPA and suricata-update
+
+- name: Install prerequisites for PPA
+  ansible.builtin.apt:
+    name:
+      - software-properties-common
+      - python3-apt
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - suricata
+    - install
+
+- name: Add OISF Suricata stable PPA
+  ansible.builtin.apt_repository:
+    repo: "{{ suricata_ppa }}"
+    state: present
+    update_cache: true
+  tags:
+    - suricata
+    - install
+
+- name: Install Suricata and suricata-update
+  ansible.builtin.apt:
+    name:
+      - suricata
+      - suricata-update
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - suricata
+    - install
+
+- name: Ensure suricata service is enabled
+  ansible.builtin.service:
+    name: suricata
+    enabled: true
+  tags:
+    - suricata
+    - install

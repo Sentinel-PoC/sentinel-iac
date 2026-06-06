@@ -1,0 +1,28 @@
+---
+# OPS-670: powerdns-auth — sentinel-iac wrapper for PowerDNS Authoritative Server
+#
+# Galaxy role PowerDNS.pdns (v1.10.0) handles: package install, systemd
+# management, config templating. This wrapper adds: LMDB opinionated defaults,
+# Vault-sourced API key, TSIG key setup, primary/secondary mode toggle.
+#
+# Install Galaxy dep before running:
+#   ansible-galaxy role install PowerDNS.pdns
+
+galaxy_info:
+  role_name: powerdns_auth
+  author: sentinel-iac
+  description: >-
+    PowerDNS Authoritative DNS server — sentinel-iac wrapper (OPS-670).
+    LMDB backend, API on 127.0.0.1, TSIG-protected AXFR, primary/secondary toggle.
+  license: proprietary
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - "all"
+
+dependencies: []
+
+collections:
+  - community.hashi_vault
+  - community.general

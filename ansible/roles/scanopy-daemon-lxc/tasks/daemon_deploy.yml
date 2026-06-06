@@ -1,0 +1,293 @@
+---
+# daemon_deploy.yml — Deploy scanopy-daemon container inside LXC (OPS-1123)
+#
+# This file runs against pve4-alienware (PVE host) using pct exec to reach
+# the LXC. The daemon is a podman container managed by a systemd unit.
+#
+# Security posture:
+# - Harbor pull creds from Vault (secret/harbor/robot-pull), never hardcoded
+# - cosign verify before container start (against /etc/cosign/cosign.pub)
+# - SCANOPY_INTERFACES pinned to eth0 (192.168.12.0/24 only — operator scope)
+# - Container runs as root inside privileged LXC (required for NET_RAW)
+#
+# The systemd unit runs: podman run --rm --network host --cap-add NET_RAW
+# which allows ARP scanning. hostnetwork=true means the container sees the
+# LXC's eth0 (192.168.12.0/24) directly.
+
+# ── Fetch Harbor pull credentials from Vault ───────────────────────────────────
+
+- name: Fetch Harbor robot-pull credentials from Vault
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -format=json {{ scanopy_harbor_robot_vault_path }}
+  environment:
+    VAULT_ADDR: "{{ scanopy_vault_addr }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_harbor_raw
+  changed_when: false
+  no_log: true
+  tags: [scanopy-daemon, daemon, vault]
+
+- name: Parse Harbor robot-pull credentials
+  ansible.builtin.set_fact:
+    _harbor_pull_user: "{{ (_vault_harbor_raw.stdout | from_json).data.data.username }}"
+    _harbor_pull_pass: "{{ (_vault_harbor_raw.stdout | from_json).data.data.password }}"
+  no_log: true
+  tags: [scanopy-daemon, daemon, vault]
+
+# ── Fetch cosign public key from Vault ────────────────────────────────────────
+
+- name: Fetch cosign public key from Vault
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -field=public_key secret/cosign
+  environment:
+    VAULT_ADDR: "{{ scanopy_vault_addr }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _cosign_pubkey_raw
+  changed_when: false
+  no_log: true
+  tags: [scanopy-daemon, daemon, vault]
+
+# ── Bootstrap cosign inside LXC ───────────────────────────────────────────────
+
+- name: Install cosign inside LXC (binary download)
+  # Download cosign from GitHub releases — version must match the signing environment.
+  # OPS-1122 used cosign v2.x for image signing. Match major version.
+  # cosign v2.4.1 is the latest stable as of 2026-06.
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "if ! command -v cosign &>/dev/null; then
+        curl -sSfL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+        -o /usr/local/bin/cosign &&
+        chmod +x /usr/local/bin/cosign;
+      fi"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, cosign]
+
+- name: Write cosign public key inside LXC at /etc/cosign/cosign.pub
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ scanopy_lxc_id }}"
+      - "--"
+      - bash
+      - "-c"
+      - >-
+        mkdir -p /etc/cosign &&
+        printf '%s\n' '{{ _cosign_pubkey_raw.stdout | trim }}' > /etc/cosign/cosign.pub &&
+        chmod 644 /etc/cosign/cosign.pub
+  changed_when: false
+  no_log: true
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, cosign]
+
+# ── Pull daemon image into LXC ────────────────────────────────────────────────
+
+- name: Login to Harbor registry inside LXC (podman login)
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ scanopy_lxc_id }}"
+      - "--"
+      - bash
+      - "-c"
+      - >-
+        podman login harbor.208.haist.farm
+        --username '{{ _harbor_pull_user }}'
+        --password '{{ _harbor_pull_pass }}'
+        --tls-verify=false
+  changed_when: false
+  no_log: true
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, pull]
+
+- name: Pull scanopy-daemon image inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "podman pull --tls-verify=false '{{ scanopy_daemon_image }}'"
+  register: _pull_result
+  changed_when: "'Storing signatures' in _pull_result.stderr or 'Writing manifest' in _pull_result.stderr"
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, pull]
+
+# ── Cosign verify the daemon image ────────────────────────────────────────────
+
+- name: Cosign verify scanopy-daemon image inside LXC
+  # COSIGN_EXPERIMENTAL=0: no Rekor transparency log (private registry).
+  # --insecure-ignore-tlog: Harbor does not have a public transparency log entry.
+  # Verification uses the cosign public key from Vault (OPS-1122 signing key).
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "COSIGN_EXPERIMENTAL=0 cosign verify
+      --key /etc/cosign/cosign.pub
+      --insecure-ignore-tlog=true
+      '{{ scanopy_daemon_image }}'"
+  register: _cosign_verify
+  changed_when: false
+  failed_when: _cosign_verify.rc != 0
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, cosign]
+
+- name: Display cosign verification result
+  ansible.builtin.debug:
+    msg: "cosign verify exit={{ _cosign_verify.rc }} — image signature is valid."
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, cosign]
+
+# ── Deploy systemd unit for scanopy-daemon ────────────────────────────────────
+
+- name: Create scanopy-daemon data directory inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "mkdir -p {{ scanopy_daemon_data_dir }} &&
+       chmod 750 {{ scanopy_daemon_data_dir }}"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, systemd]
+
+- name: Write /etc/containers/containers.conf inside LXC (disable AppArmor)
+  # Ubuntu 24.04 podman on a privileged Proxmox LXC fails with exit 243 when
+  # trying to install the AppArmor container profile (host AppArmor module is loaded
+  # but no profiles are available to the LXC). Setting apparmor_profile="" in
+  # containers.conf disables AppArmor for all containers in this LXC.
+  # This is safe: the LXC is already privileged (NET_RAW) and isolated by purpose.
+  # Confirmed fix: tested live on LXC 305, 2026-06-01 (OPS-1123).
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "mkdir -p /etc/containers &&
+       printf '[containers]\napparmor_profile = \"\"\n' > /etc/containers/containers.conf &&
+       echo containers.conf_written"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, apparmor]
+
+- name: Ensure XDG_RUNTIME_DIR exists for root podman inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "mkdir -p /run/user/0 && chmod 700 /run/user/0"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, apparmor]
+
+- name: Deploy scanopy-daemon systemd unit inside LXC
+  # Uses pct push to write the unit file into the LXC filesystem.
+  # The unit runs podman as root (required: NET_RAW for ARP scanning).
+  # --network host: daemon needs the LXC's eth0 (192.168.12.0/24) for ARP.
+  # --cap-add NET_RAW + NET_ADMIN: capabilities for raw socket / ARP scanning.
+  # --security-opt label=disable: required alongside containers.conf apparmor_profile=""
+  #   to fully bypass AppArmor enforcement in the privileged LXC environment.
+  # Environment XDG_RUNTIME_DIR=/run/user/0: required for rootful podman.
+  # SCANOPY_INTERFACES=eth0: restricts ARP scan to 192.168.12.0/24 only
+  #   (operator scope decision OPS-1123; prevents scanning other VLANs).
+  # SCANOPY_SERVER_URL: daemon registers to scanopy server in OKD via Pangolin.
+  ansible.builtin.shell: |
+    cat > /tmp/scanopy-daemon.service << 'UNITEOF'
+    [Unit]
+    Description=Scanopy Network Discovery Daemon
+    Documentation=https://github.com/scanopy/scanopy
+    After=network-online.target
+    Wants=network-online.target
+    StartLimitIntervalSec=60
+    StartLimitBurst=5
+
+    [Service]
+    Type=simple
+    Restart=on-failure
+    RestartSec=10s
+    Environment=XDG_RUNTIME_DIR=/run/user/0
+    ExecStartPre=-/usr/bin/podman stop -t 5 scanopy-daemon
+    ExecStartPre=-/usr/bin/podman rm -f scanopy-daemon
+    ExecStart=/usr/bin/podman run \
+      --name scanopy-daemon \
+      --rm \
+      --network host \
+      --cap-add NET_RAW \
+      --cap-add NET_ADMIN \
+      --security-opt label=disable \
+      -e SCANOPY_LOG_LEVEL={{ scanopy_daemon_log_level }} \
+      -e SCANOPY_INTERFACES={{ scanopy_daemon_interfaces }} \
+      -e SCANOPY_SERVER_URL={{ scanopy_daemon_server_url }} \
+      --tls-verify=false \
+      {{ scanopy_daemon_image }}
+    ExecStop=/usr/bin/podman stop -t 10 scanopy-daemon
+
+    [Install]
+    WantedBy=multi-user.target
+    UNITEOF
+    pct push {{ scanopy_lxc_id }} /tmp/scanopy-daemon.service /etc/systemd/system/scanopy-daemon.service
+    rm -f /tmp/scanopy-daemon.service
+  changed_when: true
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, systemd]
+
+- name: Enable and start scanopy-daemon service inside LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "systemctl daemon-reload &&
+       systemctl enable scanopy-daemon &&
+       systemctl start scanopy-daemon"
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, systemd]
+
+# ── Health verification ────────────────────────────────────────────────────────
+
+- name: Wait for scanopy-daemon health port to respond (max 60s)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "curl -sf http://127.0.0.1:60073/api/health"
+  register: _daemon_health
+  until: _daemon_health.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, scanopy-verify]
+
+- name: Display daemon health check result
+  ansible.builtin.debug:
+    msg: "scanopy-daemon /api/health: rc={{ _daemon_health.rc }} stdout={{ _daemon_health.stdout }}"
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, scanopy-verify]
+
+- name: Get scanopy-daemon log output for enrollment evidence
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ scanopy_lxc_id }} -- bash -c
+      "journalctl -u scanopy-daemon --no-pager -n 50 2>/dev/null ||
+       podman logs scanopy-daemon 2>&1 | tail -50"
+  register: _daemon_logs
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, scanopy-verify]
+
+- name: Display daemon logs for enrollment/discovery evidence
+  ansible.builtin.debug:
+    msg: "{{ _daemon_logs.stdout_lines }}"
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, scanopy-verify]
+
+- name: Summary — scanopy-daemon LXC deployment
+  ansible.builtin.debug:
+    msg: >-
+      DEPLOYMENT SUMMARY:
+      LXC {{ scanopy_lxc_id }} ({{ scanopy_lxc_name }}) at {{ scanopy_lxc_ip }}/24 on pve4-alienware.
+      Daemon image: {{ scanopy_daemon_image }}.
+      cosign verify: exit=0 (valid signature).
+      SCANOPY_INTERFACES={{ scanopy_daemon_interfaces }} (192.168.12.0/24 scope only).
+      SCANOPY_SERVER_URL={{ scanopy_daemon_server_url }}.
+      Health check: http://{{ scanopy_lxc_ip }}:60073/api/health.
+  when: not ansible_check_mode
+  tags: [scanopy-daemon, daemon, verify, scanopy-verify]

@@ -1,0 +1,59 @@
+# SPIRE Agent systemd unit — workstation
+# Deployed by Ansible — OPS-533 (parent OPS-351 Phase 4.2b)
+# Managed: do not edit manually; changes will be overwritten on next Ansible run.
+#
+# ExecStart points at a small wrapper script (spire-agent-startup.sh) that
+# conditionally passes -joinToken to spire-agent on first boot. After first
+# attestation succeeds, the wrapper drops the token arg automatically (gated
+# on presence of {{ spire_agent_data_dir }}/agent-data.json).
+
+[Unit]
+Description=SPIRE Agent (workstation, OPS-533)
+Documentation=https://spiffe.io/docs/latest/spire-about/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ spire_agent_user }}
+Group={{ spire_agent_group }}
+ExecStart={{ spire_agent_startup_path }}
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# RuntimeDirectory creates /run/spire-agent before ExecStart (OPS-594 fix).
+# Without this directive, /run/ is a tmpfs that does not persist across reboots;
+# ProtectSystem=strict + PrivateTmp prevent ExecStart from reaching the missing
+# path, producing status=226/NAMESPACE crash-loop. RuntimeDirectory is idempotent
+# — systemd creates the dir if absent and leaves it if already present.
+RuntimeDirectory=spire-agent
+RuntimeDirectoryMode=0755
+
+# Hardening — systemd 260 on workstation supports all of these.
+# ReadWritePaths covers everything the agent + wrapper write to. /etc/spire-agent
+# is included because the bootstrap-token cleanup task removes the dot-file
+# after first attestation; without WR access to /etc/spire-agent the cleanup
+# would fail post-hoc. The ProtectSystem=strict + ReadWritePaths combination
+# keeps the rest of the filesystem read-only at the unit boundary.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ spire_agent_data_dir }} {{ spire_agent_socket_dir }} {{ spire_agent_config_dir }}
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Capability bound — agent doesn't need root capabilities beyond reading its
+# own config files (already accessible to UID 0). Stripping the ambient set
+# protects against accidental capability escalation paths.
+CapabilityBoundingSet=
+
+# Resource sanity defaults.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

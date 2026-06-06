@@ -1,0 +1,64 @@
+# OPS-575: RCF Detector — Per-Host Process Launch Frequency
+# Detects anomalous process spawn rates per host.
+# Entity-side baseline: each host gets its own RCF model.
+#
+# Apply via: POST /_plugins/_anomaly_detection/detectors
+# See compliance-vault/runbooks/rcf-tuning.md for deployment procedure.
+#
+# Input: auditd process_events and/or osquery process_events forwarded via
+# Wazuh agents. Index: auditd-* or wazuh-alerts-* with rule.groups: process
+
+detector:
+  name: per-host-process-launch-freq
+  description: >
+    RCF detector for per-host process launch frequency. Elevated process
+    spawn rates can indicate malware, cryptominer, or lateral movement tooling.
+    Entity-side baseline per OPS-575 / Plan G' architecture (OPS-555, OPS-563).
+    Input: auditd/osquery process_events via Wazuh.
+  time_field: "@timestamp"
+
+  # Input: Wazuh alerts filtered to process-related events
+  # Adjust index pattern to match your Wazuh index naming
+  indices:
+    - wazuh-alerts-*
+
+  features:
+    - feature_name: process_launches
+      feature_enabled: true
+      aggregation_query:
+        process_launches:
+          value_count:
+            field: data.audit.pid    # auditd process event PID field via Wazuh
+
+  # Entity config: per host (agent.name maps to hostname)
+  category_field:
+    - agent.name
+
+  # Detection window: 5-minute buckets (high-frequency spawn events)
+  detection_interval:
+    period:
+      interval: 5
+      unit: Minutes
+
+  shingle_size: 12    # 60 min lookback for burst context
+
+  window_delay:
+    period:
+      interval: 1
+      unit: Minutes
+
+  # Filter: target process-related Wazuh rules only
+  # Wazuh groups: audit, process, syscheck
+  filter_query:
+    bool:
+      should:
+        - term:
+            rule.groups: "audit"
+        - term:
+            rule.groups: "process"
+      minimum_should_match: 1
+
+  # Operational note: CI/CD hosts and build servers will have naturally high
+  # process launch rates during build windows. After 14+ days of training,
+  # review per-host anomaly scores. Build hosts may need a separate detector
+  # instance or grade threshold override. See rcf-tuning.md.

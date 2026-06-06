@@ -1,0 +1,184 @@
+---
+# feeds.yml — OPS-571
+# Configures MISP threat intel feeds via REST API.
+#
+# Feeds configured (acceptance criteria: all 5 synced within 24h):
+#   1. Spamhaus DROP    — IP/CIDR blocklist (plain text CSV)
+#   2. Spamhaus EDROP   — Extended IP/CIDR blocklist (plain text CSV)
+#   3. CINS Score       — IP reputation blocklist (plain text)
+#   4. EmergingThreats  — Open IP blocklist (plain text)
+#   5. GreyNoise        — Community API via misp-modules (key from Vault)
+#   6. AbuseIPDB        — Top blacklisted IPs via misp-modules (key from Vault)
+#
+# Note: GreyNoise and AbuseIPDB use misp-modules enrichment (on-demand query),
+# not standard cron feeds. The MISP modules are enabled in docker-compose via
+# misp-modules container. API keys are injected via environment at container start.
+#
+# The 4 CSV feeds (Spamhaus x2, CINS, ET) are the cron-synced feeds.
+
+# ── Step 1: Query existing feeds (idempotency) ─────────────────────────────
+
+- name: Query existing MISP feeds
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/feeds/index.json"
+    method: GET
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+    validate_certs: false
+    status_code: 200
+  register: misp_existing_feeds
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, feeds]
+
+- name: Set existing feed names fact
+  ansible.builtin.set_fact:
+    misp_existing_feed_names: "{{ misp_existing_feeds.json | map(attribute='Feed.name') | list }}"
+  when:
+    - not ansible_check_mode
+    - misp_existing_feeds.json is defined
+  tags: [misp, feeds]
+
+# ── Step 2: Add CSV/plain-text feeds (idempotent — skip if name exists) ────
+
+- name: Add MISP feed — {{ item.name }}
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/feeds/add.json"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      Feed:
+        name: "{{ item.name }}"
+        provider: "{{ item.provider }}"
+        url: "{{ item.url }}"
+        enabled: "{{ item.enabled | bool | int }}"
+        caching_enabled: "{{ item.caching_enabled | bool | int }}"
+        input_source: "{{ item.input_source }}"
+        source_format: "{{ item.source_format }}"
+        fixed_event: 1
+        target_event: 0
+        settings: "{{ item.settings | default('') }}"
+        distribution: "{{ item.distribution | default(0) }}"
+        sharing_group_id: "{{ item.sharing_group_id | default(omit) }}"
+    validate_certs: false
+    status_code: [200, 201]
+  loop: "{{ misp_feeds }}"
+  when:
+    - not ansible_check_mode
+    - item.name not in (misp_existing_feed_names | default([]))
+  no_log: true
+  tags: [misp, feeds]
+
+# ── Step 3: Enable feeds and trigger initial sync ──────────────────────────
+
+- name: Query feed IDs after add (for sync trigger)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/feeds/index.json"
+    method: GET
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+    validate_certs: false
+    status_code: 200
+  register: misp_feeds_after_add
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, feeds]
+
+- name: Cache all feeds (trigger background sync)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/feeds/cacheFeeds/all"
+    method: GET
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+    validate_certs: false
+    status_code: [200, 201, 302]
+  when: not ansible_check_mode
+  no_log: true
+  tags: [misp, feeds]
+
+# ── Step 4: Configure misp-modules for GreyNoise / AbuseIPDB ──────────────
+# These are enrichment modules, not cron feeds. They are enabled via the
+# MISP Plugins settings if API keys are available.
+
+- name: Enable GreyNoise enrichment module in MISP
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/servers/serverSettingsEdit/Plugin.Enrichment_greynoise_enabled"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      value: true
+    validate_certs: false
+    status_code: [200, 204]
+  when:
+    - not ansible_check_mode
+    - misp_greynoise_api_key | length > 0
+  no_log: true
+  tags: [misp, feeds, modules]
+
+- name: Set GreyNoise API key in MISP module config
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/servers/serverSettingsEdit/Plugin.Enrichment_greynoise_api_key"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      value: "{{ misp_greynoise_api_key }}"
+    validate_certs: false
+    status_code: [200, 204]
+  when:
+    - not ansible_check_mode
+    - misp_greynoise_api_key | length > 0
+  no_log: true
+  tags: [misp, feeds, modules]
+
+- name: Enable AbuseIPDB enrichment module in MISP
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/servers/serverSettingsEdit/Plugin.Enrichment_abuseipdb_enabled"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      value: true
+    validate_certs: false
+    status_code: [200, 204]
+  when:
+    - not ansible_check_mode
+    - misp_abuseipdb_api_key | length > 0
+  no_log: true
+  tags: [misp, feeds, modules]
+
+- name: Set AbuseIPDB API key in MISP module config
+  ansible.builtin.uri:
+    url: "http://localhost:{{ misp_http_port }}/servers/serverSettingsEdit/Plugin.Enrichment_abuseipdb_key"
+    method: POST
+    headers:
+      Authorization: "{{ misp_admin_key }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      value: "{{ misp_abuseipdb_api_key }}"
+    validate_certs: false
+    status_code: [200, 204]
+  when:
+    - not ansible_check_mode
+    - misp_abuseipdb_api_key | length > 0
+  no_log: true
+  tags: [misp, feeds, modules]

@@ -1,0 +1,13 @@
+site_name: Vault Operations
+site_description: Operational runbook for Project Sentinel Vault deployment
+nav:
+  - Overview: index.md
+  - Deployment: deployment.md
+  - Transit Auto-Unseal: transit-unseal.md
+  - SSH Certificate Authority: ssh-ca.md
+  - Secrets Management: secrets-management.md
+  - Kubernetes Auth: kubernetes-auth.md
+  - Backup & Restore: backup-restore.md
+  - Compliance: compliance.md
+plugins:
+  - techdocs-core

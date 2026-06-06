@@ -1,0 +1,23 @@
+[Unit]
+Description=Weekly Vault auto-unseal token rotation (OPS-191)
+# Fires every Sunday at 03:00 UTC.
+#
+# Cadence reasoning:
+#   - Autounseal token period=768h (32 days).
+#   - Weekly rotation gives ~4.5× margin before a missed run causes expiry.
+#   - Sunday 03:00 UTC is low-traffic; avoids weekday change windows.
+#   - Persistent=true catches up a single missed run after host reboot.
+#   - Does NOT catch up multiple missed runs — intentional; if the timer
+#     has been silent for 3+ weeks something is wrong and the OPS-190
+#     TTL monitor will alert before the token expires.
+#
+# Timer fires 4h before vault-tls-rotate.timer (Monday 03:30 UTC) so
+# both do not restart Vault within the same window.
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+Persistent=true
+AccuracySec=10min
+
+[Install]
+WantedBy=timers.target

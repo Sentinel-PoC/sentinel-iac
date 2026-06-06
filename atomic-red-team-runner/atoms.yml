@@ -1,0 +1,101 @@
+---
+# OPS-576: Atomic Red Team weekly atom selection config
+#
+# Each entry defines one atomic test to execute per weekly run.
+# Techniques chosen for Linux compatibility and Wazuh detection coverage.
+#
+# Fields:
+#   technique       - MITRE ATT&CK technique ID (e.g. T1059.004)
+#   atom_index      - 0-based index into the technique's atomic_tests list
+#   name            - Human-readable name for logging and coverage matrix
+#   platform        - linux | windows | macos (only linux supported in v1)
+#   expected_rule_ids - Wazuh rule IDs expected to fire (empty = any alert from host counts)
+#   detection_window_seconds - How long to wait for detection after execution (default 300)
+#   cleanup         - Whether to run the atom's cleanup_command (default true)
+#   enabled         - Set false to skip without removing the entry
+
+atoms:
+  # T1059.004 — Command and Scripting Interpreter: Unix Shell
+  # Expected: Wazuh syscheck / audit rules fire on new shell execution
+  - technique: T1059.004
+    atom_index: 0
+    name: "Create and Execute Bash Shell Script"
+    platform: linux
+    expected_rule_ids: []          # Any alert from atomic-target in window counts
+    detection_window_seconds: 300
+    cleanup: true
+    enabled: true
+
+  # T1053.003 — Scheduled Task/Job: Cron
+  # Expected: Wazuh FIM or auditd detects crontab modification (rules 2830/2831)
+  - technique: T1053.003
+    atom_index: 0
+    name: "Cron - Replace crontab with new job"
+    platform: linux
+    expected_rule_ids: [2830, 2831, 550, 554]
+    detection_window_seconds: 300
+    cleanup: true
+    enabled: true
+
+  # T1105 — Ingress Tool Transfer
+  # Expected: Wazuh network/audit alert on suspicious download to /tmp
+  - technique: T1105
+    atom_index: 0
+    name: "rsync remote file copy (Linux)"
+    platform: linux
+    expected_rule_ids: []
+    detection_window_seconds: 300
+    cleanup: true
+    enabled: true
+
+  # T1070.004 — Indicator Removal: File Deletion
+  # Expected: Wazuh FIM delete alert on monitored path modification
+  - technique: T1070.004
+    atom_index: 0
+    name: "Delete a single file"
+    platform: linux
+    expected_rule_ids: [550, 553, 554]
+    detection_window_seconds: 300
+    cleanup: false               # Cleanup is the attack itself — nothing to undo
+    enabled: true
+
+  # T1136.001 — Create Account: Local Account
+  # Expected: Wazuh rule 5902 (new user added) or audit rule fires
+  - technique: T1136.001
+    atom_index: 0
+    name: "Create a user account on a Linux system"
+    platform: linux
+    expected_rule_ids: [5902, 5903, 5904]
+    detection_window_seconds: 300
+    cleanup: true
+    enabled: true
+
+# Runner behaviour settings
+runner:
+  # Maximum number of atoms to execute per weekly run (random selection if more atoms configured)
+  atoms_per_run: 5
+
+  # Atomic Red Team repo: cloned/updated on runner host before execution
+  art_repo_url: "https://github.com/redcanaryco/atomic-red-team.git"
+  art_repo_path: "/tmp/atomic-red-team"
+
+  # Detection-check: Wazuh OpenSearch index pattern
+  wazuh_index: "wazuh-alerts-4.x-*"
+
+  # Agent name registered in Wazuh for the atomic-target VM
+  wazuh_agent_name: "atomic-target"
+
+  # Plane project for gap issue filing
+  plane_workspace: "haists-it-consulting"
+  plane_project_id: "223c0b66-4255-406e-932f-3b50c0e93543"
+
+  # Gap issue labels (Plane label UUIDs)
+  gap_issue_labels:
+    - "ea9e03b1-c284-44fd-97a8-22ea977f2168"   # cat-security
+    - "118b04b4-6404-4991-aed8-706752b9c91b"   # origin-agent
+
+  # Gap issue state: Todo
+  gap_issue_state: "b7d7cdca-d840-4821-a27d-63ab85049ee3"
+
+  # Coverage matrix output path (relative to repo root, written by runner)
+  coverage_matrix_path: "compliance-vault/atomic-red-team-coverage.md"

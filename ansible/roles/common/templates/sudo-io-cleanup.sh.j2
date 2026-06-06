@@ -1,0 +1,30 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# OPS-995: Prune sudo-io session logs older than {{ log_retention_days }} days.
+#
+# Context: /etc/sudoers.d/99-sentinel-logging enables Defaults log_input and
+# Defaults log_output, which causes sudo to record full terminal I/O for every
+# sudo session. Recordings land in /var/log/sudo-io/ in a hierarchical directory
+# structure keyed by base-36 session counter:
+#   /var/log/sudo-io/<hi>/<mid>/<lo>/   (depth-3 leaf = one session)
+#     log         — plaintext metadata (user, cwd, command, timestamp)
+#     log.json    — JSON metadata
+#     ttyin       — stdin recording
+#     ttyout      — stdout/stderr recording
+#
+# Without rotation, sessions accumulate indefinitely. On forgejo-server this
+# reached 35,937 files / 1.2G before OPS-995. This script deletes session
+# directories older than the retention threshold. The outer skeleton directories
+# (depth 1 and depth 2) are left in place since they form a sparse b-tree;
+# auditd/sudo rebuilds them as needed.
+#
+# Run daily via cron. Uses find -exec rm -rf to handle the leaf dir + contents
+# in one pass. 2>/dev/null suppresses noise when /var/log/sudo-io is empty.
+
+find /var/log/sudo-io \
+  -mindepth 3 \
+  -maxdepth 3 \
+  -type d \
+  -mtime +{{ log_retention_days }} \
+  -exec rm -rf {} + \
+  2>/dev/null || true

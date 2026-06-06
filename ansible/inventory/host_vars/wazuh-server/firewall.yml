@@ -1,0 +1,29 @@
+---
+# OPS-167: Codify manual UFW rules for wazuh-server
+# Live state verified 2026-04-09 via: ssh koiakoia@192.168.12.100 sudo ufw status numbered
+
+firewall_extra_rules:
+  - port: "9200"
+    proto: tcp
+    from_ip: "192.168.12.168"
+    comment: "Pangolin Traefik to OpenSearch indexer"
+
+  - port: "9200"
+    proto: tcp
+    from_ip: "192.168.12.210"
+    comment: "sentinel-agent on iac-control to OpenSearch indexer (OPS-226)"
+
+  - port: "9101"
+    proto: tcp
+    from_ip: "192.168.12.210"
+    comment: "Prometheus scrape wazuh-vuln-exporter"
+
+  - port: "9101"
+    proto: tcp
+    from_ip: "192.168.12.0/24"
+    comment: "Prometheus scrape wazuh-vuln-exporter (subnet)"
+
+  - port: "514"
+    proto: udp
+    from_ip: "192.168.12.1"
+    comment: "OPS-401: UCG-Fiber syslog (UniFi IPS events)"

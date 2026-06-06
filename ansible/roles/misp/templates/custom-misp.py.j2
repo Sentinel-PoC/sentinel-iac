@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+# /var/ossec/integrations/custom-misp
+# Wazuh MISP IoC enrichment integration — OPS-571
+# Managed by Ansible (sentinel-iac roles/misp/templates/custom-misp.py.j2)
+# Do not edit directly — changes will be overwritten.
+#
+# Upstream reference:
+#   https://documentation.wazuh.com/current/user-manual/capabilities/
+#   threat-intelligence/enrichment-using-threat-intelligence-apis.html
+#
+# Wazuh integration calling convention:
+#   custom-misp <alert_json_file> <api_key> <hook_url>
+#
+# ossec.conf (injected by misp Ansible role via blockinfile):
+#   <integration>
+#     <name>custom-misp</name>
+#     <hook_url>{{ misp_base_url }}</hook_url>
+#     <api_key>MISP_ADMIN_KEY</api_key>
+#     <level>{{ misp_wazuh_alert_level }}</level>
+#     <alert_format>json</alert_format>
+#   </integration>
+
+import json
+import os
+import sys
+import logging
+import ipaddress
+
+try:
+    import requests
+    from requests.exceptions import RequestException, Timeout
+except ImportError:
+    # requests not installed — log and exit cleanly (don't crash Wazuh)
+    with open('/var/ossec/logs/integrations.log', 'a') as f:
+        f.write('custom-misp ERROR: python3-requests not installed\n')
+    sys.exit(0)
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    filename='/var/ossec/logs/integrations.log',
+    level=logging.INFO,
+    format='%(asctime)s %(name)s %(levelname)s %(message)s'
+)
+logger = logging.getLogger('custom-misp')
+
+# ── Argument parsing ─────────────────────────────────────────────────────────
+if len(sys.argv) < 4:
+    logger.error("Usage: custom-misp <alert_file> <api_key> <hook_url>")
+    sys.exit(0)
+
+alert_file_path = sys.argv[1]
+misp_api_key = sys.argv[2]
+misp_url = sys.argv[3].rstrip('/')
+
+# ── Read alert ───────────────────────────────────────────────────────────────
+try:
+    with open(alert_file_path) as fh:
+        alert = json.load(fh)
+except (IOError, json.JSONDecodeError) as exc:
+    logger.error("Failed to read alert file %s: %s", alert_file_path, exc)
+    sys.exit(0)
+
+# ── IoC extraction ───────────────────────────────────────────────────────────
+# Extract candidate IoCs from common Wazuh alert fields.
+# Skips RFC1918, loopback, and link-local addresses (not useful for MISP lookup).
+
+PRIVATE_NETS = [
+    ipaddress.ip_network('10.0.0.0/8'),
+    ipaddress.ip_network('172.16.0.0/12'),
+    ipaddress.ip_network('192.168.0.0/16'),
+    ipaddress.ip_network('127.0.0.0/8'),
+    ipaddress.ip_network('169.254.0.0/16'),
+    ipaddress.ip_network('::1/128'),
+    ipaddress.ip_network('fc00::/7'),
+]
+
+
+def is_public_ip(addr_str):
+    """Return True if addr_str is a routable public IP (not RFC1918/loopback)."""
+    try:
+        addr = ipaddress.ip_address(addr_str)
+        return not any(addr in net for net in PRIVATE_NETS)
+    except ValueError:
+        return False
+
+
+def extract_iocs(alert_json):
+    """
+    Walk common alert fields and return a list of (ioc_type, ioc_value) tuples.
+    Returns empty list if no usable IoCs found.
+    """
+    iocs = []
+    data = alert_json.get('data', {})
+
+    # IP address candidates
+    for field in ['srcip', 'dstip', 'src_ip', 'dst_ip',
+                  'id.orig_h', 'id.resp_h',
+                  'netinfo.srcip', 'netinfo.dstip']:
+        # Support nested dot-notation fields
+        parts = field.split('.')
+        val = data
+        try:
+            for part in parts:
+                val = val[part]
+        except (KeyError, TypeError):
+            continue
+        if isinstance(val, str) and val and is_public_ip(val):
+            iocs.append(('ip-dst', val))
+
+    # Hash candidates (file integrity or process events)
+    for field in ['md5', 'sha1', 'sha256', 'sha_256',
+                  'syscheck.md5_after', 'syscheck.sha256_after']:
+        parts = field.split('.')
+        val = data
+        try:
+            for part in parts:
+                val = val[part]
+        except (KeyError, TypeError):
+            continue
+        if isinstance(val, str) and len(val) in (32, 40, 64):
+            ioc_type = 'md5' if len(val) == 32 else ('sha1' if len(val) == 40 else 'sha-256')
+            iocs.append((ioc_type, val.lower()))
+
+    # Domain candidates
+    for field in ['dns.query.name', 'domain', 'hostname']:
+        val = data.get(field, '')
+        if isinstance(val, str) and val and '.' in val:
+            iocs.append(('domain', val.lower()))
+
+    return iocs
+
+
+iocs = extract_iocs(alert)
+if not iocs:
+    logger.debug("No public IoCs found in alert rule_id=%s",
+                 alert.get('rule', {}).get('id', 'unknown'))
+    sys.exit(0)
+
+# ── MISP lookup ──────────────────────────────────────────────────────────────
+
+MISP_SEARCH_URL = f"{misp_url}/attributes/restSearch"
+HEADERS = {
+    'Authorization': misp_api_key,
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+}
+VERIFY_SSL = {{ not misp_wazuh_verify_ssl | bool | lower }}
+
+
+def search_misp(ioc_type, ioc_value):
+    """
+    Query MISP /attributes/restSearch for a single IoC.
+    Returns list of matching attribute dicts, or [] on error/miss.
+    """
+    payload = {
+        'returnFormat': 'json',
+        'type': ioc_type,
+        'value': ioc_value,
+        'enforceWarninglist': True,
+        'limit': 5,
+        'page': 1,
+    }
+    try:
+        resp = requests.post(
+            MISP_SEARCH_URL,
+            headers=HEADERS,
+            json=payload,
+            verify=VERIFY_SSL,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get('response', {}).get('Attribute', [])
+    except Timeout:
+        logger.warning("MISP query timeout for %s=%s", ioc_type, ioc_value)
+    except RequestException as exc:
+        logger.error("MISP query error for %s=%s: %s", ioc_type, ioc_value, exc)
+    return []
+
+
+# ── Alert enrichment ─────────────────────────────────────────────────────────
+
+hits = []
+for ioc_type, ioc_value in iocs:
+    matches = search_misp(ioc_type, ioc_value)
+    for match in matches:
+        hits.append({
+            'type': ioc_type,
+            'value': ioc_value,
+            'misp_event_id': match.get('event_id', ''),
+            'misp_event_uuid': match.get('Event', {}).get('uuid', ''),
+            'misp_category': match.get('category', ''),
+            'misp_threat_level': match.get('Event', {}).get('threat_level_id', ''),
+            'misp_comment': match.get('comment', ''),
+        })
+
+if not hits:
+    logger.debug("No MISP hits for alert rule_id=%s IoCs=%s",
+                 alert.get('rule', {}).get('id', 'unknown'), iocs)
+    sys.exit(0)
+
+# ── Write enriched alert output ──────────────────────────────────────────────
+# Wazuh reads enrichment output from the same alert file path (overwrites).
+# Enrich the alert with the first hit's data; log all hits.
+
+best_hit = hits[0]
+alert.setdefault('data', {})
+alert['data']['misp'] = {
+    'ioc_type': best_hit['type'],
+    'ioc_value': best_hit['value'],
+    'event_id': best_hit['misp_event_id'],
+    'event_uuid': best_hit['misp_event_uuid'],
+    'category': best_hit['misp_category'],
+    'threat_level': best_hit['misp_threat_level'],
+    'total_matches': len(hits),
+}
+# Tag the alert for downstream routing
+alert.setdefault('labels', [])
+if 'misp-hit' not in alert['labels']:
+    alert['labels'].append('misp-hit')
+
+logger.info(
+    "MISP HIT rule_id=%s ioc=%s/%s event_id=%s matches=%d",
+    alert.get('rule', {}).get('id', 'unknown'),
+    best_hit['type'],
+    best_hit['value'],
+    best_hit['misp_event_id'],
+    len(hits),
+)
+
+# Write enriched alert back (Wazuh reads from alert_file_path)
+try:
+    with open(alert_file_path, 'w') as fh:
+        json.dump(alert, fh)
+except IOError as exc:
+    logger.error("Failed to write enriched alert: %s", exc)
+    sys.exit(1)

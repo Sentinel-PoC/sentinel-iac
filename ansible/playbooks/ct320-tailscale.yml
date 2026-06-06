@@ -1,0 +1,51 @@
+---
+# ct320-tailscale.yml — Tailscale configuration for CT320 (ts-personal-50)
+# OPS-504: Persist accept-routes=false in IaC (asymmetric-routing fix from OPS-499)
+#
+# CT320: LXC 320 on 208-pve2 (192.168.12.56), Personal VLAN IP 192.168.50.130.
+# Tailscale node: ts-personal-50 advertising 192.168.12.0/24 into the tailnet.
+# Also hosts derper.service (self-hosted DERP region 900, haist-home).
+#
+# Connectivity note:
+#   Personal VLAN (192.168.50.x) is blocked inbound from Homelab VLAN
+#   (192.168.12.x) by UCG ZBF. SSH reaches CT320 via ProxyJump through
+#   208-pve2 (root@192.168.12.56). If pve2 SSH is unavailable (OPS-593
+#   key-drift issue), apply the critical setting manually:
+#     ssh root@192.168.12.56 pct exec 320 -- \
+#       tailscale up --accept-routes=false \
+#         --advertise-routes=192.168.12.0/24 \
+#         --accept-dns=false \
+#         --hostname=ts-personal-50
+#
+# Apply:
+#   VAULT_TOKEN=<token> ansible-playbook \
+#     -i ansible/inventory/hosts.ini \
+#     ansible/playbooks/ct320-tailscale.yml
+#
+# Dry-run:
+#   VAULT_TOKEN=<token> ansible-playbook --check --diff \
+#     -i ansible/inventory/hosts.ini \
+#     ansible/playbooks/ct320-tailscale.yml
+
+- name: Configure Tailscale on CT320 (ts-personal-50) — OPS-504
+  hosts: ts-personal-50
+  # ansible_user=root (Debian LXC, no sudo layer needed)
+  become: false
+  gather_facts: false
+
+  pre_tasks:
+    - name: Display CT320 tailscale configuration target
+      ansible.builtin.debug:
+        msg: >-
+          Configuring Tailscale on {{ inventory_hostname }}
+          ({{ ansible_host }}).
+          Advertising: {{ tailscale_advertise_routes | default('192.168.12.0/24') }}.
+          accept-routes: {{ tailscale_accept_routes | default('null (omitted)') }}.
+          OPS-504 — persists the accept-routes=false fix from OPS-499.
+      tags:
+        - always
+
+  roles:
+    - role: tailscale-subnet-router
+      tags:
+        - tailscale

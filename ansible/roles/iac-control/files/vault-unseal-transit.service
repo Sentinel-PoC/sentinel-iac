@@ -1,0 +1,12 @@
+[Unit]
+Description=Auto-unseal Transit Vault
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vault-unseal-transit.sh
+# Must run as root to read the 0400 root:root unseal key file at
+# /etc/vault-unseal/transit.key (see OPS-224). Previously User=ubuntu
+# with an embedded key in the script — that key was world-readable.
+User=root

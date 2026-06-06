@@ -1,0 +1,34 @@
+<!-- Vault decoders for operational log parsing (SEC-39) -->
+<!-- Source: https://wazuh.com/blog/monitoring-hashicorp-vault-activities-with-wazuh/ -->
+<!-- Adapted for Project Sentinel -->
+
+<!-- SEC-54 CORRECTION notes:
+     The original decoder XML from branch SEC-39-vault-wazuh-integration (16b9cda6) had
+     THREE issues identified during operational verification on 2026-05-09:
+
+     1. vault-audit decoder (REMOVED): <prematch>^\[vault audit\]</prematch> was OSSEC-syntax
+        invalid — \[ not supported; requires type="pcre2". Additionally, Vault file-sink
+        audit logs at /opt/vault/logs/audit.log are pure JSON (no [vault audit] prefix).
+        SEC-39 rules (100010-100021) use <decoded_as>json</decoded_as> + label source=vault-audit,
+        NOT <decoded_as>vault-audit</decoded_as>. Decoder not needed for current rules.
+        Per https://developer.hashicorp.com/vault/docs/audit the file-type sink emits
+        newline-delimited JSON without a syslog program-name prefix.
+        Judge: decide whether to add Vault syslog audit sink or re-write for file-based JSON.
+
+     2. vault-fields (no-regex variant, REMOVED): <order> without <regex> is invalid in
+        Wazuh analysisd — causes Decoder configuration error on startup. Removed.
+
+     3. vault-fields (pcre2 variant, RETAINED): syntactically valid; retained as foundation
+        for future operational-log rules. -->
+
+<!-- Vault operational log decoder — matches vault process in syslog -->
+<decoder name="vault">
+  <program_name>^vault$</program_name>
+</decoder>
+
+<!-- Extract source IP and port from vault operational log lines containing "from IP:port" -->
+<decoder name="vault-fields">
+  <parent>vault</parent>
+  <regex type="pcre2">from ([\d\.]+):(\d+)</regex>
+  <order>srcip, srcport</order>
+</decoder>

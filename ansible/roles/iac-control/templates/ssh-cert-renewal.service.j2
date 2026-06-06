@@ -1,0 +1,13 @@
+[Unit]
+Description=Renew Vault SSH certificates for sentinel and wazuh keys
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/etc/sentinel/compliance.env
+ExecStart=/home/ubuntu/sentinel-repo/scripts/ssh-cert-renew.sh
+
+[Install]
+WantedBy=multi-user.target

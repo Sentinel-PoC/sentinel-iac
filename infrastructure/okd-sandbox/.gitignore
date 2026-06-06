@@ -1,0 +1,14 @@
+# Render and install artefacts (every file here is reproducible from Vault + templates).
+_work/
+*.iso
+kubeconfig
+kubeadmin-password
+ssh_key
+ssh_key.pub
+rendered/
+
+# Terraform local state (real state is in MinIO; these are caches).
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate*
+terraform/.openshift_install*

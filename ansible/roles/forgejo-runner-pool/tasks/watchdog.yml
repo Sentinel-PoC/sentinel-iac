@@ -1,0 +1,151 @@
+---
+# watchdog.yml — OPS-775: forgejo-runner wedge auto-recovery watchdog
+#
+# Deploys forgejo-runner-watchdog.sh + systemd service+timer into each runner LXC.
+# The watchdog runs every 5 min, scans the forgejo-runner journal for the
+# RESULT_CANCELLED/RESULT_UNSPECIFIED desync signature, and restarts the runner
+# if detected. Idle-but-healthy runners produce no such log line → no restart.
+#
+# Deployment pattern: pct push (script+service+timer) + pct exec (enable timer).
+# This mirrors runner_install.yml which uses the same pct-based pattern.
+#
+# OPS-782 fix: role_path resolves on the Ansible controller, not on the
+# pve4-alienware target where pct runs. pct push exits rc=0 even when the
+# source file is missing — Ansible sees "ok" but the file is never pushed.
+# Fix: stage files on pve4 first via ansible.builtin.copy (Ansible resolves
+# role-relative src paths from the controller's files/ dir and copies to the
+# remote), then pct push from the on-host staged path.
+#
+# Files deployed:
+#   /usr/local/bin/forgejo-runner-watchdog.sh     (0755 root:root)
+#   /etc/systemd/system/forgejo-runner-watchdog.service
+#   /etc/systemd/system/forgejo-runner-watchdog.timer
+
+# ── Stage watchdog files onto pve4 ───────────────────────────────────────────
+
+- name: Ensure watchdog staging directory exists on pve4 (OPS-782)
+  ansible.builtin.file:
+    path: /tmp/forgejo-runner-watchdog
+    state: directory
+    mode: "0755"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+- name: Stage forgejo-runner-watchdog.sh onto pve4 (OPS-782)
+  ansible.builtin.copy:
+    src: forgejo-runner-watchdog.sh
+    dest: /tmp/forgejo-runner-watchdog/forgejo-runner-watchdog.sh
+    mode: "0755"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+- name: Stage forgejo-runner-watchdog.service onto pve4 (OPS-782)
+  ansible.builtin.copy:
+    src: forgejo-runner-watchdog.service
+    dest: /tmp/forgejo-runner-watchdog/forgejo-runner-watchdog.service
+    mode: "0644"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+- name: Stage forgejo-runner-watchdog.timer onto pve4 (OPS-782)
+  ansible.builtin.copy:
+    src: forgejo-runner-watchdog.timer
+    dest: /tmp/forgejo-runner-watchdog/forgejo-runner-watchdog.timer
+    mode: "0644"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+# ── Push watchdog script ──────────────────────────────────────────────────────
+
+- name: Push forgejo-runner-watchdog.sh into LXC (OPS-775)
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/forgejo-runner-watchdog/forgejo-runner-watchdog.sh
+      /usr/local/bin/forgejo-runner-watchdog.sh
+      --perms 0755
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+# ── Push systemd service unit ─────────────────────────────────────────────────
+
+- name: Push forgejo-runner-watchdog.service into LXC (OPS-775)
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/forgejo-runner-watchdog/forgejo-runner-watchdog.service
+      /etc/systemd/system/forgejo-runner-watchdog.service
+      --perms 0644
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+# ── Push systemd timer unit ───────────────────────────────────────────────────
+
+- name: Push forgejo-runner-watchdog.timer into LXC (OPS-775)
+  ansible.builtin.command:
+    cmd: >
+      pct push {{ item.vmid }}
+      /tmp/forgejo-runner-watchdog/forgejo-runner-watchdog.timer
+      /etc/systemd/system/forgejo-runner-watchdog.timer
+      --perms 0644
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+# ── Enable and start watchdog timer inside each LXC ──────────────────────────
+
+- name: Enable and start forgejo-runner-watchdog.timer inside LXC (OPS-775)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ item.vmid }} -- bash -c
+      "systemctl daemon-reload && systemctl enable --now forgejo-runner-watchdog.timer"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+# ── Verify timer is active ────────────────────────────────────────────────────
+
+- name: Verify forgejo-runner-watchdog.timer is active inside LXC (OPS-775)
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- systemctl is-active forgejo-runner-watchdog.timer"
+  register: watchdog_timer_status
+  changed_when: false
+  failed_when: watchdog_timer_status.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - watchdog
+
+- name: Show watchdog timer status in LXCs (OPS-775)
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }}: forgejo-runner-watchdog.timer → {{ item.stdout }}"
+  loop: "{{ watchdog_timer_status.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags:
+    - forgejo-runner-pool
+    - watchdog

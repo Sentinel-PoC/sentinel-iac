@@ -1,0 +1,67 @@
+---
+# zeek-nids/tasks/configure.yml — zeek configuration (JSON output, node.cfg, zeekctl.cfg)
+# OPS-568 — idempotent: all tasks use templates (notifying handlers on change)
+
+- name: Deploy zeekctl.cfg
+  ansible.builtin.template:
+    src: zeekctl.cfg.j2
+    dest: "{{ zeek_config_dir }}/zeekctl.cfg"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Deploy zeek
+
+- name: Deploy node.cfg
+  ansible.builtin.template:
+    src: node.cfg.j2
+    dest: "{{ zeek_config_dir }}/node.cfg"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Deploy zeek
+
+- name: Deploy local.zeek site policy
+  ansible.builtin.template:
+    src: local.zeek.j2
+    dest: "{{ zeek_site_dir }}/local.zeek"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Deploy zeek
+
+- name: Ensure Zeek log and spool directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ zeek_log_dir }}"
+    - "{{ zeek_spool_dir }}"
+
+- name: Initialize zeekctl (install base scripts)
+  ansible.builtin.command:
+    cmd: "{{ zeek_install_prefix }}/bin/zeekctl install"
+  args:
+    creates: "{{ zeek_spool_dir }}/zeekctl.lock"
+  register: zeekctl_install_result
+  changed_when: zeekctl_install_result.rc == 0
+
+- name: Ensure Zeek is started
+  ansible.builtin.command:
+    cmd: "{{ zeek_install_prefix }}/bin/zeekctl start"
+  register: zeekctl_start_result
+  changed_when: "'starting zeek' in zeekctl_start_result.stdout | lower"
+  failed_when:
+    - zeekctl_start_result.rc != 0
+    - "'already running' not in zeekctl_start_result.stdout | lower"
+    - "'already running' not in zeekctl_start_result.stderr | lower"
+
+- name: Ensure zeekctl cron job is present for log rotation
+  ansible.builtin.cron:
+    name: "zeekctl cron"
+    minute: "*/5"
+    job: "{{ zeek_install_prefix }}/bin/zeekctl cron"
+    user: root
+    state: present

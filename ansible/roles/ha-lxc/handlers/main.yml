@@ -1,0 +1,23 @@
+---
+# handlers/main.yml — ha-lxc role
+# OPS-590: added Restart home-assistant container handler for ha_config.yml
+# OPS-934: added Restart journald in HA LXC handler for ha_journald.yml
+
+# Restarting via systemctl inside the LXC ensures Docker Compose + the
+# HA container are stopped and started cleanly. Required for trusted_proxies
+# changes — HA reads configuration.yaml only at process start, not on reload.
+- name: Restart home-assistant container
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- systemctl restart home-assistant"
+  changed_when: true
+
+# Restart systemd-journald inside the LXC to apply the new size cap from
+# /etc/systemd/journald.conf.d/10-maxuse.conf (OPS-934).
+# journald re-reads conf on restart and applies vacuum immediately.
+- name: Restart journald in HA LXC
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ ha_lxc_id }} --
+      bash -c "systemctl restart systemd-journald &&
+               journalctl --rotate --vacuum-size={{ ha_journald_system_max_use }}"
+  changed_when: true

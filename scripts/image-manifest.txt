@@ -1,0 +1,100 @@
+# Harbor Image Mirror Manifest
+# Format: SOURCE_IMAGE HARBOR_TARGET
+# Lines starting with # are comments
+#
+# Used by harbor-mirror-images.sh to mirror public images to Harbor
+# Harbor registry: harbor.208.haist.farm/sentinel/
+
+# PostgreSQL (used by backstage, harbor, keycloak, netbox)
+docker.io/library/postgres:16 sentinel/postgres:16
+
+# Keycloak
+# OPS-865: bumped 26.0 -> 26.6.2 (EOL 26.0: session-fixation ATO, CVE-2026-33870 req-smuggling, HTTP/2 CONTINUATION-flood DoS, stored XSS; cosign verify exit 0 sha256:40007b80367d48a3268ae4c9b5ec9c9aa530bc801e9f6ae27f2b6727dec7bf94)
+quay.io/keycloak/keycloak:26.6.2 sentinel/keycloak:26.6.2
+
+# Homepage
+ghcr.io/gethomepage/homepage:latest sentinel/homepage:latest
+
+# BusyBox (homepage init container)
+# OPS-865: bumped 1.36 -> 1.37.0 (UAF CVEs + tar/wget injection; cosign verify exit 0 sha256:91c66c844e6bba57e92e10e755e73a816d0b99edd17eb5297d9ac519ab3a8c81)
+docker.io/library/busybox:1.37.0 sentinel/busybox:1.37.0
+
+# Hello OpenShift (demo app)
+docker.io/openshift/hello-openshift:latest sentinel/hello-openshift:latest
+
+# Newt tunnel
+# OPS-489: bumped 1.10.2 → 1.12.5 (released 2026-05-08; fixes CVE-2026-31789 OpenSSL Alpine)
+docker.io/fosrl/newt:1.12.5 sentinel/newt:1.12.5
+
+# Jellyfin
+docker.io/jellyfin/jellyfin:latest sentinel/jellyfin:latest
+
+# Kiali (service mesh observability)
+# OPS-1045: bumped to v2.26.1 (released 2026-05-27; fixes CVE-2026-33186 grpc v1.79.3, CVE-2025-68121 go1.25.9)
+# No upstream cosign sig; platform re-sign via mirror-upstream-image.sh (exception: kiali in trust-policy.yaml).
+# Helm chart kiali-server 2.26.0 (latest) overrides image to harbor.208.haist.farm/sentinel/kiali:v2.26.1 at deploy.
+quay.io/kiali/kiali:v2.26.1 sentinel/kiali:v2.26.1
+
+# Jaeger
+# OPS-1041 Phase 1: bumped 1.62.0 → 1.76.0 (released 2025-12-03; closes ~5 Critical CVEs: Alpine OpenSSL x2, Go binary grpc/stdlib/x/crypto)
+docker.io/jaegertracing/all-in-one:1.76.0 sentinel/jaeger-all-in-one:1.76.0
+
+# Grafana (Helm chart image)
+# OPS-1044: bumped 12.4.3 → 12.4.3-security-02 (released 2026-05-12; fixes CVE-2026-33186 grpc, CVE-2025-68121 stdlib, CVE-2026-31789 OpenSSL via Alpine patch)
+# Note: 2 pgx CVE-2026-33816 findings remain after this bump (pgx v5.9.0 not yet incorporated upstream — tracked in OPS-1044)
+docker.io/grafana/grafana:12.4.3-security-02 sentinel/grafana:12.4.3-security-02
+
+# Grafana sidecar (dashboard watcher)
+# OPS-1043: sync manifest 1.28.0 → 2.7.3 (deployed was 2.6.0; released 2026-05-12; fixes CVE-2026-31789 OpenSSL via Python 3.15 beta base)
+quay.io/kiwigrid/k8s-sidecar:2.7.3 sentinel/k8s-sidecar:2.7.3
+
+# NetBox (Helm chart image)
+# OPS-865: bumped v4.5.2 -> v4.6.1 (CVE-2026-29514 ExportTemplate RCE; fixed in 4.6.x; no patched 4.5.x)
+ghcr.io/netbox-community/netbox:v4.6.1 sentinel/netbox:v4.6.1
+
+# Valkey (NetBox Redis subchart)
+# OPS-865: bumped 9.0.2 -> 9.1.0 (netbox Redis subchart; cosign verify exit 0 sha256:fcc1d5b8ca40ec960169d758547b6278b6691257629aaf7c5058acb60202bdf6)
+# NOTE: Bitnami doesn't publish bare version tags. Pull :latest (which is 9.1.0 as of 2026-06-01)
+# and push as sentinel/valkey:9.1.0. The script handles this via manual tag+push.
+docker.io/bitnami/valkey:latest sentinel/valkey:9.1.0
+
+# Matrix (Synapse + Element Web)
+# OPS-489: bumped v1.139.2 → v1.153.0 (released 2026-05-19; fixes CVE-2026-31789/33845/42010)
+docker.io/matrixdotorg/synapse:v1.153.0 sentinel/synapse:v1.153.0
+# OPS-489: bumped v1.12.11 → v1.12.20 (released 2026-05-27; fixes CVE-2026-31789 OpenSSL Alpine 3.22)
+docker.io/vectorim/element-web:v1.12.20 sentinel/element-web:v1.12.20
+
+# ntfy (push notifications)
+# OPS-489: bumped v2.18.0 → v2.23.0 (released 2026-05-18; fixes CVE-2026-31789 OpenSSL Alpine)
+docker.io/binwiederhier/ntfy:v2.23.0 sentinel/ntfy:v2.23.0
+
+# DefectDojo (OPS-1016: added to automated pipeline; 2.58.4 clears 42 Critical CVE findings)
+# No upstream cosign signatures; see exceptions.defectdojo-django/nginx in trust-policy.yaml.
+# After mirror: trigger sign-harbor-image.yml to re-sign with platform cosign key (Kyverno enforce).
+docker.io/defectdojo/defectdojo-django:2.58.4 sentinel/defectdojo-django:2.58.4
+docker.io/defectdojo/defectdojo-nginx:2.58.4 sentinel/defectdojo-nginx:2.58.4
+
+# PostgreSQL alpine (DefectDojo raw manifest — pinned alpine variant for OPS-1016)
+# Falls under the existing postgres Docker Official Library exception in trust-policy.yaml.
+docker.io/library/postgres:16.14-alpine3.23 sentinel/postgres:16.14-alpine3.23
+
+# Plane CE (OPS-1017: v0.24.0 → v1.3.1; clears 25 Critical CVE findings)
+# CVEs: CVE-2026-31789 (OpenSSL all 5 components), CVE-2024-56171 (libxml2 backend), CVE-2025-6965 (sqlite backend)
+# No upstream cosign signatures; see exceptions.plane-* in trust-policy.yaml.
+# After mirror: trigger sign-harbor-image.yml for each image (Kyverno enforce).
+# Upgrade also retires SEC-59 plane-live-custom workaround: v1.3.1 ships axios 1.15.0 natively.
+docker.io/makeplane/plane-frontend:v1.3.1 sentinel/plane-frontend:v1.3.1
+docker.io/makeplane/plane-backend:v1.3.1 sentinel/plane-backend:v1.3.1
+docker.io/makeplane/plane-admin:v1.3.1 sentinel/plane-admin:v1.3.1
+docker.io/makeplane/plane-space:v1.3.1 sentinel/plane-space:v1.3.1
+docker.io/makeplane/plane-live:v1.3.1 sentinel/plane-live:v1.3.1
+
+# RabbitMQ (OPS-1038: bumped 3.13.6 → 3.13.7-management-alpine; closes 5 Critical CVEs: CVE-2026-31789 OpenSSL x2, CVE-2024-45491/45492 expat, CVE-2025-6965 sqlite)
+# Source: official Docker Library (docker.io/library/rabbitmq). No upstream cosign signatures (Docker Official Images exception);
+# see exceptions.rabbitmq in trust-policy.yaml. Re-signed with platform cosign key on 2026-05-30.
+docker.io/library/rabbitmq:3.13.7-management-alpine sentinel/rabbitmq:3.13.7-management-alpine
+
+# Grafana Tempo (OPS-1106: add to supply-chain pipeline; crane-mirrored 2.7.2 was unsigned — SEC-87 violation)
+# No upstream cosign signatures; see exceptions.tempo in trust-policy.yaml (same exception class as grafana/grafana).
+# Platform re-sign required via mirror-upstream-image.sh (Kyverno enforce).
+docker.io/grafana/tempo:2.7.2 sentinel/tempo:2.7.2

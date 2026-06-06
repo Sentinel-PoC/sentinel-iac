@@ -1,0 +1,26 @@
+---
+# LocalVolume — registers /dev/sdb on each master as a filesystem PV.
+# Each master in this sandbox has a 50 GB blank disk on scsi1 (variables.tf
+# var.lso_disk_*); inside RHCOS / SCOS that disk shows up as /dev/sdb.
+#
+# The local-disk-provisioner DaemonSet (rolled out by the operator) watches
+# this CR and creates one PV per matching device per node.
+apiVersion: local.storage.openshift.io/v1
+kind: LocalVolume
+metadata:
+  name: okd-sandbox-local-disks
+  namespace: openshift-local-storage
+spec:
+  nodeSelector:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: node-role.kubernetes.io/master
+            operator: In
+            values:
+              - ""
+  storageClassDevices:
+    - storageClassName: local-storage
+      volumeMode: Filesystem
+      fsType: xfs
+      devicePaths:
+        - /dev/sdb

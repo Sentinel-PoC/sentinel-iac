@@ -1,0 +1,80 @@
+<!-- Wazuh rules for Canarytokens token-trip alerts -->
+<!-- Managed by Ansible — OPS-572 -->
+<!-- Rule IDs: 199700–199720 (local custom range) -->
+<group name="canarytokens,deception,">
+
+  <!-- Parent rule: any canarytokens trip -->
+  <rule id="199700" level="12">
+    <decoded_as>canarytokens_trip</decoded_as>
+    <field name="source">canarytokens</field>
+    <field name="event_type">token_trip</field>
+    <description>Canarytoken tripped: $(payload.token_type) token accessed</description>
+    <group>canarytokens,deception,high_severity,</group>
+    <options>no_full_log</options>
+  </rule>
+
+  <!-- AWS key canary — likely credential harvesting -->
+  <rule id="199701" level="14">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">aws_keys</field>
+    <description>DECEPTION: Fake AWS credentials accessed — possible credential harvesting or lateral movement</description>
+    <group>canarytokens,deception,aws,credential_access,</group>
+  </rule>
+
+  <!-- Azure key canary -->
+  <rule id="199702" level="14">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">azure_id</field>
+    <description>DECEPTION: Fake Azure credentials accessed — possible credential harvesting</description>
+    <group>canarytokens,deception,azure,credential_access,</group>
+  </rule>
+
+  <!-- MS Office document canary -->
+  <rule id="199703" level="12">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">ms_word|ms_excel</field>
+    <description>DECEPTION: Planted Office document opened — possible document exfil or insider threat</description>
+    <group>canarytokens,deception,document,collection,</group>
+  </rule>
+
+  <!-- SSH key canary -->
+  <rule id="199704" level="14">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">ssh_key</field>
+    <description>DECEPTION: Fake SSH key used — possible SSH credential theft</description>
+    <group>canarytokens,deception,ssh,credential_access,</group>
+  </rule>
+
+  <!-- Kubeconfig canary — high severity, implies k8s access attempt -->
+  <rule id="199705" level="15">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">kubeconfig</field>
+    <description>DECEPTION: Fake kubeconfig accessed — possible k8s cluster attack in progress</description>
+    <group>canarytokens,deception,kubernetes,credential_access,critical,</group>
+  </rule>
+
+  <!-- Slack token canary -->
+  <rule id="199706" level="13">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">slack_api</field>
+    <description>DECEPTION: Fake Slack API token used — possible credential harvesting</description>
+    <group>canarytokens,deception,slack,credential_access,</group>
+  </rule>
+
+  <!-- Cloned-site canary -->
+  <rule id="199707" level="11">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">cloned_site</field>
+    <description>DECEPTION: Cloned-site canary loaded — possible phishing site in operation</description>
+    <group>canarytokens,deception,phishing,</group>
+  </rule>
+
+  <!-- Stripe key canary -->
+  <rule id="199708" level="13">
+    <if_sid>199700</if_sid>
+    <field name="payload.token_type">stripe_apikey</field>
+    <description>DECEPTION: Fake Stripe API key accessed — possible financial credential theft</description>
+    <group>canarytokens,deception,financial,credential_access,</group>
+  </rule>
+
+</group>

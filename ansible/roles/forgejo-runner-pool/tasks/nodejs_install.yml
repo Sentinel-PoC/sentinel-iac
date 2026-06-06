@@ -1,0 +1,93 @@
+---
+# nodejs_install.yml — Phase 2b: Install Node.js 20 LTS inside each runner LXC
+# OPS-763
+#
+# actions/checkout@v4 requires node >=20; Ubuntu 24.04 apt nodejs is 18.19.1 — too old.
+# NodeSource repo provides node 20 LTS. Manual fix applied 2026-05-18T12:02Z (session-023);
+# this task codifies that fix so Phase 2 runners (OPS-762) don't ship the same defect.
+#
+# Pattern mirrors docker_install.yml: pct exec from PVE host, check-before-install.
+
+# ── Check node version inside each LXC ────────────────────────────────────────
+
+- name: Check node version inside runner LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- node --version"
+  register: nodejs_version_check
+  failed_when: false
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, nodejs]
+
+# ── Install NodeSource repo + node 20 LTS where needed ────────────────────────
+# Condition: node not present (rc != 0) OR version string does not begin with
+# v20, v21, etc. (i.e., Ubuntu 24.04 shipped v18 satisfies rc=0 but needs upgrade).
+
+- name: Ensure /etc/apt/keyrings exists inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item.vmid }} -- install -m 0755 -d /etc/apt/keyrings"
+  when: >
+    item.rc != 0 or
+    not (item.stdout is match('^v(2[0-9]|[3-9][0-9])'))
+  changed_when: false
+  loop: "{{ nodejs_version_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, nodejs]
+
+- name: Download NodeSource GPG key inside LXC
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.item.vmid }} -- bash -c
+      "curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+      -o /etc/apt/keyrings/nodesource.asc &&
+      chmod 0644 /etc/apt/keyrings/nodesource.asc"
+  when: >
+    item.rc != 0 or
+    not (item.stdout is match('^v(2[0-9]|[3-9][0-9])'))
+  changed_when: true
+  loop: "{{ nodejs_version_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, nodejs]
+
+- name: Add NodeSource APT repository inside LXC
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.item.vmid }} -- bash -c
+      "echo 'deb [signed-by=/etc/apt/keyrings/nodesource.asc]
+      https://deb.nodesource.com/node_20.x nodistro main'
+      > /etc/apt/sources.list.d/nodesource.list"
+  when: >
+    item.rc != 0 or
+    not (item.stdout is match('^v(2[0-9]|[3-9][0-9])'))
+  changed_when: true
+  loop: "{{ nodejs_version_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, nodejs]
+
+- name: Install nodejs 20 LTS inside LXC
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.item.vmid }} -- bash -c
+      "apt-get update -qq && apt-get install -y nodejs"
+  when: >
+    item.rc != 0 or
+    not (item.stdout is match('^v(2[0-9]|[3-9][0-9])'))
+  changed_when: true
+  loop: "{{ nodejs_version_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  notify: restart forgejo-runner
+  tags: [forgejo-runner-pool, nodejs]
+
+- name: Display node version after install
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} node: {{ item.stdout | default('not installed — newly installed above') }}"
+  loop: "{{ nodejs_version_check.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, nodejs]

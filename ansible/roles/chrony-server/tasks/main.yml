@@ -1,0 +1,48 @@
+---
+# chrony-server role tasks — OPS-288
+# Configures iac-control and vault-server as internal NTP servers
+# NIST: AU-8, AU-8(1), SC-45
+
+- name: Install chrony
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  tags:
+    - chrony-server
+    - ntp
+
+- name: Deploy chrony server configuration
+  ansible.builtin.template:
+    src: chrony-server.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart chronyd
+  tags:
+    - chrony-server
+    - ntp
+
+- name: Enable and start chronyd
+  ansible.builtin.service:
+    name: chrony
+    enabled: true
+    state: started
+  tags:
+    - chrony-server
+    - ntp
+
+- name: Allow inbound NTP (UDP/123) from LAN via UFW
+  community.general.ufw:
+    rule: allow
+    port: "123"
+    proto: udp
+    src: "{{ chrony_ufw_from }}"
+    comment: "OPS-288 — internal NTP server"
+  when: chrony_ufw_enabled | bool
+  tags:
+    - chrony-server
+    - ntp
+    - firewall

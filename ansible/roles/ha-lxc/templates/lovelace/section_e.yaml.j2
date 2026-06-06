@@ -1,0 +1,202 @@
+# Ansible managed — OPS-586 Section E ha-lxc role
+# Lovelace side-dashboard: Media & Comms
+#
+# Loaded as a YAML dashboard via configuration.yaml lovelace.dashboards.
+# Sidebar entry: "Media & Comms" (icon: mdi:television-play)
+# Ref: https://www.home-assistant.io/dashboards/dashboards/
+#
+# OPERATOR SETUP REQUIRED before entities populate:
+#
+# Jellyfin:      Settings → D&S → Add Integration → Jellyfin
+#                URL: http://{{ ha_jellyfin_url }}
+#                Ref: https://www.home-assistant.io/integrations/jellyfin/
+#                Post-setup: update entity below to match actual session name
+#
+# UniFi Network: Settings → D&S → Add Integration → UniFi Network
+#                Host: {{ ha_unifi_host }} (direct IP, not pangolin-routed)
+#                Local admin user required (NOT Ubiquiti SSO)
+#                Ref: https://www.home-assistant.io/integrations/unifi/
+#                Post-setup: add device_tracker.* entities to presence card
+#
+# Google Calendar: Settings → D&S → Add Integration → Google Calendar
+#                  OAuth redirect URI: https://my.home-assistant.io/redirect/oauth
+#                  Ref: https://www.home-assistant.io/integrations/google/
+#
+# NWS:           Settings → D&S → Add Integration → National Weather Service
+#                Latitude: {{ ha_nws_latitude }} Longitude: -{{ ha_nws_longitude }}
+#                Ref: https://www.home-assistant.io/integrations/nws/
+#                Post-setup: check entity ID in Developer Tools → States
+#
+# TrueNAS HACS:  Install HACS → then install tomaae/homeassistant-truenas
+#                Ref: https://github.com/tomaae/homeassistant-truenas
+#                NOTE: "ellis-rebernick/hass-truenas" does not exist (verified 2026-05-13)
+#                Post-setup: update sensor entity IDs in TrueNAS card
+
+title: Media & Comms
+
+views:
+  - title: Media & Comms
+    icon: mdi:television-play
+    path: media-comms
+    cards:
+
+      # ── Setup Status (operator checklist) ─────────────────────────────────
+      - type: markdown
+        title: Section E — Operator Setup Checklist
+        content: |
+          ### Media & Comms Setup Checklist (OPS-586 Section E)
+
+          **Jellyfin** (http://{{ ha_jellyfin_url }}):
+          - [ ] Settings → Devices & Services → Add Integration → Jellyfin
+          - [ ] After setup: update media_player entity in Jellyfin card below
+
+          **UniFi Network** ({{ ha_unifi_host }}):
+          - [ ] Settings → Devices & Services → Add Integration → UniFi Network
+          - [ ] Use local admin user (not Ubiquiti SSO cloud user)
+          - [ ] After setup: add device_tracker entities to presence card below
+
+          **Telegram Bot** (OPS-617: setup via HA UI — YAML config removed in HA 2026.5):
+          - [ ] Settings → Devices & Services → Add Integration → Telegram bot
+          - [ ] Platform: Polling, API key: (from Vault secret/telegram/bot_token)
+          - [ ] Add allowed chat ID: three-dot menu → Add allowed chat ID
+          - [ ] After setup: send /status to bot to verify inbound commands work
+
+          **Google Calendar**:
+          - [ ] Settings → Devices & Services → Add Integration → Google Calendar
+          - [ ] Requires OAuth dev credentials + redirect: https://my.home-assistant.io/redirect/oauth
+
+          **NWS Weather** ({{ ha_nws_latitude }}°N, {{ ha_nws_longitude }}°W):
+          - [ ] Settings → Devices & Services → Add Integration → National Weather Service
+          - [ ] Station: leave blank (auto-selects nearest)
+
+          **TrueNAS** ({{ ha_truenas_host }}):
+          - [ ] Install HACS first (Settings → Add-ons → HACS)
+          - [ ] HACS → Integrations → Search "TrueNAS" → tomaae/homeassistant-truenas
+          - [ ] Restart HA → Settings → D&S → Add Integration → TrueNAS
+
+      # ── Jellyfin: Now-Playing ─────────────────────────────────────────────
+      # Entity: media_player.jellyfin_<session_name> (auto-created per active session)
+      # The entity ID below is a placeholder — update after Jellyfin integration setup.
+      # Check actual entity ID: Developer Tools → States → filter "media_player.jellyfin"
+      # Ref: https://www.home-assistant.io/integrations/jellyfin/ — "Media player entities"
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >-
+              ## 🎬 Jellyfin — Now Playing
+
+              Server: `http://{{ ha_jellyfin_url }}`
+              *(Update entity below after integration setup)*
+          - type: media-control
+            entity: media_player.jellyfin
+            # OPERATOR: replace with actual entity ID from Developer Tools → States
+            # Example: media_player.jellyfin_living_room_tv
+
+      # ── UniFi: Network Presence ───────────────────────────────────────────
+      # Entities: device_tracker.* (auto-created by UniFi integration per client)
+      # OPERATOR: replace placeholder entities with actual device_tracker.* entity IDs
+      # after completing UniFi integration setup.
+      # Ref: https://www.home-assistant.io/integrations/unifi/ — "Presence detection"
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >-
+              ## 📡 Network Presence (UniFi UDM)
+
+              Controller: `{{ ha_unifi_host }}`
+              *(Add device_tracker entities below after UniFi integration setup)*
+          - type: glance
+            title: Tracked Devices
+            show_state: true
+            entities:
+              # OPERATOR: replace with actual device_tracker.* entities
+              # Example: device_tracker.iphone_operator, device_tracker.pixel_operator
+              - entity: device_tracker.placeholder_replace_me
+                name: "— configure UniFi integration first —"
+
+      # ── Google Calendar: Today's Events ───────────────────────────────────
+      # Entity: calendar.primary (or calendar.<your_calendar_name> after OAuth)
+      # Ref: https://www.home-assistant.io/integrations/google/
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >-
+              ## 📅 Google Calendar — Today's Events
+
+              *(Complete OAuth setup in Settings → D&S → Google Calendar)*
+              *(Redirect URI: https://my.home-assistant.io/redirect/oauth)*
+          - type: calendar
+            title: Upcoming Events
+            entities:
+              # OPERATOR: replace with actual calendar entity after OAuth setup
+              # Example: calendar.primary, calendar.work
+              - calendar.primary
+            initial_view: dayGridDay
+
+      # ── NWS: Wabash County Weather ────────────────────────────────────────
+      # Coords: {{ ha_nws_latitude }}°N, {{ ha_nws_longitude }}°W
+      # Entity slug: "weather.{{ ha_nws_entity_slug }}" (verify after setup)
+      # Ref: https://www.home-assistant.io/integrations/nws/
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >-
+              ## 🌤 Wabash County Weather (NWS)
+
+              Coords: {{ ha_nws_latitude }}°N, {{ ha_nws_longitude }}°W
+              Entity: `weather.{{ ha_nws_entity_slug }}`
+              *(Verify entity ID in Developer Tools → States after NWS setup)*
+          - type: weather-forecast
+            entity: weather.{{ ha_nws_entity_slug }}
+            forecast_type: twice_daily
+            show_forecast: true
+
+      # ── TrueNAS: Storage Health ───────────────────────────────────────────
+      # HACS integration: tomaae/homeassistant-truenas
+      # Host: {{ ha_truenas_host }}
+      # Ref: https://github.com/tomaae/homeassistant-truenas
+      # OPERATOR: install HACS + TrueNAS integration (operator post-merge step)
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >-
+              ## 🖥 TrueNAS Storage Health
+
+              Host: `{{ ha_truenas_host }}`
+              HACS repo: `tomaae/homeassistant-truenas`
+
+              **Post-merge install steps:**
+              1. Install HACS (Settings → Add-ons → HACS)
+              2. HACS → Integrations → "TrueNAS" → `tomaae/homeassistant-truenas`
+              3. Restart HA → Settings → D&S → Add Integration → TrueNAS
+              4. Update sensor entity IDs in this card
+
+          - type: entities
+            title: TrueNAS Sensors
+            entities:
+              # OPERATOR: add TrueNAS sensor entities after HACS install
+              # Examples: sensor.truenas_pool_data_status
+              #           sensor.truenas_disk_ada0_temperature
+              - entity: sensor.truenas_placeholder
+                name: "— install TrueNAS HACS integration first —"
+
+      # ── Telegram Bot: Status ──────────────────────────────────────────────
+      # OPS-617: Telegram bot is configured via HA UI (config flow), NOT YAML.
+      # HA 2026.5+ rejects telegram_bot YAML config (config_entry_only_config_schema).
+      # After UI setup, the telegram_bot.send_message service is available for automations.
+      # Ref: https://www.home-assistant.io/integrations/telegram_bot/
+      - type: markdown
+        content: >-
+          ## 📬 Telegram Bot
+
+          **Setup:** Settings → Devices & Services → Add Integration → Telegram bot
+          Platform: Polling (no internet exposure required)
+          API key: from Vault `secret/telegram/bot_token`
+
+          **After setup:**
+          1. Three-dot menu next to Telegram bot entry → **Add allowed chat ID**
+          2. To find your chat ID: send any message to [@id_bot](https://t.me/id_bot)
+          3. Send `/status` to your bot → should reply with HA timestamp
+
+          **Note:** YAML config (`telegram_bot:` in configuration.yaml) was removed
+          in OPS-617 — HA 2026.5+ rejects it and enters recovery mode.

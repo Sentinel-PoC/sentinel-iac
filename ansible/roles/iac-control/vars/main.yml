@@ -1,0 +1,184 @@
+---
+# Variables for iac-control configuration
+# Combines original OKD infrastructure vars with new service vars
+
+# Required packages (apt)
+required_packages:
+  - haproxy
+  - squid-openssl
+  - squid-common
+  - dnsmasq
+  - dnsmasq-base
+  - iptables
+  # OPS-229: UFW is the firewall manager on iac-control (see tasks/main.yml
+  # community.general.ufw rules and templates/ufw-before.rules.j2). Installing
+  # iptables-persistent alongside UFW causes apt to uninstall UFW on each
+  # ansible run, which flushes netfilter rules and drops in-flight connections
+  # (observed 2026-04-18: killed 29d of iSCSI conntrack). Remove
+  # iptables-persistent + netfilter-persistent; rely on UFW.
+  - ufw
+  - docker.io
+  - docker-compose-v2
+  - nginx
+  - keepalived
+  - socat
+  - jq
+  - git
+  - vim
+  - curl
+  - wget
+  - qemu-guest-agent
+
+# (GitLab Runner removed 2026-04-18 per OPS-216; Forgejo Runner is the active
+# CI runner. Stale `gitlab_runner_package` variable removed 2026-04-19 per
+# OPS-227 — no consumers remain after the GitLab→Forgejo migration.)
+
+# Binary tools installed via script/binary (not apt)
+# These are checked with `which` and skipped if already present.
+# Version pinning could be added later for reproducibility.
+binary_tools:
+  - name: trivy
+    version: "0.69.1"
+  - name: tflint
+    version: "0.61.0"
+  - name: gitleaks
+    version: "8.30.0"
+  - name: helm
+  - name: oc
+  - name: kubectl
+  - name: mc
+  - name: vault
+
+# OKD Cluster nodes (used by HAProxy, dnsmasq, iptables templates)
+okd_bootstrap_node:
+  mac: "bc:24:11:d8:cf:14"
+  ip: "10.0.0.220"
+  hostname: "bootstrap"
+
+okd_master_nodes:
+  - name: master-1
+    mac: "BC:24:11:F1:90:7A"
+    ip: "10.0.0.221"
+  - name: master-2
+    mac: "BC:24:11:54:EF:CF"
+    ip: "10.0.0.222"
+  - name: master-3
+    mac: "BC:24:11:EC:8C:91"
+    ip: "10.0.0.223"
+
+# HAProxy backend ports
+haproxy_api_port: 6443
+haproxy_machine_config_port: 22623
+haproxy_http_port: 80
+haproxy_https_port: 443
+
+# Squid egress allowlist domains
+squid_allowed_domains:
+  - .quay.io
+  - .docker.io
+  - .ghcr.io
+  - .lscr.io
+  - .githubusercontent.com
+  - .svc.ci.openshift.org
+  - .k8s.io
+  - .cloudfront.net
+  - .amazonaws.com
+  - .openshift.com
+  - .okd.io
+  - .pangolin.net
+  - .digicert.com
+  - .letsencrypt.org
+  - .globalsign.com
+  - .ubuntu.com
+  - .debian.org
+  - .pool.ntp.org
+  - .github.com
+  - .redhat.io
+  - .akamaized.net
+  - .fastly.net
+  - "192.168.12.58"
+  - "192.168.12.68"
+
+# DNS upstream servers
+dns_upstream_servers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# Infrastructure service IPs
+nfs_server: 192.168.12.205
+minio_server: 192.168.12.58
+minio_replica_server: 192.168.12.59
+gitlab_server: 192.168.12.68
+
+# Firewall allowed IPs for HAProxy access
+haproxy_allowed_sources:
+  - 192.168.12.168/32
+  - 192.168.12.206/32  # Vault server - ESO needs K8s API access
+
+# --- New service variables ---
+
+# etcd backup settings
+etcd_backup_master: "10.0.0.221"
+etcd_backup_user: "core"
+etcd_backup_ssh_key: "/home/ubuntu/.ssh/id_sentinel"
+etcd_backup_minio_bucket: "etcd-backups"
+etcd_backup_retention_days: 7
+# OPS-285: MinIO URL for etcd-backup env file (scoped to etcd-backups bucket)
+# SEC-88: S3 API now TLS-terminated; use FQDN so wildcard cert validates.
+etcd_backup_minio_url: "https://s3.208.haist.farm:9000"
+
+# Sentinel Matrix Bot (replaces grafana-alert-receiver)
+matrix_bot_port: 9095
+matrix_bot_log: "/var/log/sentinel-matrix-bot.log"
+
+# qBittorrent socat proxy
+qbit_proxy_listen_port: 18080
+qbit_proxy_target: "192.168.12.69:8080"
+
+# Nginx PXE directories
+nginx_pxe_dirs:
+  - /var/www/html/ignition
+  - /var/www/html/scos
+
+# Forgejo Runner
+forgejo_host: "forgejo.haist.farm"
+
+# Vault Unseal (Transit Vault - standalone Docker container)
+vault_unseal_host: "192.168.12.210"
+vault_unseal_port: "8201"
+vault_unseal_image_version: "1.21.2"
+vault_unseal_config_dir: "/opt/vault-unseal/config"
+vault_unseal_data_dir: "/opt/vault-unseal/data"
+# SEC-89: TLS for transit listener (static self-signed cert, no Vault-PKI dependency)
+vault_unseal_tls_dir: "/opt/vault-unseal/config/tls"
+vault_unseal_tls_cert: "/opt/vault-unseal/config/tls/cert.pem"
+vault_unseal_tls_key: "/opt/vault-unseal/config/tls/key.pem"
+# IPs allowed to reach the transit Vault on :8201 via DOCKER-USER (SEC-89 Phase C)
+# prod Vault (.206) + local iac-control (.210) + loopback for local scripts
+vault_unseal_allowed_sources:
+  - "192.168.12.206"  # prod Vault (vault-server)
+  - "192.168.12.210"  # iac-control itself (local scripts)
+
+# Loki stack (docker-compose: loki + promtail)
+loki_stack_dir: "/home/ubuntu/loki-stack"
+loki_version: "2.9.3"
+promtail_version: "2.9.3"
+
+# Supply-chain tooling — pinned versions for Forgejo runner (OPS-258)
+# Required by SEC-60/61/62 composite action (PR #66).
+# SHA256 checksums sourced from each project's GitHub release page.
+# DO NOT change versions without also updating the corresponding SHA256.
+syft_version: "1.21.0"
+syft_sha256: "0ee8161dfa4f79487e46e734305a414e1e7fbcdc114d69809d069e89483c4898"
+
+osv_scanner_version: "1.9.2"
+osv_scanner_sha256: "d6af4b67fa5de658598bd2d445efb99e90d1734b3146962418719c4350ecb74b"
+
+cosign_version: "2.4.3"
+cosign_sha256: "caaad125acef1cb81d58dcdc454a1e429d09a750d1e9e2b3ed1aed8964454708"
+
+# OPS-935: packer — required by .forgejo/workflows/packer.yml packer-validate job
+# Pinned to 1.11.2 (last MPL-2.0 release family; compatible with proxmox plugin >= 1.1.2)
+# SHA256 from https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_SHA256SUMS
+packer_version: "1.11.2"
+packer_sha256: "ced13efc257d0255932d14b8ae8f38863265133739a007c430cae106afcfc45a"

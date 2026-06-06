@@ -1,0 +1,7 @@
+---
+- name: Deploy Grafana Alloy on VM/LXC hosts
+  hosts: all:!iac-control
+  become: true
+  roles:
+    - role: alloy
+      when: alloy_enabled | default(true)

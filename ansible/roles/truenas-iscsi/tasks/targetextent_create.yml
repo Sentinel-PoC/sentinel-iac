@@ -1,0 +1,133 @@
+---
+# truenas-iscsi | targetextent_create — idempotent LUN mapping creation (OPS-1011)
+#
+# Links an iSCSI target to an extent with a LUN ID.
+# Resolves target and extent by NAME (no hardcoded IDs required).
+# Idempotent: skips creation if a mapping with the same target+extent already exists.
+#
+# Requires:
+#   truenas_iscsi_targetextent_target_name  — target name (must already exist)
+#   truenas_iscsi_targetextent_extent_name  — extent name (must already exist)
+#   truenas_iscsi_targetextent_lunid        — LUN ID (typically 0)
+#
+# NOTE: Create the extent and target first (extent_create, target_create tasks)
+# before running this task.
+
+- name: truenas-iscsi/targetextent_create | validate required variables
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_targetextent_target_name | length > 0
+      - truenas_iscsi_targetextent_extent_name | length > 0
+    fail_msg: >
+      Both truenas_iscsi_targetextent_target_name and
+      truenas_iscsi_targetextent_extent_name must be set.
+
+- name: truenas-iscsi/targetextent_create | fetch all extents to resolve extent ID
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_te_all_extents
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_create | assert named extent exists
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_te_all_extents.json | selectattr('name', 'equalto', truenas_iscsi_targetextent_extent_name) | list | length == 1
+    fail_msg: >
+      Extent '{{ truenas_iscsi_targetextent_extent_name }}' not found on TrueNAS.
+      Create it first with extent_create task.
+
+- name: truenas-iscsi/targetextent_create | resolve extent ID
+  ansible.builtin.set_fact:
+    truenas_iscsi_te_extent_id: >-
+      {{
+        (truenas_iscsi_te_all_extents.json
+        | selectattr('name', 'equalto', truenas_iscsi_targetextent_extent_name)
+        | first).id
+      }}
+
+- name: truenas-iscsi/targetextent_create | fetch all targets to resolve target ID
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/target"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_te_all_targets
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_create | assert named target exists
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_te_all_targets.json | selectattr('name', 'equalto', truenas_iscsi_targetextent_target_name) | list | length == 1
+    fail_msg: >
+      Target '{{ truenas_iscsi_targetextent_target_name }}' not found on TrueNAS.
+      Create it first with target_create task.
+
+- name: truenas-iscsi/targetextent_create | resolve target ID
+  ansible.builtin.set_fact:
+    truenas_iscsi_te_target_id: >-
+      {{
+        (truenas_iscsi_te_all_targets.json
+        | selectattr('name', 'equalto', truenas_iscsi_targetextent_target_name)
+        | first).id
+      }}
+
+- name: truenas-iscsi/targetextent_create | fetch all targetextents to check for existing
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/targetextent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_all_targetextents
+  changed_when: false
+
+- name: truenas-iscsi/targetextent_create | check if mapping already exists
+  ansible.builtin.set_fact:
+    truenas_iscsi_te_existing: >-
+      {{
+        truenas_iscsi_all_targetextents.json
+        | selectattr('target', 'equalto', truenas_iscsi_te_target_id | int)
+        | selectattr('extent', 'equalto', truenas_iscsi_te_extent_id | int)
+        | list
+      }}
+
+- name: truenas-iscsi/targetextent_create | create LUN mapping (skip if exists)
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/targetextent"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      target: "{{ truenas_iscsi_te_target_id | int }}"
+      extent: "{{ truenas_iscsi_te_extent_id | int }}"
+      lunid: "{{ truenas_iscsi_targetextent_lunid | int }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  when: truenas_iscsi_te_existing | length == 0
+  register: truenas_iscsi_te_create_result
+
+- name: truenas-iscsi/targetextent_create | report outcome
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        'Created LUN mapping: target=' + truenas_iscsi_targetextent_target_name
+        + ' (id=' + truenas_iscsi_te_target_id | string + ')'
+        + ' → extent=' + truenas_iscsi_targetextent_extent_name
+        + ' (id=' + truenas_iscsi_te_extent_id | string + ')'
+        + ' lunid=' + truenas_iscsi_targetextent_lunid | string
+        if truenas_iscsi_te_existing | length == 0
+        else 'LUN mapping already exists (no-op): target=' + truenas_iscsi_targetextent_target_name
+        + ' → extent=' + truenas_iscsi_targetextent_extent_name
+        + ' id=' + (truenas_iscsi_te_existing | first).id | string
+      }}
+  changed_when: false

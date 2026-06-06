@@ -1,0 +1,99 @@
+# {{ ansible_managed }}
+# OpenSearch Security plugin authentication configuration
+# OPS-631: Authentik OIDC integration
+---
+_meta:
+  type: "config"
+  config_version: 2
+config:
+  dynamic:
+    http:
+      anonymous_auth_enabled: false
+      xff:
+        enabled: false
+        internalProxies: '192\.168\.0\.10|192\.168\.0\.11'
+    authc:
+{% if wazuh_oidc_enabled %}
+      openid_auth_domain:
+        description: "Authenticate via {{ wazuh_oidc_provider_name }} OpenID Connect"
+        http_enabled: true
+        transport_enabled: false
+        order: 0
+        http_authenticator:
+          type: openid
+          challenge: false
+          config:
+            subject_key: preferred_username
+            roles_key: groups
+            openid_connect_url: {{ wazuh_oidc_connect_url }}
+            openid_connect_idp:
+              enable_ssl: true
+              verify_hostnames: false
+              pemtrustedcas_filepath: /etc/wazuh-indexer/opensearch-security/ca-certificates.crt
+        authentication_backend:
+          type: noop
+{% endif %}
+      basic_internal_auth_domain:
+        description: "Authenticate via HTTP Basic against internal users database"
+        http_enabled: true
+        transport_enabled: true
+        order: 4
+        http_authenticator:
+          type: basic
+          challenge: true
+        authentication_backend:
+          type: intern
+      kerberos_auth_domain:
+        http_enabled: false
+        transport_enabled: false
+        order: 6
+        http_authenticator:
+          type: kerberos
+          challenge: true
+          config:
+            krb_debug: false
+            strip_realm_from_principal: true
+        authentication_backend:
+          type: noop
+      proxy_auth_domain:
+        description: "Authenticate via proxy"
+        http_enabled: false
+        transport_enabled: false
+        order: 3
+        http_authenticator:
+          type: proxy
+          challenge: false
+          config:
+            user_header: "x-proxy-user"
+            roles_header: "x-proxy-roles"
+        authentication_backend:
+          type: noop
+      jwt_auth_domain:
+        description: "Authenticate via Json Web Token"
+        http_enabled: false
+        transport_enabled: false
+        order: 1
+        http_authenticator:
+          type: jwt
+          challenge: false
+          config:
+            signing_key: "base64 encoded HMAC key or public RSA/ECDSA pem key"
+            jwt_header: "Authorization"
+            jwt_url_parameter: null
+            jwt_clock_skew_tolerance_seconds: 30
+            roles_key: null
+            subject_key: null
+        authentication_backend:
+          type: noop
+      clientcert_auth_domain:
+        description: "Authenticate via SSL client certificates"
+        http_enabled: false
+        transport_enabled: false
+        order: 2
+        http_authenticator:
+          type: clientcert
+          config:
+            username_attribute: cn
+          challenge: false
+        authentication_backend:
+          type: noop

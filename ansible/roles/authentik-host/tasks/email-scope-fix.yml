@@ -1,0 +1,59 @@
+---
+# email-scope-fix.yml — OPS-684
+# Ensures all Authentik OAuth2 providers use the correct email scope mapping
+# (email_verified: True) instead of the default managed mapping that hardcodes
+# email_verified: False.
+#
+# Root cause: Authentik ships "authentik default OAuth Mapping: OpenID 'email'"
+# (pk: 49d5d850-016d-41d8-9304-7d65703b82b1, managed: goauthentik.io/providers/oauth2/scope-email)
+# with expression: return {"email": request.user.email, "email_verified": False}
+# This mapping is read-only (managed by Authentik system); it cannot be patched.
+#
+# Fix: swap out the managed mapping for the platform-local "Pangolin: OpenID email
+# (verified)" mapping (pk: 05fbfc9d-3eb4-4531-8b6d-2035f8efcaf1) in all OAuth2
+# providers that currently use the broken one.
+# The Pangolin mapping was created manually and is not managed — it IS patchable.
+#
+# Idempotency:
+# - GET /providers/oauth2/?page_size=100 returns current state
+# - PATCH only issued when provider.property_mappings contains the bad PK
+# - Already-fixed providers (bad PK absent) are silently skipped
+#
+# Vault: authentik_admin_token set by vault-secrets.yml (included in main.yml).
+# If running standalone with --tags email-scope-fix, vault-secrets.yml must
+# already have run (or vault_token must be injected via -e vault_token=...).
+
+- name: "Email-scope-fix | Get all OAuth2 providers (OPS-684)"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/providers/oauth2/?page_size=200"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_email_fix_providers
+  tags: [authentik, email-scope-fix]
+
+- name: "Email-scope-fix | Swap broken email mapping for fixed one in affected providers"
+  # property_mappings is the full list of UUIDs assigned to the provider.
+  # PATCH replaces the whole list, so we remove the bad PK and add the good PK.
+  # difference() + union() is idempotent: remove bad, add good (no duplicates).
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/providers/oauth2/{{ item.pk }}/"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      property_mappings: >-
+        {{ (item.property_mappings
+            | difference([authentik_email_broken_mapping_pk])
+            | union([authentik_email_fixed_mapping_pk])) }}
+    status_code: 200
+  loop: "{{ authentik_email_fix_providers.json.results }}"
+  loop_control:
+    label: "{{ item.name }} (pk={{ item.pk }})"
+  when: authentik_email_broken_mapping_pk in item.property_mappings
+  changed_when: true
+  tags: [authentik, email-scope-fix]

@@ -1,0 +1,25 @@
+---
+# chrony-server role defaults — OPS-288
+# Upstream NTP servers for internal NTP infrastructure hosts
+chrony_upstream_servers:
+  - server: time.nist.gov
+    options: iburst
+  - server: time.cloudflare.com
+    options: iburst
+  - server: pool.ntp.org
+    options: iburst
+
+# NTP peer — the other internal NTP server (set per-host in inventory or play vars)
+# Leave empty to skip mutual peering (e.g., standalone server)
+chrony_peer: ""
+
+# Allow NTP queries from this subnet
+chrony_allow_network: "192.168.12.0/24"
+
+# Step clock at any offset > this threshold (seconds); -1 = unlimited step count
+chrony_makestep_threshold: 1.0
+chrony_makestep_limit: -1
+
+# UFW firewall rule — allow inbound UDP/123 from LAN
+chrony_ufw_enabled: true
+chrony_ufw_from: "192.168.12.0/24"

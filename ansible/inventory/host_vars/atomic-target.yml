@@ -1,0 +1,60 @@
+---
+# OPS-576: atomic-target — isolated test VM for Atomic Red Team atom execution
+#
+# This VM is the ONLY host against which atomic tests are executed.
+# It must be on an isolated VLAN with no production network reachability.
+#
+# Provisioning status: PENDING — VM not yet created.
+# See: https://plane.208.haist.farm/haists-it-consulting/projects/OPS/issues/OPS-576
+#
+# When provisioned:
+#   - Update ansible_host with the actual IP
+#   - Register the Wazuh agent and verify agent name = "atomic-target"
+#   - Take a clean snapshot BEFORE first atom run
+#   - Add VM subnet to wazuh_ar_whitelist in roles/wazuh-server/defaults/main.yml
+
+# --- Connection ---
+ansible_host: 10.10.20.10          # Placeholder: update when VM is provisioned
+ansible_user: ubuntu
+ansible_ssh_private_key_file: ~/.ssh/id_sentinel
+ansible_become: true
+
+# --- Platform ---
+ansible_distribution: "Ubuntu"
+ansible_distribution_version: "22.04"
+
+# --- Role membership ---
+# This host receives only the wazuh-agent role and minimal hardening.
+# It does NOT receive any production service roles.
+
+# --- Wazuh agent config ---
+# Agent must register as name "atomic-target" (matches runner config in atoms.yml)
+wazuh_manager_ip: "192.168.12.100"
+wazuh_agent_name: "atomic-target"
+
+# --- Network isolation ---
+# Must be on a dedicated VLAN with:
+#   - Outbound: 192.168.12.100:1514 (Wazuh agent events)
+#   - Outbound: 192.168.12.100:55000 (Wazuh agent registration)
+#   - Outbound: 443 to github.com (for ART repo clone — or use local mirror)
+#   - Inbound: 22/TCP from 192.168.12.210 (iac-control runner SSH)
+#   - NO routes to production subnets (192.168.12.0/24 except Wazuh)
+#   - NO routes to OKD 10.0.0.0/24
+atomic_target_vlan: 20              # Placeholder VLAN ID — confirm with network config
+
+# --- Snapshot lifecycle ---
+# After each atom run, restore VM to clean snapshot.
+# The Forgejo workflow does NOT automate snapshot restore in v1.
+# Manual step: after verifying PR is merged and first run completes,
+# restore to clean snapshot for next week's run.
+# Future: automate via Proxmox API (proxmox_kvm module).
+proxmox_node: "pve"                 # PVE node hosting this VM
+proxmox_vmid: null                  # Assign when VM is created
+
+# --- Wazuh AR whitelist note ---
+# IMPORTANT: Before first atom run, add the atomic-target VLAN subnet to:
+#   ansible/roles/wazuh-server/defaults/main.yml → wazuh_ar_whitelist
+# Otherwise Wazuh active-response may block the VM during test execution.
+# Example:
+#   wazuh_ar_whitelist:
+#     - "10.10.20.0/24"   # atomic-target VLAN

@@ -1,0 +1,15 @@
+[Unit]
+Description=Wazuh Vulnerability Prometheus Exporter
+After=wazuh-indexer.service
+Requires=wazuh-indexer.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/sentinel/wazuh-vuln-exporter.py
+Restart=on-failure
+RestartSec=30
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

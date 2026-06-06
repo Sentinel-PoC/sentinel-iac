@@ -1,0 +1,60 @@
+---
+# configure.yml — OPS-573
+# Post-deploy: imports 5 G'-prime baseline workflows via Shuffle REST API.
+# Workflows are tagged 'g-prime' per issue acceptance criteria.
+#
+# Shuffle API: POST /api/v1/workflows (multipart-form or JSON body)
+# Requires Authorization header with api_token.
+#
+# Workflow files are JSON exports from shuffle-workflows/ directory.
+# They are transferred to the remote host and imported via API.
+
+- name: Find workflow JSON files on controller
+  ansible.builtin.find:
+    paths: "{{ shuffle_workflows_dir }}"
+    patterns: "*.json"
+  delegate_to: localhost
+  become: false
+  register: shuffle_workflow_files
+  tags: [shuffle, configure]
+
+- name: Copy workflow files to shuffle host
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "{{ shuffle_data_dir }}/{{ item.path | basename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ shuffle_workflow_files.files }}"
+  tags: [shuffle, configure]
+
+- name: Import workflows via Shuffle API
+  ansible.builtin.uri:
+    url: "http://localhost:{{ shuffle_backend_port }}/api/v1/workflows"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ shuffle_api_token }}"
+      Content-Type: "application/json"
+    body: "{{ lookup('file', item.path) }}"
+    body_format: json
+    status_code: [200, 201]
+    validate_certs: false
+  loop: "{{ shuffle_workflow_files.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - not ansible_check_mode
+    - shuffle_api_token | length > 0
+  register: shuffle_import_result
+  tags: [shuffle, configure]
+
+- name: Report workflow import results
+  ansible.builtin.debug:
+    msg: >-
+      Imported {{ shuffle_import_result.results | selectattr('status', 'defined')
+      | selectattr('status', 'in', [200, 201]) | list | length }} of
+      {{ shuffle_workflow_files.files | length }} workflows successfully.
+  when:
+    - not ansible_check_mode
+    - shuffle_api_token | length > 0
+  tags: [shuffle, configure]

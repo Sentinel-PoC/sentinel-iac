@@ -1,0 +1,12 @@
+site_name: Sentinel IaC
+site_description: Infrastructure-as-Code for Project Sentinel
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Ansible Roles: ansible-roles.md
+  - Terraform Modules: terraform-modules.md
+  - Disaster Recovery: disaster-recovery.md
+  - Security: security.md
+  - Compliance: compliance.md
+plugins:
+  - techdocs-core

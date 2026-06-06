@@ -1,0 +1,32 @@
+---
+vault_version: "1.21.2"
+vault_api_addr: "192.168.12.206"
+vault_data_dir: "/opt/vault/data"
+vault_config_dir: "/etc/vault/config"
+vault_log_dir: "/opt/vault/logs"
+vault_compose_dir: "/opt/vault"
+# OPS-541 (L4 recovery): TLS cert+key dir on host, bind-mounted read-only
+# into the Vault container at /vault/tls and referenced by config.hcl.
+# Existed live but was never in IaC until this PR.
+vault_tls_dir: "/etc/vault/tls"
+vault_backup_retention_days: 7
+# SEC-88: S3 API now TLS-terminated; use FQDN so wildcard cert validates.
+minio_endpoint: "https://s3.208.haist.farm:9000"
+minio_access_key: ""
+minio_secret_key: ""
+vault_tls_enabled: true
+
+# Transit auto-unseal (via transit vault on iac-control)
+# SEC-89: transit address now https:// — transit listener has TLS enabled.
+# vault_transit_ca_cert: path to the transit Vault's self-signed CA cert on
+# the prod Vault host (deployed by iac-control role Phase A, SEC-89).
+vault_transit_unseal_enabled: true
+vault_transit_address: "https://192.168.12.210:8201"
+vault_transit_key_name: "autounseal"
+vault_transit_mount_path: "transit/"
+vault_transit_token: "{{ vault_transit_unseal_token | default('CHANGE_ME') }}"
+vault_transit_ca_cert: "/etc/vault/tls/transit-ca.pem"
+
+# Telemetry / Prometheus metrics
+vault_telemetry_enabled: true
+vault_telemetry_retention: "30s"

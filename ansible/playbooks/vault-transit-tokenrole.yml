@@ -1,0 +1,153 @@
+---
+# Bootstrap: create the autounseal-rotation token role on the transit Vault
+# and apply the matching autounseal-rotate policy.
+#
+# Run this ONCE after the autounseal-rotate policy HCL is updated (OPS-191).
+# Safe to re-run — both operations are idempotent Vault upserts.
+#
+# Context
+# -------
+# The rotation-token (stored at /etc/vault-unseal/rotation-token on iac-control)
+# carries policies [autounseal-rotate, default].  The autounseal policy is a
+# separate policy that the rotation-token does NOT hold.  Vault 1.x requires child
+# token policies to be a strict subset of the parent's policies, so a plain
+# POST /v1/auth/token/create with policies=["autounseal"] fails with:
+#   "child policies must be subset of parent"
+#
+# A token *role* with allowed_policies=["autounseal"] breaks this restriction:
+# the role's allowed_policies list is checked against the SYSTEM, not the parent.
+# The rotation-token needs only auth/token/create/<role> capability to use it.
+#
+# Required vars (pass via -e or --extra-vars):
+#   vault_token          — Vault token with sys/policies/acl write scope AND
+#                          auth/token/roles write scope on the transit Vault.
+#                          Root token or equivalent for bootstrapping.
+#   transit_vault_addr   — (optional) default: https://192.168.12.210:8201 (SEC-89)
+#   transit_vault_cacert — (optional) path to transit CA cert for TLS validation
+#                          default: /opt/vault-unseal/config/tls/cert.pem
+#
+# Example run (from repo root, with VAULT_TOKEN exported):
+#   ansible-playbook ansible/playbooks/vault-transit-tokenrole.yml \
+#     -e vault_token="${VAULT_TOKEN}" \
+#     -e transit_vault_addr="https://192.168.12.210:8201"
+#
+# Verification after run:
+#   vault read auth/token/roles/autounseal-rotation
+#   vault policy read autounseal-rotate
+#
+# Tracking: OPS-191
+
+- name: Bootstrap autounseal-rotation token role on transit Vault
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # SEC-89: transit listener now has TLS — address flipped to https://
+    transit_vault_addr: "https://192.168.12.210:8201"
+    transit_vault_cacert: "/opt/vault-unseal/config/tls/cert.pem"
+    policy_name: "autounseal-rotate"
+    policy_file: "{{ playbook_dir }}/../../policies/vault/autounseal-rotate-policy.hcl"
+    token_role_name: "autounseal-rotation"
+
+  tasks:
+    - name: "Fail fast if vault_token is not set"
+      ansible.builtin.fail:
+        msg: "vault_token must be provided via -e vault_token=<token>"
+      when: vault_token is not defined or vault_token == ""
+
+    - name: "Read autounseal-rotate policy HCL from repo"
+      ansible.builtin.slurp:
+        src: "{{ policy_file }}"
+      register: _policy_hcl
+
+    - name: "Apply autounseal-rotate policy to transit Vault"
+      ansible.builtin.uri:
+        url: "{{ transit_vault_addr }}/v1/sys/policies/acl/{{ policy_name }}"
+        method: PUT
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          policy: "{{ _policy_hcl.content | b64decode }}"
+        status_code: [200, 204]
+        # SEC-89: validate_certs enabled with explicit CA cert for transit TLS
+        validate_certs: true
+        ca_path: "{{ transit_vault_cacert }}"
+      no_log: true
+      register: _policy_result
+      changed_when: _policy_result.status in [200, 204]
+
+    - name: "Confirm policy applied (read back)"
+      ansible.builtin.uri:
+        url: "{{ transit_vault_addr }}/v1/sys/policies/acl/{{ policy_name }}"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        status_code: 200
+        # SEC-89: validate_certs enabled with explicit CA cert for transit TLS
+        validate_certs: true
+        ca_path: "{{ transit_vault_cacert }}"
+      no_log: true
+      register: _policy_read
+
+    - name: "Show policy paths (sanitised)"
+      ansible.builtin.debug:
+        msg: >-
+          Policy '{{ policy_name }}' present in transit Vault.
+          Response status: {{ _policy_read.status }}
+
+    - name: "Create / update autounseal-rotation token role"
+      ansible.builtin.uri:
+        url: "{{ transit_vault_addr }}/v1/auth/token/roles/{{ token_role_name }}"
+        method: POST
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          allowed_policies:
+            - "autounseal"
+          orphan: true
+          renewable: true
+          period: "800h"
+          path_suffix: "{{ token_role_name }}"
+        status_code: [200, 204]
+        # SEC-89: validate_certs enabled with explicit CA cert for transit TLS
+        validate_certs: true
+        ca_path: "{{ transit_vault_cacert }}"
+      no_log: true
+      register: _role_result
+      changed_when: _role_result.status in [200, 204]
+
+    - name: "Confirm role created (read back)"
+      ansible.builtin.uri:
+        url: "{{ transit_vault_addr }}/v1/auth/token/roles/{{ token_role_name }}"
+        method: GET
+        headers:
+          X-Vault-Token: "{{ vault_token }}"
+        status_code: 200
+        # SEC-89: validate_certs enabled with explicit CA cert for transit TLS
+        validate_certs: true
+        ca_path: "{{ transit_vault_cacert }}"
+      no_log: true
+      register: _role_read
+
+    - name: "Show role summary (sanitised)"
+      ansible.builtin.debug:
+        msg: >-
+          Token role '{{ token_role_name }}' present in transit Vault.
+          allowed_policies={{ _role_read.json.data.allowed_policies | default('(unset)') }}
+          orphan={{ _role_read.json.data.orphan | default('(unset)') }}
+          period={{ _role_read.json.data.period | default('(unset)') }}
+          renewable={{ _role_read.json.data.renewable | default('(unset)') }}
+
+    - name: "Summary"
+      ansible.builtin.debug:
+        msg:
+          - "Bootstrap complete."
+          - "Policy '{{ policy_name }}' applied to {{ transit_vault_addr }}"
+          - "Token role '{{ token_role_name }}' created/updated."
+          - "Next: verify rotation-token can create via this role:"
+          - "  vault token create -role={{ token_role_name }} (using rotation-token)"
+          - "Then trigger a dry-run of the rotation script to confirm."

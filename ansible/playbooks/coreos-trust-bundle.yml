@@ -1,0 +1,45 @@
+---
+# ansible/playbooks/coreos-trust-bundle.yml
+#
+# OPS-238: Distribute Vault root CA to OKD CoreOS nodes via MachineConfig.
+#
+# USAGE:
+#   ansible-playbook ansible/playbooks/coreos-trust-bundle.yml \
+#     -i ansible/inventory/hosts.yml \
+#     --vault-password-file ~/.vault-pass
+#
+# DRY-RUN (validate only, no oc apply):
+#   ansible-playbook ansible/playbooks/coreos-trust-bundle.yml \
+#     -i ansible/inventory/hosts.yml \
+#     -e coreos_trust_bundle_dry_run=true
+#
+# WHAT THIS DOES:
+#   1. Runs on iac-control (where oc + kubeconfig live)
+#   2. Fetches Vault root CA (pki/cert/ca) + intermediate CA (pki_int/cert/ca)
+#   3. Renders a MachineConfig targeting the 'master' MCP
+#   4. Applies via `oc apply` — MCO performs rolling drain+reboot of OKD nodes
+#
+# OPERATOR NOTES:
+#   - MCO rolling update will drain+reboot each master node sequentially.
+#   - After each node reboots, CoreOS runs `update-ca-trust` automatically,
+#     promoting vault-root-ca.pem into the system trust store.
+#   - CRI-O will then trust Harbor (mirror.208.haist.farm) TLS certificates.
+#   - Monitor progress: oc get mcp master -w
+#   - Verify on a node: oc debug node/master-1.overwatch.haist.farm -- \
+#       chroot /host openssl verify -CAfile /etc/pki/tls/certs/ca-bundle.crt \
+#       /etc/pki/ca-trust/source/anchors/vault-root-ca.pem
+#
+# VAULT AUTHENTICATION:
+#   The role uses Vault's unauthenticated pki/cert/ca endpoint (public CA).
+#   No Vault token required — the CA cert is intentionally public.
+#   See: https://developer.hashicorp.com/vault/api-docs/secret/pki#read-ca-certificate
+
+- name: Deploy Vault root CA trust bundle to OKD CoreOS nodes
+  hosts: iac-control
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: coreos-trust-bundle
+      tags:
+        - coreos-trust-bundle

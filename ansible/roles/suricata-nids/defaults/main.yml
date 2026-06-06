@@ -1,0 +1,58 @@
+---
+# suricata-nids role defaults — OPS-569
+# Suricata standalone NIDS: ET Open ruleset + PCAP capture + Wazuh forwarder
+
+# Package installation
+suricata_ppa: "ppa:oisf/suricata-stable"
+
+# Network capture interface — override in host_vars or group_vars
+# Must be the port-mirrored interface receiving SPAN traffic (OPS-567)
+suricata_capture_interface: "eth1"
+
+# Suricata configuration paths
+suricata_config_dir: "/etc/suricata"
+suricata_log_dir: "/var/log/suricata"
+suricata_pcap_dir: "/var/log/suricata/pcap"
+suricata_rules_dir: "/var/lib/suricata/rules"
+suricata_run_dir: "/var/run/suricata"
+
+# eve.json output — consumed by Wazuh agent
+suricata_eve_json_enabled: true
+suricata_eve_json_path: "/var/log/suricata/eve.json"
+
+# PCAP capture rotation (OPS-569 acceptance criteria)
+# size: maximum size per pcap file before rotation
+# max-files: rolling window count; oldest file removed when exceeded
+suricata_pcap_log_enabled: true
+suricata_pcap_file_max_size: "1gb"
+suricata_pcap_file_max_files: 10
+suricata_pcap_use_stream_depth: false
+
+# Suricata operational mode
+# af-packet is preferred for Linux — zero-copy via AF_PACKET sockets
+suricata_runmode: "workers"
+suricata_default_packet_size: 1514
+
+# ET Open ruleset (suricata-update)
+suricata_update_sources:
+  - "et/open"
+
+# suricata-update schedule: daily systemd timer
+suricata_update_timer_oncalendar: "daily"
+suricata_update_timer_randomized_delay: "1h"
+
+# Wazuh agent integration
+# Path to ossec.conf localfile fragment for eve.json forwarding
+wazuh_agent_config_path: "/var/ossec/etc/ossec.conf"
+suricata_wazuh_localfile_enabled: true
+
+# Performance tuning
+suricata_af_packet_threads: 1
+suricata_af_packet_cluster_type: "cluster_flow"
+suricata_af_packet_defrag: true
+
+# Memory settings (safe defaults for 4GB+ host)
+suricata_flow_memcap: "128mb"
+suricata_stream_memcap: "64mb"
+suricata_defrag_memcap: "32mb"
+suricata_app_layer_reassembly_limit: 268435456

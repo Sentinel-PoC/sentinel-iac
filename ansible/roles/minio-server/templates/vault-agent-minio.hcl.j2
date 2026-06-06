@@ -1,0 +1,49 @@
+# {{ ansible_managed }}
+# [OPS-940] vault-agent configuration for minio-server AppRole boot auth.
+#
+# vault-agent authenticates to Vault using AppRole credentials stored on disk
+# (mode 0600, root:root) and renders /run/minio-secrets from secret/minio/admin.
+# minio.service reads MINIO_ROOT_USER and MINIO_ROOT_PASSWORD from /run/minio-secrets
+# at startup — vault-agent ensures this file exists after reboot without operator
+# intervention (closes the SEC-81 Pattern B reboot gap).
+#
+# AppRole role:    sentinel-minio-server
+# Policy:          sentinel-minio-server (read-only on secret/data/minio/admin)
+# Token TTL:       24h (renewable up to max TTL)
+# Credentials:     {{ vault_agent_minio_config_dir }}/role-id   (mode 0600, root:root)
+#                  {{ vault_agent_minio_config_dir }}/secret-id (mode 0600, root:root)
+# Secrets dest:    /run/minio-secrets (mode 0600, root:root, tmpfs — wiped on reboot)
+#
+# To rotate secret_id:
+#   1. vault kv delete secret/minio/approle-credentials-lxc<N>
+#   2. Re-run: ansible-playbook ... --tags minio-approle
+#   vault-agent will re-authenticate on its next cycle.
+
+pid_file = "/run/vault-agent-minio.pid"
+
+vault {
+  address         = "{{ vault_agent_minio_vault_addr }}"
+  tls_skip_verify = {{ 'true' if (vault_agent_minio_tls_skip_verify | string | lower in ['true', 'yes', '1']) else 'false' }}
+}
+
+auto_auth {
+  method "approle" {
+    config = {
+      role_id_file_path                    = "{{ vault_agent_minio_config_dir }}/role-id"
+      secret_id_file_path                  = "{{ vault_agent_minio_config_dir }}/secret-id"
+      remove_secret_id_file_after_reading  = false
+    }
+  }
+}
+
+template_config {
+  static_secret_render_interval = "{{ vault_agent_minio_render_interval }}"
+  exit_on_retry_failure         = false
+}
+
+template {
+  source               = "{{ vault_agent_minio_ctmpl_file }}"
+  destination          = "/run/minio-secrets"
+  perms                = 0600
+  error_on_missing_key = true
+}

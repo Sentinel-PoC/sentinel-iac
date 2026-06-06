@@ -1,0 +1,16 @@
+[Unit]
+Description=Check and unseal Transit Vault every 2 minutes
+
+[Timer]
+# OnBootSec fires shortly after boot for initial unseal check.
+# OnCalendar=*:0/2 fires every even minute (wall-clock), state-independent.
+# Avoid OnUnitActiveSec= for Type=oneshot services that complete in
+# milliseconds — observed NextElapseUSecMonotonic=infinity in that
+# configuration on iac-control (see OPS-214).
+OnBootSec=30s
+OnCalendar=*:0/2
+Persistent=true
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

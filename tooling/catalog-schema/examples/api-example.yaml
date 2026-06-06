@@ -1,0 +1,39 @@
+---
+# Example: API entity (service interface definition)
+# Validates against: tooling/catalog-schema/schema.json
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: vault-secrets-api
+  description: HashiCorp Vault KV v2 secrets API for the sentinel platform
+  links:
+    - url: https://vault.208.haist.farm/ui/vault/auth
+      title: Vault UI
+      icon: dashboard
+  tags:
+    - secrets
+    - vault
+    - overwatch
+spec:
+  type: openapi
+  lifecycle: production
+  owner: platform-team
+  system: sentinel-platform
+  definition: |
+    openapi: 3.0.0
+    info:
+      title: Vault Secrets API
+      version: "v2"
+      description: HashiCorp Vault KV v2 API at vault.208.haist.farm
+    servers:
+      - url: https://vault.208.haist.farm/v1
+    paths:
+      /secret/data/{path}:
+        get:
+          summary: Read a secret
+          parameters:
+            - name: path
+              in: path
+              required: true
+              schema:
+                type: string

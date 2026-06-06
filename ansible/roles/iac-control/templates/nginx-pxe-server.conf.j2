@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# PXE/SCOS artifact server for OKD cluster
+# Binds to cluster network interface only on port {{ nginx_pxe_port }}
+# to avoid conflict with HAProxy on *:80/*:443
+server {
+    listen {{ okd_gateway_ip }}:{{ nginx_pxe_port }};
+
+    root /var/www/html;
+    index index.html;
+    server_name _;
+
+    autoindex on;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

@@ -1,0 +1,6 @@
+---
+- name: Test wazuh-server role
+  hosts: localhost
+  connection: local
+  roles:
+    - wazuh-server

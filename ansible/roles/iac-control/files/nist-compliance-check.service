@@ -1,0 +1,39 @@
+[Unit]
+Description=NIST 800-53 Compliance Check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+EnvironmentFile=/etc/sentinel/compliance.env
+# OPS-787: Refresh apt cache before the compliance check so that recently
+# released security packages appear in `apt-get -s upgrade` output.  The
+# SI-2 patch-currency sub-check uses `apt-get -s upgrade | grep -c
+# '^Inst.*security'` to count pending security updates; a stale cache can
+# make this return 0, which — due to a bash pipefail + grep-c interaction
+# bug — produces the string "0\n0" instead of a clean integer, ultimately
+# embedding a literal newline in a JSON string field and causing jq to
+# fail with "Invalid string: control characters".  Running apt-get update
+# first ensures the cache reflects the latest Ubuntu security advisories.
+# The + prefix runs this step as root (apt-get update needs /var/lib/apt
+# write access); the - prefix ignores failures (offline or rate-limit).
+ExecStartPre=+-/usr/bin/apt-get update -qq
+# COMP-24: Clean up any root-owned mc config before the check runs.
+# If someone manually ran `mc` as root with MC_CONFIG_DIR=/tmp/.mc (e.g.
+# for diagnostics), the resulting config.json is root:600 and the ubuntu
+# service user cannot read or overwrite it.  The `mc alias set` call in
+# nist-compliance-check.sh then fails silently, causing vault-backup and
+# forgejo-backup to appear MISSING even when fresh artifacts exist.
+# This pre-step removes the offending files as root before ubuntu runs,
+# allowing the check's own `mc alias set` to create a fresh ubuntu-owned
+# config on every run.
+ExecStartPre=+-/bin/rm -f /tmp/.mc/config.json /tmp/.mc/config.json.old
+ExecStart=/home/ubuntu/sentinel-repo/scripts/nist-compliance-check.sh
+SuccessExitStatus=1
+ExecStartPost=-/usr/local/bin/upload-compliance-to-minio.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

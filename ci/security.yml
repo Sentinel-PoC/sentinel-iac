@@ -1,0 +1,176 @@
+# ci/security.yml - Security lint and scan jobs for sentinel-iac
+---
+
+yamllint:
+  stage: lint
+  tags:
+    - iac
+  script:
+    - echo "Running yamllint on all YAML files..."
+    - yamllint -c .yamllint.yml -f parsable . | tee yamllint-report.txt
+  artifacts:
+    when: always
+    paths:
+      - yamllint-report.txt
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+ansible-lint:
+  stage: lint
+  tags:
+    - iac
+  script:
+    - echo "Running ansible-lint on playbooks..."
+    - |
+      cd infrastructure
+      ansible-lint -f sarif --nocolor . > ../ansible-lint-report.json 2>../ansible-lint-stderr.txt
+      LINT_RC=$?
+      cd ..
+      if [ -s ansible-lint-stderr.txt ]; then cat ansible-lint-stderr.txt; fi
+      exit $LINT_RC
+  artifacts:
+    when: always
+    paths:
+      - ansible-lint-report.json
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+tflint:
+  stage: lint
+  tags:
+    - iac
+  script:
+    - echo "Running tflint on Terraform configs..."
+    - |
+      for dir in infrastructure/bootstrap infrastructure/managed; do
+        if [ -d "$dir" ]; then
+          echo "Linting $dir..."
+          cd "$dir"
+          tflint --init 2>/dev/null
+          tflint --format json > "../../tflint-$(basename $dir)-report.json" 2>&1
+          cd ../..
+        fi
+      done
+  artifacts:
+    when: always
+    paths:
+      - tflint-*-report.json
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+trivy-iac:
+  stage: security-scan
+  tags:
+    - iac
+  script:
+    - echo "Running Trivy IaC misconfiguration scan..."
+    - trivy fs --scanners misconfig --format json --output trivy-iac-report.json .
+    - echo "Summary:"
+    - trivy fs --scanners misconfig --severity HIGH,CRITICAL .
+  artifacts:
+    when: always
+    paths:
+      - trivy-iac-report.json
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+trivy-config:
+  stage: security-scan
+  tags:
+    - iac
+  script:
+    - echo "Running Trivy configuration scan for IaC misconfigurations..."
+    - trivy config --format json --output trivy-config-report.json .
+    - echo "Summary:"
+    - trivy config --severity HIGH,CRITICAL .
+  artifacts:
+    when: always
+    paths:
+      - trivy-config-report.json
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+gitleaks:
+  stage: security-scan
+  tags:
+    - iac
+  script:
+    - echo "Running gitleaks secret detection..."
+    - gitleaks detect --source . --report-format json --report-path gitleaks-report.json --no-git
+    - echo "No secrets detected."
+  artifacts:
+    when: always
+    paths:
+      - gitleaks-report.json
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+checkov:
+  stage: security-scan
+  tags:
+    - iac
+  script:
+    - echo "Running Checkov comprehensive IaC scan..."
+    - checkov --framework terraform dockerfile kubernetes helm -d . --output json --output-file-path . --hard-fail-on CRITICAL,HIGH
+    - mv results_json.json checkov-report.json 2>/dev/null || echo '{"results":{"failed_checks":[]}}' > checkov-report.json
+    - echo "Summary:"
+    - checkov --framework terraform dockerfile kubernetes helm -d . --compact --quiet || true
+  artifacts:
+    when: always
+    paths:
+      - checkov-report.json
+    expire_in: 30 days
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+shellcheck:
+  stage: security-scan
+  tags:
+    - iac
+  script:
+    - echo "Running ShellCheck on all shell scripts..."
+    - |
+      find . -name "*.sh" ! -path "./.git/*" > shell_files.txt
+      if [ -s shell_files.txt ]; then
+        # Collect all ShellCheck results
+        echo "[]" > shellcheck-report.json
+        for file in $(cat shell_files.txt); do
+          echo "Checking $file..."
+          shellcheck -f json "$file" 2>/dev/null | jq -s 'add // []' >> sc_temp.json || true
+        done
+        # Merge all JSON arrays into one
+        jq -s 'add // []' sc_temp.json > shellcheck-report.json 2>/dev/null || echo '[]' > shellcheck-report.json
+        echo "ShellCheck found $(jq 'length' shellcheck-report.json 2>/dev/null || echo 0) issues"
+      else
+        echo "No shell scripts found"
+        echo '[]' > shellcheck-report.json
+      fi
+  artifacts:
+    when: always
+    paths:
+      - shellcheck-report.json
+    expire_in: 30 days
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'

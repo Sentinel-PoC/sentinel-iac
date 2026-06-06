@@ -1,0 +1,14 @@
+[Unit]
+Description=Forgejo Actions Runner
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/forgejo-runner
+ExecStart=/usr/local/bin/forgejo-runner daemon
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

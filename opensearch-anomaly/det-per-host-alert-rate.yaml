@@ -1,0 +1,62 @@
+# OPS-575: RCF Detector — Per-Host Alert Rate
+# Detects anomalous spikes or drops in Wazuh alert frequency per host.
+# Entity-side baseline: each agent.id gets its own RCF model.
+#
+# Apply via: POST /_plugins/_anomaly_detection/detectors
+# See compliance-vault/runbooks/rcf-tuning.md for deployment procedure.
+
+detector:
+  name: per-host-alert-rate
+  description: >
+    RCF detector for per-host Wazuh alert rate. Detects anomalous spikes or
+    suppression in alert volume per agent. Entity-side baseline per OPS-575 /
+    Plan G' architecture (OPS-555, OPS-563).
+  time_field: "@timestamp"
+
+  # Input: Wazuh alerts index
+  indices:
+    - wazuh-alerts-*
+
+  # Features extracted per detection window
+  features:
+    - feature_name: alert_count
+      feature_enabled: true
+      aggregation_query:
+        alert_count:
+          value_count:
+            field: id
+
+  # Entity config: one RCF model per agent.id
+  category_field:
+    - agent.id
+
+  # Detection window: 10-minute buckets
+  detection_interval:
+    period:
+      interval: 10
+      unit: Minutes
+
+  # RCF shingle size: 8 windows (80 min lookback for pattern context)
+  shingle_size: 8
+
+  # Window delay: allow 1 minute for log ingestion lag
+  window_delay:
+    period:
+      interval: 1
+      unit: Minutes
+
+  # Grade thresholds (initial conservative values; retrain after 14+ days)
+  # See rcf-tuning.md for adjustment procedure
+  detection_date_range: null   # null = use all available data for training
+
+  # Filter: exclude low-severity informational rules to reduce noise
+  filter_query:
+    bool:
+      must_not:
+        - range:
+            rule.level:
+              lt: 5
+
+  # Operational note: start_time is set at deploy time via API.
+  # The detector trains for ~14 days before anomaly scores stabilize.
+  # Monitor via OpenSearch Dashboards > Anomaly Detection > Detector Metrics.

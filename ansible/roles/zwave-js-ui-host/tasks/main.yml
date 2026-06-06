@@ -1,0 +1,229 @@
+---
+# tasks/main.yml — zwave-js-ui-host role (OPS-585)
+#
+# Install zwave-js-ui as a systemd service on a host with a ZWA-2 USB radio.
+# Target: CachyOS/Arch workstation (ansible_connection=local, become=true).
+#
+# Upstream install path: npm install -g zwave-js-ui
+# Source: https://raw.githubusercontent.com/zwave-js/zwave-js-ui/master/docs/getting-started/other-methods.md
+#   "You can install Z-Wave JS UI from NPM: npm install -g zwave-js-ui"
+#   "You MUST configure a custom storage path using an environment variable,
+#    otherwise settings will be lost on updates."
+# Node.js >= 20.19 required (package.json engines field, verified 2026-05-13).
+
+# ── Phase 1: System user + groups ────────────────────────────────────────────
+
+- name: Create zwavejs system group
+  ansible.builtin.group:
+    name: "{{ zwavejs_group }}"
+    system: true
+    state: present
+  tags: [zwave-js-ui, users]
+
+- name: Create zwavejs system user
+  ansible.builtin.user:
+    name: "{{ zwavejs_user }}"
+    group: "{{ zwavejs_group }}"
+    groups:
+      - "{{ zwavejs_serial_group }}"  # Arch serial port group (uucp)
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+    state: present
+  tags: [zwave-js-ui, users]
+
+# ── Phase 2: Node.js (Arch/CachyOS via pacman) ───────────────────────────────
+# Arch rolling repos carry the current Node.js LTS (20.x / 22.x), always >= 20.19.
+# pacman is the correct package manager for CachyOS. NodeSource only supports
+# Debian/Ubuntu/RHEL — not applicable here.
+
+- name: Install Node.js and npm via pacman
+  community.general.pacman:
+    name:
+      - nodejs
+      - npm
+    state: present
+    update_cache: true
+  tags: [zwave-js-ui, nodejs]
+
+- name: Verify Node.js version is >= 20
+  ansible.builtin.command:
+    cmd: node --version
+  register: node_version_result
+  changed_when: false
+  tags: [zwave-js-ui, nodejs, verify]
+
+- name: Assert Node.js major version >= 20
+  ansible.builtin.assert:
+    that:
+      - "(node_version_result.stdout | trim | regex_replace('^v(\\d+)\\..*', '\\1') | int) >= 20"
+    fail_msg: >
+      Node.js version {{ node_version_result.stdout }} is < 20.
+      zwave-js-ui v11.x requires >= 20.19 (package.json engines field).
+      Install a newer Node.js via pacman or NodeSource before running this role.
+  tags: [zwave-js-ui, nodejs, verify]
+
+# ── Phase 3: Install zwave-js-ui globally via npm ────────────────────────────
+
+- name: Install zwave-js-ui globally via npm
+  community.general.npm:
+    name: zwave-js-ui
+    global: true
+    state: present
+  tags: [zwave-js-ui, install]
+  notify: Restart zwave-js-ui
+
+# ── Phase 4: Store directory ─────────────────────────────────────────────────
+
+- name: Create zwave-js-ui store directory
+  ansible.builtin.file:
+    path: "{{ zwavejs_store_dir }}"
+    state: directory
+    owner: "{{ zwavejs_user }}"
+    group: "{{ zwavejs_group }}"
+    mode: "0750"
+  tags: [zwave-js-ui, dirs]
+
+# ── Phase 5: Vault secrets (Z-Wave network keys + auth token) ─────────────────
+# Z-Wave security keys must be backed up. They are generated once (at first
+# install) and stored in Vault. On subsequent runs (idempotent), the existing
+# keys are fetched from Vault and written to the store settings.
+#
+# Vault path: secret/home-assistant/zwave
+# Fields: s0_legacy, s2_unauth, s2_auth, s2_access_control, ui_auth_token
+
+- name: Check if Z-Wave keys exist in Vault
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -field=s0_legacy
+      {{ zwavejs_vault_path }}
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: zwavejs_vault_check
+  failed_when: false
+  changed_when: false
+  no_log: true
+  tags: [zwave-js-ui, vault, keys]
+
+- name: Generate Z-Wave network security keys (32 hex chars each)
+  ansible.builtin.command:
+    cmd: "openssl rand -hex 16"
+  register: zwavejs_key_gen
+  no_log: true
+  changed_when: false
+  when: zwavejs_vault_check.rc != 0
+  loop:
+    - s0_legacy
+    - s2_unauth
+    - s2_auth
+    - s2_access_control
+    - ui_auth_token
+  loop_control:
+    loop_var: key_name
+  tags: [zwave-js-ui, vault, keys]
+
+- name: Build keys dict from generated values
+  ansible.builtin.set_fact:
+    zwavejs_generated_keys:
+      s0_legacy: "{{ (zwavejs_key_gen.results | selectattr('key_name', 'equalto', 's0_legacy') | first).stdout | upper }}"
+      s2_unauth: "{{ (zwavejs_key_gen.results | selectattr('key_name', 'equalto', 's2_unauth') | first).stdout | upper }}"
+      s2_auth: "{{ (zwavejs_key_gen.results | selectattr('key_name', 'equalto', 's2_auth') | first).stdout | upper }}"
+      s2_access_control: "{{ (zwavejs_key_gen.results | selectattr('key_name', 'equalto', 's2_access_control') | first).stdout | upper }}"
+      ui_auth_token: "{{ (zwavejs_key_gen.results | selectattr('key_name', 'equalto', 'ui_auth_token') | first).stdout }}"
+  when: zwavejs_vault_check.rc != 0
+  no_log: true
+  tags: [zwave-js-ui, vault, keys]
+
+- name: Write Z-Wave keys to Vault (first run only)
+  ansible.builtin.shell:
+    cmd: >
+      vault kv put {{ zwavejs_vault_path }}
+      s0_legacy="{{ zwavejs_generated_keys.s0_legacy }}"
+      s2_unauth="{{ zwavejs_generated_keys.s2_unauth }}"
+      s2_auth="{{ zwavejs_generated_keys.s2_auth }}"
+      s2_access_control="{{ zwavejs_generated_keys.s2_access_control }}"
+      ui_auth_token="{{ zwavejs_generated_keys.ui_auth_token }}"
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  when: zwavejs_vault_check.rc != 0
+  no_log: true
+  changed_when: true
+  tags: [zwave-js-ui, vault, keys]
+
+# ── Phase 6: Fetch keys from Vault for EnvironmentFile ───────────────────────
+
+- name: Fetch Z-Wave secrets from Vault
+  ansible.builtin.command:
+    cmd: >
+      vault kv get -format=json {{ zwavejs_vault_path }}
+  environment:
+    VAULT_ADDR: "https://192.168.12.206:8200"
+    VAULT_SKIP_VERIFY: "true"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: zwavejs_vault_secrets_raw
+  changed_when: false
+  no_log: true
+  tags: [zwave-js-ui, vault, env]
+
+- name: Parse Z-Wave secrets
+  ansible.builtin.set_fact:
+    zwavejs_secrets: "{{ (zwavejs_vault_secrets_raw.stdout | from_json).data.data }}"
+  no_log: true
+  tags: [zwave-js-ui, vault, env]
+
+- name: Deploy zwave-js-ui EnvironmentFile (keys + config)
+  ansible.builtin.template:
+    src: zwave-js-ui.env.j2
+    dest: "{{ zwavejs_store_dir }}/.env"
+    owner: "{{ zwavejs_user }}"
+    group: "{{ zwavejs_group }}"
+    mode: "0640"
+  no_log: true
+  tags: [zwave-js-ui, env]
+  notify: Restart zwave-js-ui
+
+# ── Phase 7: systemd unit ─────────────────────────────────────────────────────
+
+- name: Deploy zwave-js-ui systemd unit
+  ansible.builtin.template:
+    src: zwave-js-ui.service.j2
+    dest: /etc/systemd/system/zwave-js-ui.service
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [zwave-js-ui, systemd]
+  notify:
+    - Reload systemd
+    - Restart zwave-js-ui
+
+- name: Enable and start zwave-js-ui service
+  ansible.builtin.systemd:
+    name: zwave-js-ui
+    enabled: true
+    state: started
+    daemon_reload: true
+  tags: [zwave-js-ui, systemd]
+
+# ── Phase 8: Smoke check ──────────────────────────────────────────────────────
+
+- name: Wait for zwave-js-ui WebSocket port to be available (max 30s)
+  ansible.builtin.wait_for:
+    port: "{{ zwavejs_ws_port }}"
+    host: "127.0.0.1"
+    timeout: 30
+    state: started
+  tags: [zwave-js-ui, verify]
+
+- name: Check zwave-js-ui service status
+  # noqa command-instead-of-module — read-only status query; systemd module
+  # manages state but cannot report current active status directly.
+  ansible.builtin.command:
+    cmd: systemctl is-active zwave-js-ui
+  register: zwavejs_service_status
+  changed_when: false
+  failed_when: zwavejs_service_status.stdout != "active"
+  tags: [zwave-js-ui, verify]

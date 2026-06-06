@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: spire_workload_entries
+  author: sentinel-platform
+  description: >-
+    Register SPIRE workload entries for the four sentinel agent roles
+    (sentinel-worker, sentinel-judge, sentinel-planner, sentinel-scribe)
+    against the attested SPIRE Agents. OPS-535 / OPS-351 Phase 4.3.
+  license: BSD-3-Clause
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+
+# Runs on the SPIRE Server host (iac-control). Uses `docker exec` against
+# the spire-server container deployed by the iac-control role.
+dependencies: []

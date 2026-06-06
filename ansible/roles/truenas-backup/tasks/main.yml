@@ -1,0 +1,76 @@
+---
+# TrueNAS backup role — Layer 3 ZFS snapshot for Keycloak postgres iSCSI LUN (OPS-632)
+#
+# This role runs on iac-control (or localhost with API access to TrueNAS .205).
+# It creates a ZFS snapshot of the dataset backing the Keycloak postgres iSCSI LUN,
+# then prunes old snapshots beyond the retention count.
+#
+# Runs on a SEPARATE schedule (04:00 UTC) from the OKD CronJob (03:00 UTC)
+# so Layer 3 always follows after Layers 1+2 are safely in MinIO.
+
+- name: Keycloak/layer3 | generate snapshot timestamp
+  ansible.builtin.set_fact:
+    truenas_snapshot_name: "{{ truenas_snapshot_prefix }}-{{ ansible_date_time.iso8601_basic_short }}"
+
+- name: Keycloak/layer3 | create ZFS snapshot of Keycloak postgres dataset
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/zfs/snapshot"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      dataset: "{{ truenas_keycloak_dataset }}"
+      name: "{{ truenas_snapshot_name }}"
+    validate_certs: false
+    status_code: 200
+  register: snapshot_result
+
+- name: Keycloak/layer3 | log snapshot creation
+  ansible.builtin.debug:
+    msg: >-
+      Created TrueNAS snapshot:
+      {{ truenas_keycloak_dataset }}@{{ truenas_snapshot_name }}
+      (id={{ snapshot_result.json | default('no-id') }})
+
+- name: Keycloak/layer3 | list existing keycloak snapshots for pruning
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/zfs/snapshot?dataset={{ truenas_keycloak_dataset | urlencode }}&extra.retrieve_children=false"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: false
+    status_code: 200
+  register: existing_snapshots
+
+- name: Keycloak/layer3 | build list of backup snapshots sorted by creation time
+  ansible.builtin.set_fact:
+    keycloak_snapshots: >-
+      {{
+        existing_snapshots.json
+        | selectattr('name', 'search', truenas_snapshot_prefix ~ '-')
+        | sort(attribute='properties.createtxg.value', reverse=False)
+        | list
+      }}
+
+- name: Keycloak/layer3 | prune oldest snapshots beyond retention count
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/zfs/snapshot/id/{{ item.id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: false
+    status_code: [200, 204]
+  loop: "{{ keycloak_snapshots[: (keycloak_snapshots | length) - truenas_snapshot_retention_count] }}"
+  when: (keycloak_snapshots | length) > truenas_snapshot_retention_count
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Keycloak/layer3 | report retained snapshot count
+  ansible.builtin.debug:
+    msg: >-
+      TrueNAS snapshot complete.
+      Dataset: {{ truenas_keycloak_dataset }}
+      New snapshot: {{ truenas_snapshot_name }}
+      Retained: {{ [keycloak_snapshots | length, truenas_snapshot_retention_count] | min }} snapshots

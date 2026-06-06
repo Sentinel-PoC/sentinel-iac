@@ -1,0 +1,19 @@
+---
+# host_vars/208pc001/main.yml — OPS-585 home automation
+# Workstation (operator's primary desktop, CachyOS / Arch Linux, 192.168.12.55).
+# Connection model: ansible_connection=local (sshd intentionally inactive).
+# This file adds zwave-js-ui role configuration to the existing workstation host.
+#
+# Do NOT add the common role here (see playbooks/workstation.yml comment —
+# common role is intentionally excluded from this host).
+
+# ── zwave-js-ui-host role (OPS-585) ──────────────────────────────────────────
+# ZWA-2 (Z-Wave 800) is physically connected to this workstation.
+# Stable USB path per operator inventory (never use /dev/ttyACM*).
+zwavejs_serial_port: "/dev/serial/by-id/usb-Nabu_Casa_ZWA-2_80B54EE62650-if00"
+zwavejs_store_dir: "/var/lib/zwave-js-ui"
+zwavejs_ws_port: 3000
+zwavejs_ui_port: 8091
+
+# HA LXC IP — for README documentation only; firewall is operator-managed.
+ha_lxc_ip: "192.168.12.81"

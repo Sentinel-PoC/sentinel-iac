@@ -1,0 +1,93 @@
+#!/bin/bash
+# OPS-711: gluetun-watcher — cascade restart bound containers on gluetun restart.
+#
+# Problem: when gluetun restarts, containers using network_mode: service:gluetun lose
+# their shared network namespace. docker restart is NOT sufficient — the container was
+# created with a resolved container:ID reference. docker compose up -d --force-recreate
+# IS required to adopt gluetun's new network namespace.
+#
+# Strategy:
+#   1. Startup recovery: if gluetun is already healthy but bound containers are unhealthy
+#      (or missing), force-recreate them. Handles missed events during watcher downtime.
+#   2. Event loop: watch for docker "start" events on gluetun. When one fires, wait for
+#      gluetun to become healthy, then force-recreate the bound services.
+#
+# Managed by: gluetun-watcher.service (deployed by Ansible OPS-711)
+# Do NOT run manually while gluetun-watcher.service is active.
+
+set -euo pipefail
+
+COMPOSE_DIR="{{ seedbox_dir }}"
+GLUETUN_CONTROL_PORT="{{ seedbox_gluetun_control_port }}"
+BOUND_SERVICES="qbittorrent prowlarr cross-seed"
+HEALTHY_TIMEOUT=120
+
+log() {
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] gluetun-watcher: $*"
+}
+
+gluetun_is_healthy() {
+  wget -qO- "http://localhost:${GLUETUN_CONTROL_PORT}/v1/publicip/ip" 2>/dev/null \
+    | grep -q '"public_ip"'
+}
+
+wait_for_gluetun_healthy() {
+  local waited=0
+  while [ "${waited}" -lt "${HEALTHY_TIMEOUT}" ]; do
+    if gluetun_is_healthy; then
+      return 0
+    fi
+    sleep 5
+    waited=$((waited + 5))
+  done
+  return 1
+}
+
+force_recreate_bound() {
+  log "force-recreating bound services: ${BOUND_SERVICES}"
+  cd "${COMPOSE_DIR}"
+  # shellcheck disable=SC2086
+  docker compose up -d --force-recreate ${BOUND_SERVICES}
+  log "force-recreate complete"
+}
+
+# --- Startup recovery ---
+# If gluetun is running and healthy but any bound container is unhealthy or absent,
+# force-recreate now. This handles the case where gluetun restarted while this
+# service was down and the event was missed.
+log "starting (OPS-711 cascade recovery)"
+if gluetun_is_healthy; then
+  log "gluetun healthy at startup — checking bound container health"
+  NEEDS_RECREATE=0
+  for svc in ${BOUND_SERVICES}; do
+    STATUS=$(docker inspect --format '{% raw %}{{.State.Health.Status}}{% endraw %}' "${svc}" 2>/dev/null || echo "missing")
+    if [ "${STATUS}" = "unhealthy" ] || [ "${STATUS}" = "missing" ]; then
+      log "service ${svc} is ${STATUS} — will force-recreate"
+      NEEDS_RECREATE=1
+    fi
+  done
+  if [ "${NEEDS_RECREATE}" -eq 1 ]; then
+    force_recreate_bound
+  else
+    log "all bound services healthy at startup — no action needed"
+  fi
+else
+  log "gluetun not healthy at startup — skipping startup recovery check"
+fi
+
+# --- Event loop ---
+log "listening for gluetun start events..."
+docker events \
+  --filter "container=gluetun" \
+  --filter "event=start" \
+  --format '{% raw %}{{.ID}}{% endraw %}' | while read -r container_id; do
+  log "gluetun start event (container ID: ${container_id:0:12})"
+  log "waiting for gluetun to become healthy (timeout: ${HEALTHY_TIMEOUT}s)..."
+  if wait_for_gluetun_healthy; then
+    log "gluetun is healthy — proceeding with force-recreate"
+    force_recreate_bound
+  else
+    log "ERROR: gluetun did not become healthy within ${HEALTHY_TIMEOUT}s"
+    log "Manual intervention required: docker compose up -d --force-recreate ${BOUND_SERVICES}"
+  fi
+done

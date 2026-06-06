@@ -1,0 +1,80 @@
+---
+# OPS-670: ns2 — secondary nameserver host_vars
+# Host: 192.168.12.254 (LXC on pve3, VMID 305 — provisioned in OPS-673 Phase 2)
+
+# ---------------------------------------------------------------------------
+# LXC provisioning vars (OPS-673 Phase 2)
+# Used by powerdns-provision.yml Plays 2+3 (via hostvars['ns2']) when
+# targeting pve3 to create the LXC.
+# ---------------------------------------------------------------------------
+pdns_lxc_id: 305
+pdns_lxc_name: "ns2"
+pdns_lxc_pve_host: "pve3"            # PVE cluster node that hosts this LXC
+pdns_lxc_ip: "192.168.12.254"        # Same as ansible_host
+pdns_lxc_cidr: "24"
+pdns_lxc_gateway: "192.168.12.1"
+pdns_lxc_nameserver: "192.168.12.210"  # iac-control dnsmasq — bootstrap DNS
+pdns_lxc_searchdomain: "208.haist.farm"
+pdns_lxc_cores: 1
+pdns_lxc_memory: 512                 # MiB
+pdns_lxc_swap: 256                   # MiB
+pdns_lxc_rootfs_size: "8"            # GB
+pdns_lxc_bridge: "vmbr0"
+pdns_lxc_template_storage: "local"
+pdns_lxc_rootfs_storage: "local-lvm"
+pdns_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+pdns_lxc_unprivileged: 1             # PowerDNS doesn't need privileged mode
+pdns_lxc_onboot: 1                   # Auto-start on PVE boot (nameserver must survive reboots)
+pdns_lxc_startup: "order=1,up=30"    # Boot early (before application-tier LXCs)
+
+# ---------------------------------------------------------------------------
+# common role vars — firewall
+# Default firewall_allowed_ports (common) only opens 22/TCP.
+# ns2 must accept DNS on both TCP and UDP port 53.
+# firewall_allowed_ports adds 53/TCP via the ufw loop (proto: tcp hardcoded).
+# firewall_extra_rules adds 53/UDP explicitly.
+# ---------------------------------------------------------------------------
+firewall_allowed_ports:
+  - 22     # SSH
+  - 53     # DNS TCP (zone transfers, large responses)
+
+firewall_extra_rules:
+  - port: "53"
+    proto: udp
+    comment: "DNS UDP (standard queries)"
+  # Auth port for NOTIFY from ns1 and AXFR initiation. Restricted to ns1 IP only.
+  - port: "5300"
+    proto: tcp
+    from_ip: "192.168.12.253"
+    comment: "Auth AXFR/NOTIFY TCP from ns1 only"
+  - port: "5300"
+    proto: udp
+    from_ip: "192.168.12.253"
+    comment: "Auth NOTIFY UDP from ns1 only"
+
+# ---------------------------------------------------------------------------
+# powerdns-auth role vars
+# ---------------------------------------------------------------------------
+pdns_auth_ns_mode: "secondary"
+# Auth must listen on the LXC IP to receive NOTIFY from ns1 (at ns2:5300).
+# Also needed so ns2 can be queried directly if debugging is needed.
+pdns_auth_listen_address: "127.0.0.1 192.168.12.254"
+# ns2 accepts AXFR from ns1 (primary)
+pdns_auth_peer_ns_ip: "192.168.12.253"
+
+# pdns_auth_listen_address: 127.0.0.1  (role default — auth on loopback only)
+# pdns_auth_listen_port: 5300           (role default)
+# pdns_auth_api_key_vault_path:         (role default — secret/infrastructure/powerdns-api-key)
+# pdns_auth_tsig_key_name:              (role default — haist-axfr-key)
+
+# ---------------------------------------------------------------------------
+# powerdns-recursor role vars
+# ---------------------------------------------------------------------------
+# Recursor listens on ns2's LXC IP (port 53) for inbound queries
+pdns_rec_svc_listen_addresses:
+  - "192.168.12.254"
+
+# pdns_rec_svc_auth_address: 127.0.0.1  (role default)
+# pdns_rec_svc_auth_port: 5300           (role default)
+# pdns_rec_svc_upstream_resolvers:       (role default — 1.1.1.1, 9.9.9.9)
+# pdns_rec_svc_internal_zones:          (role default — haist.farm, 208.haist.farm)

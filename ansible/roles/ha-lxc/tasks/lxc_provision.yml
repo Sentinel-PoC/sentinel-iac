@@ -1,0 +1,136 @@
+---
+# lxc_provision.yml — Phase 1: Create home-assistant LXC on pve4
+# OPS-585 — mirrors lxc_provision.yml pattern from OPS-564 pve4-nvidia-gpu role
+
+# ── Download Ubuntu 24.04 LXC template ────────────────────────────────────────
+
+- name: Update Proxmox template list (pveam update)
+  ansible.builtin.command:
+    cmd: pveam update
+  register: pveam_update
+  changed_when: "'No updates available' not in pveam_update.stdout"
+  failed_when: false
+  tags: [ha-lxc, lxc, template]
+
+- name: Check if Ubuntu 24.04 template is already downloaded
+  ansible.builtin.command:
+    cmd: "pveam list {{ ha_lxc_template_storage }}"
+  register: pveam_list
+  changed_when: false
+  tags: [ha-lxc, lxc, template]
+
+- name: Download Ubuntu 24.04 LXC template if not present
+  ansible.builtin.command:
+    cmd: >
+      pveam download {{ ha_lxc_template_storage }}
+      {{ ha_lxc_ostemplate }}
+  when: ha_lxc_ostemplate not in pveam_list.stdout
+  register: pveam_download
+  changed_when: true
+  async: 300
+  poll: 10
+  tags: [ha-lxc, lxc, template]
+
+# ── Create home-assistant LXC (idempotent) ────────────────────────────────────
+
+- name: Check if home-assistant LXC already exists
+  ansible.builtin.command:
+    cmd: "pct status {{ ha_lxc_id }}"
+  register: lxc_exists
+  failed_when: false
+  changed_when: false
+  tags: [ha-lxc, lxc, create]
+
+- name: Create home-assistant LXC container
+  # Privileged LXC (unprivileged=0) is REQUIRED for Docker-in-LXC.
+  # features=nesting=1 enables Linux namespace nesting needed by Docker.
+  # --onboot and --startup ensure HA auto-starts after a PVE host reboot.
+  # Backflow from 2026-05-14: pve4 rebooted and LXC 201 stayed stopped
+  # because the Proxmox config lacked onboot; operator had to pct start manually.
+  # mountoptions=discard (OPS-1010): enables TRIM/UNMAP passthrough to LVM-thin
+  # so guest fstrim calls reclaim blocks in the thinpool.
+  ansible.builtin.command:
+    cmd: >
+      pct create {{ ha_lxc_id }}
+      {{ ha_lxc_template_storage }}:vztmpl/{{ ha_lxc_ostemplate }}
+      --hostname {{ ha_lxc_name }}
+      --cores {{ ha_lxc_cores }}
+      --memory {{ ha_lxc_memory }}
+      --swap {{ ha_lxc_swap }}
+      --rootfs {{ ha_lxc_rootfs_storage }}:{{ ha_lxc_rootfs_size }},mountoptions={{ ha_lxc_rootfs_mountoptions }}
+      --net0 name=eth0,bridge={{ ha_lxc_bridge }},ip={{ ha_lxc_ip }}/{{ ha_lxc_cidr }},gw={{ ha_lxc_gateway }}
+      --nameserver {{ ha_lxc_nameserver }}
+      --searchdomain {{ ha_lxc_searchdomain }}
+      --unprivileged {{ ha_lxc_unprivileged }}
+      --features nesting=1
+      --onboot {{ ha_lxc_onboot }}
+      --startup {{ ha_lxc_startup }}
+      --start 0
+  when: lxc_exists.rc != 0
+  changed_when: lxc_exists.rc != 0
+  tags: [ha-lxc, lxc, create]
+
+- name: Ensure onboot and startup are set on existing LXC (idempotent)
+  # pct config does not return exit code 1 on mismatch; we always run pct set
+  # and rely on Proxmox to be idempotent (no-op when values already match).
+  # This covers LXCs that were created before this task existed (e.g., LXC 201
+  # provisioned without onboot, then fixed out-of-band on 2026-05-14).
+  ansible.builtin.command:
+    cmd: >
+      pct set {{ ha_lxc_id }}
+      -onboot {{ ha_lxc_onboot }}
+      -startup {{ ha_lxc_startup }}
+  changed_when: false
+  tags: [ha-lxc, lxc, create]
+
+- name: Ensure rootfs mountoptions=discard is set on existing LXC (idempotent)
+  # OPS-1010: Apply discard mountoption to LXC 201 (ha-lxc) which predates this task.
+  # Mirrors OPS-1009 pattern from powerdns-lxc (provision.yml).
+  # pct config shows merged pending+live state; grep checks both.
+  # pct set writes a [pve:pending] delta — active after next container restart.
+  ansible.builtin.shell: |
+    current=$(pct config {{ ha_lxc_id }} | grep '^rootfs:' | grep -o 'mountoptions=[^ ,]*' || true)
+    if echo "$current" | grep -q 'discard'; then
+      echo "already_set"
+    else
+      pct set {{ ha_lxc_id }} \
+        -rootfs $(pct config {{ ha_lxc_id }} | grep '^rootfs:' | sed 's/rootfs: //' | sed 's/,mountoptions=[^ ,]*//'| tr -d '\n'),mountoptions={{ ha_lxc_rootfs_mountoptions }}
+      echo "applied"
+    fi
+  register: _discard_result
+  changed_when: "'applied' in _discard_result.stdout"
+  tags: [ha-lxc, lxc, create, discard]
+
+# ── Start the LXC ─────────────────────────────────────────────────────────────
+
+- name: Ensure home-assistant LXC is running
+  ansible.builtin.command:
+    cmd: "pct status {{ ha_lxc_id }}"
+  register: lxc_status
+  changed_when: false
+  tags: [ha-lxc, lxc, start]
+
+- name: Start home-assistant LXC if not running
+  ansible.builtin.command:
+    cmd: "pct start {{ ha_lxc_id }}"
+  when: "'running' not in lxc_status.stdout"
+  changed_when: "'running' not in lxc_status.stdout"
+  tags: [ha-lxc, lxc, start]
+
+- name: Wait for LXC networking to be ready (max 60s)
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- ip route show default"
+  register: lxc_network_ready
+  until: lxc_network_ready.rc == 0 and lxc_network_ready.stdout != ""
+  retries: 12
+  delay: 5
+  changed_when: false
+  tags: [ha-lxc, lxc, start]
+
+# ── Create config directory inside LXC ───────────────────────────────────────
+
+- name: Create HA config directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}"
+  changed_when: false
+  tags: [ha-lxc, lxc, config]

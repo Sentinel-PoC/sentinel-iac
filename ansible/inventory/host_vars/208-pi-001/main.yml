@@ -1,0 +1,20 @@
+---
+# OPS-507 / OPS-514: host-specific overrides for 208-pi-001.
+# Raspberry Pi (aarch64), Ubuntu 24.04 LTS, bare-metal physical host.
+
+# OPS-514: Pi's actual boot artifacts (cmdline.txt, kernel*.img, config.txt,
+# firmware blobs) live in /boot/firmware/ — a vfat partition mounted there
+# by the Pi imager / cloud-init. /boot itself is mostly an empty mount
+# point. Without this override, AIDE would watch the empty tree and Pi
+# would lose file-integrity coverage for its actual boot files.
+aide_boot_path: "/boot/firmware"
+
+# ── zigbee2mqtt-host role (OPS-585) ──────────────────────────────────────────
+# ZBT-1 (Nabu Casa Home Assistant Connect ZBT-1, Zigbee) is physically connected
+# to this Pi. Stable USB path per operator inventory (never use /dev/ttyACM*).
+zigbee2mqtt_serial_port: "/dev/serial/by-id/usb-Nabu_Casa_Home_Assistant_Connect_ZBT-1_f42334c96a39ef11809559f454516304-if00-port0"
+zigbee2mqtt_dir: /opt/zigbee2mqtt
+zigbee2mqtt_data_dir: /var/lib/zigbee2mqtt
+zigbee2mqtt_frontend_port: 8080
+mqtt_port: 1883
+ha_lxc_ip: "192.168.12.81"

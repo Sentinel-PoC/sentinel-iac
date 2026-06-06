@@ -1,0 +1,102 @@
+---
+# verify.yml — Phase 4: Acceptance-criteria verification
+# OPS-586 Section B
+#
+# Checks that Wyoming Whisper + Piper containers are running and their ports
+# are reachable from inside the ai-tier1 LXC.
+#
+# NOTE: Full end-to-end voice verification (phone → HA Assist → STT → intent →
+#   TTS → response) requires operator setup in HA UI and is post-merge operator scope.
+#   See role README.md for the E2E verification recipe.
+
+# ── Container status ──────────────────────────────────────────────────────────
+
+- name: Wait for wyoming-whisper container to start (model download may take time)
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      docker inspect --format '{{ "{{" }}.State.Status{{ "}}" }}' wyoming-whisper
+  register: whisper_status
+  until: whisper_status.stdout.strip() == 'running'
+  retries: "{{ wyoming_startup_retries }}"
+  delay: "{{ wyoming_startup_delay }}"
+  changed_when: false
+  failed_when: whisper_status.rc != 0
+  tags: [whisper-piper, verify]
+
+- name: Wait for wyoming-piper container to start
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      docker inspect --format '{{ "{{" }}.State.Status{{ "}}" }}' wyoming-piper
+  register: piper_status
+  until: piper_status.stdout.strip() == 'running'
+  retries: "{{ wyoming_startup_retries }}"
+  delay: "{{ wyoming_startup_delay }}"
+  changed_when: false
+  failed_when: piper_status.rc != 0
+  tags: [whisper-piper, verify]
+
+# ── Port reachability ─────────────────────────────────────────────────────────
+
+- name: Verify Whisper Wyoming port is listening {{ wyoming_whisper_port }}
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      nc -z -w5 127.0.0.1 {{ wyoming_whisper_port }}
+  register: whisper_port_check
+  retries: 6
+  delay: 10
+  until: whisper_port_check.rc == 0
+  changed_when: false
+  failed_when: whisper_port_check.rc != 0
+  tags: [whisper-piper, verify]
+
+- name: Verify Piper Wyoming port is listening {{ wyoming_piper_port }}
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      nc -z -w5 127.0.0.1 {{ wyoming_piper_port }}
+  register: piper_port_check
+  retries: 6
+  delay: 10
+  until: piper_port_check.rc == 0
+  changed_when: false
+  failed_when: piper_port_check.rc != 0
+  tags: [whisper-piper, verify]
+
+# ── GPU check for Whisper ─────────────────────────────────────────────────────
+# Verify the Whisper container can see the NVIDIA GPU via the nvidia runtime.
+# 'nvidia-smi' inside the container should return without error if GPU is accessible.
+
+- name: Verify NVIDIA GPU is accessible inside wyoming-whisper container
+  ansible.builtin.command:
+    cmd: >
+      pct exec {{ whisper_piper_lxc_id }} --
+      docker exec wyoming-whisper nvidia-smi --query-gpu=name --format=csv,noheader
+  register: whisper_gpu_check
+  changed_when: false
+  failed_when: whisper_gpu_check.rc != 0
+  tags: [whisper-piper, verify, gpu]
+
+# ── Print verification summary ────────────────────────────────────────────────
+
+- name: Print Wyoming verification summary
+  ansible.builtin.debug:
+    msg:
+      - "=== Wyoming Voice Services Verification ==="
+      - "wyoming-whisper: {{ whisper_status.stdout.strip() }}"
+      - "wyoming-piper:   {{ piper_status.stdout.strip() }}"
+      - "Whisper port {{ wyoming_whisper_port }}: OPEN"
+      - "Piper port {{ wyoming_piper_port }}: OPEN"
+      - "Whisper GPU: {{ whisper_gpu_check.stdout.strip() }}"
+      - ""
+      - "HA Operator steps (see README.md for full instructions):"
+      - "  1. Settings > Devices & Services > Add Integration > Wyoming Protocol"
+      - "     - Whisper STT: host={{ whisper_piper_lxc_ip }} port={{ wyoming_whisper_port }}"
+      - "     - Piper TTS:   host={{ whisper_piper_lxc_ip }} port={{ wyoming_piper_port }}"
+      - "  2. Settings > Voice Assistants > Add Pipeline"
+      - "     - STT: Wyoming (Whisper); TTS: Wyoming (Piper)"
+      - "  3. Optional: Add Ollama conversation agent"
+      - "     - host={{ ollama_host }} port={{ ollama_port }} model={{ ollama_conversation_model }}"
+  tags: [whisper-piper, verify]

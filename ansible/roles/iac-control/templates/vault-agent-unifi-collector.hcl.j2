@@ -1,0 +1,47 @@
+# {{ ansible_managed }}
+# [OPS-169] vault-agent configuration for unifi-collector AppRole auto-auth.
+#
+# vault-agent authenticates to Vault using AppRole credentials stored on disk
+# and writes a short-lived, auto-renewed service token to
+# {{ vault_agent_unifi_token_path }}.
+#
+# unifi-collector.service reads VAULT_TOKEN from that path at each invocation
+# (timer fires every 5 minutes).  vault-agent handles token renewal before
+# expiry — no operator intervention required.
+#
+# AppRole role:   sentinel-unifi-collector
+# Policy:         sentinel-unifi-collector (read-only on secret/data/unifi)
+# Token TTL:      24h (renewable up to 87600h max)
+# Credentials:    /etc/sentinel-unifi/role-id  (mode 0640, root:ubuntu)
+#                 /etc/sentinel-unifi/secret-id (mode 0640, root:ubuntu)
+# Token sink:     {{ vault_agent_unifi_token_path }} (mode 0600, ubuntu:ubuntu)
+#
+# To rotate secret_id:
+#   1. Delete secret/sentinel-unifi/approle-credentials from Vault KV
+#   2. Re-run: ansible-playbook ... --tags unifi-approle
+#   This generates a new secret_id, stores it in KV, and rewrites the disk file.
+#   vault-agent will re-authenticate on its next cycle.
+
+pid_file = "/run/vault-agent-unifi-collector.pid"
+
+vault {
+  address     = "{{ unifi_vault_addr }}"
+  tls_skip_verify = {{ 'true' if (unifi_vault_skip_verify | string | lower in ['true', 'yes', '1']) else 'false' }}
+}
+
+auto_auth {
+  method "approle" {
+    config = {
+      role_id_file_path                = "/etc/sentinel-unifi/role-id"
+      secret_id_file_path              = "/etc/sentinel-unifi/secret-id"
+      remove_secret_id_file_after_reading = false
+    }
+  }
+
+  sink "file" {
+    config = {
+      path = "{{ vault_agent_unifi_token_path }}"
+      mode = 0600
+    }
+  }
+}

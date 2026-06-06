@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Vault TLS Certificate Rotation Check
+
+[Timer]
+OnCalendar=Mon *-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

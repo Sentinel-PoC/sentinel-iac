@@ -1,0 +1,37 @@
+---
+# OPS-533 / OPS-351 Phase 4.2b — workstation (operator desktop, CachyOS).
+# Drives the `workstation` role; first concern is SPIRE Agent install + first
+# attestation against the Server on iac-control. Other workstation-managed
+# services (none yet) will fold into this role's tasks/ directory as future
+# phases land.
+#
+# IMPORTANT: this playbook does NOT apply the `common` role. The workstation
+# is operator-managed at the OS level (package updates, kernel, base config)
+# via interactive pacman/yay and is intentionally NOT in the platform's
+# auditd / Wazuh-agent / firewall-managed fleet. Adding `common` here would
+# silently expand 4.2b's scope onto a host the operator maintains by hand.
+# If a future phase decides to bring the workstation under common-role
+# governance, that's its own issue with its own Plane track.
+#
+# Connection model: hosts.ini [workstation] sets connection=local + host=127.0.0.1
+# because sshd is intentionally inactive on the workstation. The playbook runs
+# from within the workstation's own shell (typical: a tmux pane on the desktop).
+
+- name: Configure workstation services (OPS-351 Phase 4.2b)
+  hosts: workstation
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: workstation
+      tags: [workstation, spire-agent]
+    # OPS-545 / OPS-351 Phase 4.5 — workload-side provisioning for SPIRE-
+    # attested agent identities. Creates sentinel-<role> users + sentinel-
+    # agents group, configures sudoers. The spire-agent CLI host binary is
+    # already installed on the workstation by the workstation role
+    # (OPS-533), so the binary-install task no-ops here. NOTE: end-to-end
+    # JWT-SVID test on workstation is blocked by OPS-546 (workstation
+    # SPIRE Agent crash loop) — user/group/sudoers provisioning still applies
+    # cleanly because none of those depend on SPIRE Agent being healthy.
+    - role: sentinel-agent-workload
+      tags: [sentinel-agent-workload, spire-workload]

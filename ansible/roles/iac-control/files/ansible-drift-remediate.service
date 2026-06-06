@@ -1,0 +1,11 @@
+[Unit]
+Description=Ansible Drift Auto-Remediation (common role only)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ansible-drift-remediate.sh
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+TimeoutStartSec=1800
+Environment="ANSIBLE_HOST_KEY_CHECKING=False"

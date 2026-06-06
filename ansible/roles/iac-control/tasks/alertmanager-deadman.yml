@@ -1,0 +1,142 @@
+---
+# alertmanager-deadman.yml — OPS-915: External Alertmanager dead-man switch
+#
+# Deploys a systemd timer on iac-control that polls Alertmanager via
+# oc port-forward and sends a Telegram alert if the Watchdog heartbeat
+# goes silent for more than alertmanager_deadman_threshold_seconds (12h).
+#
+# This runs OUT OF CLUSTER — survives full OKD monitoring stack failure.
+# Vault path: secret/telegram/alertmanager-bot (field: bot_token)
+
+# ── Vault secret fetch ────────────────────────────────────────────────────────
+
+- name: Fetch Telegram bot token from Vault (requires VAULT_ADDR and VAULT_TOKEN in env)
+  ansible.builtin.command:
+    cmd: vault kv get -field=bot_token secret/telegram/alertmanager-bot
+  environment:
+    VAULT_ADDR: "{{ lookup('env', 'VAULT_ADDR') | default('https://vault.208.haist.farm', true) }}"
+    VAULT_TOKEN: "{{ lookup('env', 'VAULT_TOKEN') }}"
+  register: _vault_telegram_token_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+  when: alertmanager_deadman_telegram_token == 'CHANGE_ME'
+  delegate_to: localhost
+  become: false
+  tags:
+    - alertmanager-deadman
+
+- name: Set Telegram bot token from Vault lookup result
+  ansible.builtin.set_fact:
+    alertmanager_deadman_telegram_token: "{{ _vault_telegram_token_result.stdout | trim }}"
+  when:
+    - alertmanager_deadman_telegram_token == 'CHANGE_ME'
+    - _vault_telegram_token_result is defined
+    - _vault_telegram_token_result.rc | default(1) == 0
+    - _vault_telegram_token_result.stdout | default('') | length > 0
+  no_log: true
+  tags:
+    - alertmanager-deadman
+
+- name: Fail if Telegram bot token is still unset after Vault lookup
+  ansible.builtin.fail:
+    msg: >
+      alertmanager_deadman_telegram_token is CHANGE_ME and Vault lookup failed.
+      Set VAULT_TOKEN env var or pass -e alertmanager_deadman_telegram_token=<value>.
+      Retrieve with: vault kv get -field=bot_token secret/telegram/alertmanager-bot
+  when:
+    - alertmanager_deadman_telegram_token == 'CHANGE_ME'
+  tags:
+    - alertmanager-deadman
+
+# ── State directory ───────────────────────────────────────────────────────────
+
+- name: Create alertmanager-deadman state directory
+  ansible.builtin.file:
+    path: "{{ alertmanager_deadman_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags:
+    - alertmanager-deadman
+
+# ── Credentials env file ──────────────────────────────────────────────────────
+
+- name: Deploy alertmanager-deadman credentials env file
+  ansible.builtin.template:
+    src: alertmanager-deadman.env.j2
+    dest: /etc/sentinel/alertmanager-deadman.env
+    owner: root
+    group: root
+    mode: "0600"
+  tags:
+    - alertmanager-deadman
+
+# ── Poller script ─────────────────────────────────────────────────────────────
+
+- name: Deploy alertmanager-deadman poller script
+  ansible.builtin.template:
+    src: alertmanager-deadman.sh.j2
+    dest: /usr/local/bin/alertmanager-deadman.sh
+    owner: root
+    group: root
+    mode: "0755"
+  tags:
+    - alertmanager-deadman
+
+# ── Systemd service unit ──────────────────────────────────────────────────────
+
+- name: Deploy alertmanager-deadman systemd service
+  ansible.builtin.copy:
+    src: alertmanager-deadman.service
+    dest: /etc/systemd/system/alertmanager-deadman.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Daemon-reload
+  tags:
+    - alertmanager-deadman
+
+# ── Systemd timer unit ────────────────────────────────────────────────────────
+
+- name: Deploy alertmanager-deadman systemd timer
+  ansible.builtin.copy:
+    src: alertmanager-deadman.timer
+    dest: /etc/systemd/system/alertmanager-deadman.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart alertmanager-deadman-timer
+  tags:
+    - alertmanager-deadman
+
+# ── Enable and start timer ────────────────────────────────────────────────────
+
+- name: Enable and start alertmanager-deadman timer
+  ansible.builtin.systemd:
+    name: alertmanager-deadman.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags:
+    - alertmanager-deadman
+
+# ── Verify timer is active ────────────────────────────────────────────────────
+
+- name: Verify alertmanager-deadman.timer is active
+  ansible.builtin.command:
+    cmd: systemctl is-active alertmanager-deadman.timer
+  register: _deadman_timer_status
+  changed_when: false
+  failed_when: _deadman_timer_status.rc != 0
+  tags:
+    - alertmanager-deadman
+
+- name: Show alertmanager-deadman timer status
+  ansible.builtin.debug:
+    msg: "alertmanager-deadman.timer: {{ _deadman_timer_status.stdout }}"
+  tags:
+    - alertmanager-deadman

@@ -1,0 +1,103 @@
+---
+# OPS-670: powerdns-recursor defaults
+#
+# Variables prefixed pdns_rec_svc_* are sentinel-iac-specific.
+# The Galaxy role (PowerDNS.pdns_recursor) vars (pdns_rec_*) are set
+# via include_role vars in tasks/main.yml, computed from our defaults here.
+# Read this file top-to-bottom — configuration intent is explicit here.
+
+# ---------------------------------------------------------------------------
+# Network binding
+# The recursor listens on the LXC's main interface IP on port 53.
+# MUST be set in host_vars for each nameserver host.
+# Example: ["192.168.12.253"]
+# ---------------------------------------------------------------------------
+pdns_rec_svc_listen_addresses:
+  - "127.0.0.1"   # safe default for syntax-check; override in host_vars
+
+# Allow queries from these CIDRs (default: RFC1918 + localhost).
+# For a LAN-facing resolver, include the management subnet.
+pdns_rec_svc_allow_from:
+  - "127.0.0.0/8"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+
+# ---------------------------------------------------------------------------
+# Local auth forwarding
+# Recursor forwards haist.farm to the local PowerDNS auth server.
+# The auth binds to 127.0.0.1:pdns_auth_listen_port (default 5300).
+# ---------------------------------------------------------------------------
+pdns_rec_svc_auth_address: "127.0.0.1"
+pdns_rec_svc_auth_port: 5300
+
+# Internal zone(s) to forward to local auth.
+pdns_rec_svc_internal_zones:
+  - "haist.farm"
+  - "208.haist.farm"
+
+# ---------------------------------------------------------------------------
+# External recursion
+# Forward all non-internal queries to upstream resolvers.
+# Using forward_zones_recurse with zone "." to forward-all.
+# ---------------------------------------------------------------------------
+pdns_rec_svc_upstream_resolvers:
+  - "1.1.1.1"
+  - "9.9.9.9"
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+# Log DNS queries at debug level (false = production; true = troubleshooting)
+pdns_rec_svc_log_queries: false
+
+# dont-query: Addresses the recursor will NOT send queries to.
+#
+# OPS-676 Root Cause #1: PowerDNS recursor 4.9.x default dont-query list includes
+# 127.0.0.0/8. From pdns docs: "if a forward zone defines a server which falls
+# into one of these ranges, queries for that zone will result in a SERVFAIL."
+# Our forward-zones target 127.0.0.1:pdns_rec_svc_auth_port (local auth), so the
+# default dont-query blocks all internal zone lookups -> SERVFAIL.
+#
+# Fix: set dont-query explicitly, omitting 127.0.0.0/8.
+# All other defaults (RFC1918, link-local, reserved) are retained for loop-safety.
+# External recursion goes to 1.1.1.1/9.9.9.9 (public IPs, not affected).
+# 127.0.0.0/8 is intentionally ABSENT from this list.
+pdns_rec_svc_dont_query:
+  - "10.0.0.0/8"
+  - "100.64.0.0/10"
+  - "169.254.0.0/16"
+  - "192.168.0.0/16"
+  - "172.16.0.0/12"
+  - "::1/128"
+  - "fc00::/7"
+  - "fe80::/10"
+  - "0.0.0.0/8"
+  - "192.0.0.0/24"
+  - "192.0.2.0/24"
+  - "198.51.100.0/24"
+  - "203.0.113.0/24"
+  - "240.0.0.0/4"
+  - "::/96"
+  - "::ffff:0:0/96"
+  - "100::/64"
+  - "2001:db8::/32"
+  - "0.0.0.0"
+  - "::"
+
+# DNSSEC validation mode: off/process-no-validate/process/validate
+#
+# OPS-676 Root Cause #2: Default DNSSEC validation marks haist.farm responses
+# as "Bogus - No RRSIG" because the zone has no DNSSEC signatures. The recursor
+# then returns SERVFAIL to the client despite getting a valid response from auth.
+# haist.farm is a private/internal zone; DNSSEC signing is not in scope.
+# Set off to disable validation entirely for this internal resolver.
+pdns_rec_svc_dnssec: "off"
+
+# ---------------------------------------------------------------------------
+# Galaxy role pass-through
+# Set to a repo dict to use PowerDNS official repo (5.x) instead of Ubuntu.
+# Ubuntu 24.04 ships pdns-recursor 4.9.x which uses traditional key=value config.
+# Phase 1 default: Ubuntu OS package.
+# ---------------------------------------------------------------------------
+pdns_rec_svc_install_repo: ""

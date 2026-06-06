@@ -1,0 +1,268 @@
+---
+# OPS-370: Weekly NIST compliance heartbeat
+#
+# Context: all 22 workflows fire only on push/PR/dispatch. Compliance score
+# can regress via config drift on hosts (Wazuh rule removed, Vault policy
+# changed) without any file change to trigger a workflow. This scheduled
+# workflow runs the nist-compliance-check.sh script on the iac runner
+# (which IS iac-control, 192.168.12.210) weekly and posts the score as a
+# Plane observation comment so the operator has a persistent audit trail.
+#
+# Runner: iac — the iac runner is iac-control; the script runs locally,
+# no SSH hop needed. /etc/sentinel/compliance.env provides WAZUH_PASS.
+#
+# Cron: 0 3 * * 1 — Monday 03:00 UTC (after nightly trivy/gitleaks sweeps
+# at 02:00/02:30 UTC). Offset from :00 per acceptance criteria.
+#
+# Non-blocking (continue-on-error: true): compliance score regression should
+# alert, not break the sweep pipeline. Failures are visible via Plane comment
+# and workflow artifact; hard-gating deferred to operator decision.
+#
+# NIST controls: CA-7 (Continuous Monitoring), CA-2 (Control Assessments),
+#                RA-5 (Vulnerability Monitoring), CM-3(2) (Test/Validate Changes).
+name: compliance-heartbeat
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"  # OPS-370: weekly Monday 03:00 UTC
+  workflow_dispatch:  # break-glass + ad-hoc verification
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false  # scheduled heartbeats must not cancel each other
+
+jobs:
+  compliance-heartbeat:
+    runs-on: iac
+    # Non-blocking: compliance check can fail due to transient Wazuh/OKD API
+    # unavailability. The Plane comment and artifact capture the state; hard-fail
+    # added once transient-failure baseline is established.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run NIST 800-53 compliance check
+        id: compliance_run
+        env:
+          # WAZUH_PASS sourced from /etc/sentinel/compliance.env on iac-control.
+          # VAULT_TOKEN loaded from runner environment (iac-control has a long-lived
+          # token in /etc/sentinel/compliance.env; sourced below).
+          SENTINEL_REPO_ROOT: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          DATE=$(date +%Y-%m-%d)
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "timestamp=${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
+
+          # Source compliance env (WAZUH_PASS, VAULT_TOKEN, etc.)
+          # /etc/sentinel/compliance.env is provisioned on iac-control by the
+          # iac-control Ansible role. Required for nist-compliance-check.sh.
+          if [ -f /etc/sentinel/compliance.env ]; then
+            # shellcheck source=/dev/null
+            set +u; source /etc/sentinel/compliance.env; set -u
+            echo "Sourced /etc/sentinel/compliance.env"
+          else
+            echo "::warning::/etc/sentinel/compliance.env not found — WAZUH_PASS may be unset"
+          fi
+
+          # Run the compliance check. exit-code 1 from the script means failures
+          # detected but we still want the report artifact and Plane comment.
+          # Use /bin/bash explicitly; script has #!/bin/bash shebang.
+          /bin/bash scripts/nist-compliance-check.sh 2>&1 | tee compliance-run.log \
+            || SCRIPT_EXIT=$?
+
+          # Locate the report written by the script
+          JSON_REPORT="/var/log/sentinel/nist-compliance-${DATE}.json"
+          if [ ! -f "$JSON_REPORT" ]; then
+            echo "::error::Compliance JSON report not found at ${JSON_REPORT}"
+            echo "has_report=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Extract summary fields using jq
+          PASS=$(jq '.summary.pass // 0' "$JSON_REPORT")
+          FAIL=$(jq '.summary.fail // 0' "$JSON_REPORT")
+          WARN=$(jq '.summary.warn // 0' "$JSON_REPORT")
+          TOTAL=$(jq '.summary.total // 0' "$JSON_REPORT")
+          PASS_RATE=$(jq '.summary.pass_rate // 0' "$JSON_REPORT")
+          OVERALL=$(jq -r '.overall_status // "UNKNOWN"' "$JSON_REPORT")
+          CONTROLS_CHECKED=$(jq '.summary.coverage.controls_checked // 0' "$JSON_REPORT")
+          COVERAGE_PCT=$(jq '.summary.coverage.coverage_pct // 0' "$JSON_REPORT")
+
+          echo "Compliance check complete:"
+          echo "  Status:   ${OVERALL}"
+          echo "  Passed:   ${PASS}/${TOTAL} (${PASS_RATE}%)"
+          echo "  Failed:   ${FAIL}"
+          echo "  Warnings: ${WARN}"
+          echo "  Controls: ${CONTROLS_CHECKED} (${COVERAGE_PCT}% coverage)"
+
+          # Copy report to workspace for artifact upload
+          cp "$JSON_REPORT" compliance-report-latest.json
+
+          # Write outputs for downstream steps
+          echo "has_report=true" >> "$GITHUB_OUTPUT"
+          echo "overall=${OVERALL}" >> "$GITHUB_OUTPUT"
+          echo "pass=${PASS}" >> "$GITHUB_OUTPUT"
+          echo "fail=${FAIL}" >> "$GITHUB_OUTPUT"
+          echo "warn=${WARN}" >> "$GITHUB_OUTPUT"
+          echo "total=${TOTAL}" >> "$GITHUB_OUTPUT"
+          echo "pass_rate=${PASS_RATE}" >> "$GITHUB_OUTPUT"
+          echo "controls_checked=${CONTROLS_CHECKED}" >> "$GITHUB_OUTPUT"
+          echo "coverage_pct=${COVERAGE_PCT}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v3
+        if: always() && hashFiles('compliance-report-latest.json') != ''
+        with:
+          name: compliance-heartbeat-${{ github.run_id }}
+          path: |
+            compliance-report-latest.json
+            compliance-run.log
+          retention-days: 90
+
+      - name: Post score to Plane as observation comment
+        # Post compliance score to Plane OPS project so each weekly run leaves
+        # a persistent audit trail in the issue tracker (CA-7, AU-12 evidence).
+        # Non-blocking: Plane API unavailability should not fail the sweep.
+        if: steps.compliance_run.outputs.has_report == 'true'
+        env:
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+          OVERALL: ${{ steps.compliance_run.outputs.overall }}
+          PASS: ${{ steps.compliance_run.outputs.pass }}
+          FAIL: ${{ steps.compliance_run.outputs.fail }}
+          WARN: ${{ steps.compliance_run.outputs.warn }}
+          TOTAL: ${{ steps.compliance_run.outputs.total }}
+          PASS_RATE: ${{ steps.compliance_run.outputs.pass_rate }}
+          CONTROLS_CHECKED: ${{ steps.compliance_run.outputs.controls_checked }}
+          COVERAGE_PCT: ${{ steps.compliance_run.outputs.coverage_pct }}
+          TIMESTAMP: ${{ steps.compliance_run.outputs.timestamp }}
+          RUN_URL: https://forgejo.208.haist.farm/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +e  # non-blocking: Plane post failure must not abort the workflow
+          WORKSPACE="haists-it-consulting"
+          PROJECT_ID="223c0b66-4255-406e-932f-3b50c0e93543"
+          PLANE_BASE="https://plane.208.haist.farm/api/v1"
+
+          # Build comment HTML
+          # OPS-1177: replaced python3 heredoc (column-0 content broke yamllint) with
+          # jq -n which stays within the YAML block scalar. Behaviorally equivalent:
+          # jq -n produces a JSON-encoded string (same as json.dumps in the original).
+          STATUS_COLOR=$([ "${OVERALL}" = "PASS" ] && echo "green" || \
+                         { [ "${OVERALL}" = "WARN" ] && echo "orange" || echo "red"; })
+          COMMENT_HTML=$(jq -n \
+            --arg ts "${TIMESTAMP}" \
+            --arg overall "${OVERALL}" \
+            --arg pass_c "${PASS}" \
+            --arg fail_c "${FAIL}" \
+            --arg warn_c "${WARN}" \
+            --arg total_c "${TOTAL}" \
+            --arg rate "${PASS_RATE}" \
+            --arg controls "${CONTROLS_CHECKED}" \
+            --arg coverage "${COVERAGE_PCT}" \
+            --arg url "${RUN_URL}" \
+            --arg color "${STATUS_COLOR}" \
+            '"<p><strong>OBSERVATION</strong> -- Weekly NIST 800-53 compliance heartbeat</p>\n<p><strong>Timestamp:</strong> \($ts)</p>\n<p><strong>Status:</strong> <span style=\"color:\($color)\"><strong>\($overall)</strong></span></p>\n<ul>\n<li>Passed: \($pass_c)/\($total_c) (\($rate)%)</li>\n<li>Failed: \($fail_c)</li>\n<li>Warnings: \($warn_c)</li>\n<li>Controls checked: \($controls) (\($coverage)% coverage)</li>\n</ul>\n<p><a href=\"\($url)\">CI run artifacts</a> (report retained 90 days)</p>\n<p><em>Generated by compliance-heartbeat.yml (OPS-370) -- runs weekly Monday 03:00 UTC</em></p>"'
+          )
+
+          # Post comment to OPS-370 issue
+          ISSUE_ID="557dfee7-8795-461e-aac4-d722b377617e"
+          HTTP_CODE=$(curl -sk -w "%{http_code}" -o /tmp/plane_response.json \
+            --request POST \
+            --header "x-api-key: ${PLANE_API_KEY}" \
+            --header "Content-Type: application/json" \
+            --data "{\"comment_html\": ${COMMENT_HTML}}" \
+            "${PLANE_BASE}/workspaces/${WORKSPACE}/projects/${PROJECT_ID}/issues/${ISSUE_ID}/comments/")
+
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "::warning::Plane comment post failed (HTTP ${HTTP_CODE})"
+            cat /tmp/plane_response.json 2>/dev/null || true
+          else
+            echo "Compliance score posted to Plane OPS-370 (HTTP ${HTTP_CODE})"
+          fi
+
+      - name: Upload to DefectDojo
+        # Upload compliance findings on schedule/dispatch. Non-blocking.
+        # DefectDojo does not have a native NIST compliance check scan type;
+        # use Generic Findings Import. The JSON is reformatted inline.
+        if: >-
+          steps.compliance_run.outputs.has_report == 'true' &&
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          set +e  # non-blocking
+          # Transform compliance JSON to DefectDojo Generic Findings Import schema
+          # OPS-1177: replaced python3 heredoc (column-0 content broke yamllint) with
+          # python3 -c indented block; python3 strips common leading whitespace from -c.
+          python3 -c "
+          import json, sys, os, datetime
+
+          try:
+              with open('compliance-report-latest.json') as f:
+                  data = json.load(f)
+          except Exception as e:
+              print(f\"Could not read compliance report: {e}\")
+              sys.exit(0)
+
+          today = datetime.date.today().isoformat()
+          findings = []
+          for check in data.get('checks', []):
+              status = check.get('status', 'UNKNOWN')
+              if status == 'PASS':
+                  continue  # only upload failures and warnings
+              severity = 'High' if status == 'FAIL' else 'Medium'
+              findings.append({
+                  'title': f\"[{check.get('control', 'UNKNOWN')}] {check.get('check', 'Unnamed check')}\",
+                  'date': today,
+                  'severity': severity,
+                  'description': check.get('detail', ''),
+                  'file_path': 'nist-compliance-check.sh',
+                  'static_finding': True,
+                  'dynamic_finding': False,
+                  'vuln_id_from_tool': check.get('control', 'NIST'),
+              })
+
+          if not findings:
+              print(\"No FAIL/WARN findings — skipping DefectDojo upload\")
+              sys.exit(0)
+
+          output = {'findings': findings}
+          with open('compliance-findings.json', 'w') as f:
+              json.dump(output, f)
+          print(f\"Prepared {len(findings)} compliance finding(s) for DefectDojo upload\")
+          "
+
+          if [ ! -f compliance-findings.json ]; then
+            echo "No findings file produced — skipping upload"
+            exit 0
+          fi
+          COUNT=$(python3 -c "import json; d=json.load(open('compliance-findings.json')); print(len(d.get('findings',[])))" 2>/dev/null || echo 0)
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "No FAIL/WARN findings to upload"
+            exit 0
+          fi
+          echo "Uploading ${COUNT} compliance finding(s) to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=Generic Findings Import" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Scheduled Sweeps — Compliance" \
+            -F "test_title=NIST 800-53 Compliance Heartbeat" \
+            -F "auto_create_context=true" \
+            -F "file=@compliance-findings.json" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" \
+            -F "minimum_severity=Medium" \
+            -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=nist,compliance,heartbeat,scheduled" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+          echo "DefectDojo upload HTTP status: ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "::warning::DefectDojo upload failed (HTTP ${HTTP_CODE}): ${BODY}"
+          else
+            echo "Compliance findings uploaded to DefectDojo (product: Sentinel IaC)"
+          fi

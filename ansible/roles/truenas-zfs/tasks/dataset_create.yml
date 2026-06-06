@@ -1,0 +1,50 @@
+---
+# truenas-zfs | dataset_create — idempotent FILESYSTEM dataset creation (OPS-947)
+#
+# Creates a filesystem dataset if it does not already exist.
+# Will not modify an existing dataset.
+# Requires truenas_zfs_dataset_name to be set.
+
+- name: truenas-zfs/dataset_create | validate dataset name is set
+  ansible.builtin.assert:
+    that:
+      - truenas_zfs_dataset_name | length > 0
+    fail_msg: "truenas_zfs_dataset_name must be set (e.g. 'DATA/new-dataset')"
+
+- name: truenas-zfs/dataset_create | check if dataset already exists
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/pool/dataset/id/{{ truenas_zfs_dataset_name | urlencode }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: [200, 404]
+  register: truenas_zfs_dataset_check
+  changed_when: false
+
+- name: truenas-zfs/dataset_create | create dataset (skip if exists)
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/pool/dataset"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ truenas_zfs_dataset_name }}"
+      type: "FILESYSTEM"
+      compression: "{{ truenas_zfs_dataset_compression }}"
+      atime: "{{ truenas_zfs_dataset_atime }}"
+      comments: "{{ truenas_zfs_dataset_comments }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  when: truenas_zfs_dataset_check.status == 404
+  register: truenas_zfs_dataset_create_result
+
+- name: truenas-zfs/dataset_create | report outcome
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Created dataset: ' + truenas_zfs_dataset_name
+         if truenas_zfs_dataset_check.status == 404
+         else 'Dataset already exists (no-op): ' + truenas_zfs_dataset_name }}
+  changed_when: false

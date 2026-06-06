@@ -1,0 +1,50 @@
+---
+# forgejo-runner-pool.yml — OPS-582
+# Provision 6 CI runner LXCs on pve4-alienware (192.168.12.60)
+#
+# UPSTREAM REFERENCES:
+#   Forgejo Actions admin guide:  https://forgejo.org/docs/next/admin/actions/
+#   Runner registration docs:     https://forgejo.org/docs/next/admin/actions/registration/
+#   forgejo-runner source:        https://code.forgejo.org/forgejo/runner
+#
+# DO NOT auto-apply — PVE bedrock change per CLAUDE.md §8.
+# Operator authorization required before running live apply.
+#
+# DRY RUN (safe):
+#   VAULT_TOKEN=$(cat ~/.vault-token) VAULT_ADDR=https://192.168.12.206:8200 \
+#     VAULT_SKIP_VERIFY=true ansible-playbook --check --diff \
+#     -i ansible/inventory/hosts.yml --limit pve4-alienware \
+#     ansible/playbooks/forgejo-runner-pool.yml
+#
+# LIVE APPLY (operator authorization required):
+#   VAULT_TOKEN=$(cat ~/.vault-token) VAULT_ADDR=https://192.168.12.206:8200 \
+#     VAULT_SKIP_VERIFY=true ansible-playbook \
+#     -i ansible/inventory/hosts.yml --limit pve4-alienware \
+#     ansible/playbooks/forgejo-runner-pool.yml
+#
+# REGISTER ONLY (after operator adds tokens to Vault):
+#   ... ansible-playbook ... --tags runner-register
+#
+# VERIFY ONLY:
+#   ... ansible-playbook ... --tags verify
+
+- name: Provision forgejo CI runner pool on pve4-alienware
+  hosts: pve4-alienware
+  # ansible_user=root (host_vars) — become=false; tasks run directly as root
+  become: false
+  gather_facts: false
+
+  pre_tasks:
+    - name: Confirm target is pve4-alienware
+      ansible.builtin.debug:
+        msg: >
+          Provisioning forgejo-runner-pool on {{ inventory_hostname }}
+          ({{ ansible_host }}) — OPS-582.
+          Resources: 6x LXC (2 CPU / 4GB RAM each, VMIDs 210-215).
+          DO NOT run this without operator authorization.
+      tags: [always]
+
+  roles:
+    - role: forgejo-runner-pool
+      tags:
+        - forgejo-runner-pool

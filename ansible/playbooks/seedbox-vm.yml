@@ -1,0 +1,28 @@
+---
+- name: Configure seedbox VM
+  hosts: seedbox
+  become: true
+  vars:
+    docker_users: [koiakoia]
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker-host
+      tags: [docker]
+    - role: seedbox
+      tags: [seedbox]
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Tag-gated; --tags jit-ssh-trust runs only this.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh
+  post_tasks:
+    - name: Reminder - VPN credentials required
+      ansible.builtin.debug:
+        msg: >
+          Seedbox is configured but VPN credentials (WireGuard private key)
+          must be set in /opt/seedbox/docker-compose.yml or via extra-vars.
+      when: wireguard_private_key | default('') == ""
+      tags: [seedbox]

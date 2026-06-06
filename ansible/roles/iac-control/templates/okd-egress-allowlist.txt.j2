@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# Squid domain allowlist for OKD egress traffic
+# NIST SC-7: Boundary Protection - domain-based filtering
+{% for domain in squid_allowed_domains %}
+{{ domain }}
+{% endfor %}

@@ -1,0 +1,54 @@
+---
+# pve4-nvidia-gpu — task entrypoint
+# OPS-564: NVIDIA RTX 3060 LXC cgroup-passthrough for Plan G' Tier-1 inference
+#
+# Execution order (critical — dependencies between phases):
+#   1. host_driver.yml   — Install NVIDIA driver on PVE host; load kernel modules
+#   2. lxc_provision.yml — Download template; create ai-tier1 LXC; write cgroup config
+#   3. ollama_install.yml — Install Ollama inside LXC; configure; pull models
+#   4. verify.yml        — Acceptance-criteria checks (nvidia-smi, /api/ps, latency)
+#
+# All phases are gated on nvidia_lxc_enabled (default: true).
+# Set nvidia_lxc_enabled: false in host_vars to skip this role entirely.
+
+- name: Bail out if nvidia_lxc_enabled is false
+  ansible.builtin.meta: end_play
+  when: not (nvidia_lxc_enabled | bool)
+
+# ── Phase 1: NVIDIA host driver ────────────────────────────────────────────────
+- name: Install NVIDIA host driver and container toolkit
+  ansible.builtin.import_tasks: host_driver.yml
+  tags:
+    - nvidia-driver
+    - host
+
+# ── Phase 1b: nvidia-persistenced + boot-time modprobe warmup ─────────────────
+# Fixes post-reboot GPU race: /dev/nvidia* nodes must exist before LXC autostart.
+# See tasks/persistenced.yml for full problem description and fix rationale.
+- name: Install nvidia-persistenced and warmup boot unit
+  ansible.builtin.import_tasks: persistenced.yml
+  tags:
+    - nvidia-driver
+    - persistenced
+    - host
+
+# ── Phase 2: ai-tier1 LXC provisioning ─────────────────────────────────────────
+- name: Provision ai-tier1 LXC with cgroup-passthrough
+  ansible.builtin.import_tasks: lxc_provision.yml
+  tags:
+    - lxc
+    - provision
+
+# ── Phase 3: Ollama install + model pull inside LXC ────────────────────────────
+- name: Install Ollama and pull inference models
+  ansible.builtin.import_tasks: ollama_install.yml
+  tags:
+    - ollama
+    - inference
+
+# ── Phase 4: Acceptance-criteria verification ──────────────────────────────────
+- name: Verify acceptance criteria (nvidia-smi, size_vram, latency)
+  ansible.builtin.import_tasks: verify.yml
+  tags:
+    - verify
+    - acceptance

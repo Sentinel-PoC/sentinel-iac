@@ -1,0 +1,178 @@
+---
+# lxc_provision.yml — Phase 2: Create ai-tier1 LXC + cgroup-passthrough config
+# OPS-564
+#
+# All pct commands run directly on pve4-alienware (Ansible target = PVE host root).
+# cgroup2 device allow rules and bind mounts are written to /etc/pve/lxc/<vmid>.conf
+# using blockinfile to ensure idempotency alongside Proxmox's own conf management.
+
+# ── Download Ubuntu 24.04 LXC template ────────────────────────────────────────
+
+- name: Update Proxmox template list (pveam update)
+  ansible.builtin.command:
+    cmd: pveam update
+  register: pveam_update
+  changed_when: "'No updates available' not in pveam_update.stdout"
+  failed_when: false
+  tags:
+    - lxc
+    - template
+
+- name: Check if Ubuntu 24.04 template is already downloaded
+  ansible.builtin.command:
+    cmd: "pveam list {{ ai_tier1_lxc_template_storage }}"
+  register: pveam_list
+  changed_when: false
+  tags:
+    - lxc
+    - template
+
+- name: Download Ubuntu 24.04 template if not present
+  ansible.builtin.command:
+    cmd: >
+      pveam download {{ ai_tier1_lxc_template_storage }}
+      {{ ai_tier1_lxc_ostemplate }}
+  when: ai_tier1_lxc_ostemplate not in pveam_list.stdout
+  register: pveam_download
+  changed_when: true   # Only runs when template absent (when: gate enforces this)
+  async: 300
+  poll: 10
+  tags:
+    - lxc
+    - template
+
+# ── Create ai-tier1 LXC (idempotent) ──────────────────────────────────────────
+
+- name: Check if ai-tier1 LXC already exists
+  ansible.builtin.command:
+    cmd: "pct status {{ ai_tier1_lxc_id }}"
+  register: lxc_exists
+  failed_when: false
+  changed_when: false
+  tags:
+    - lxc
+    - create
+
+- name: Create ai-tier1 LXC container
+  ansible.builtin.command:
+    cmd: >
+      pct create {{ ai_tier1_lxc_id }}
+      {{ ai_tier1_lxc_template_storage }}:vztmpl/{{ ai_tier1_lxc_ostemplate }}
+      --hostname {{ ai_tier1_lxc_name }}
+      --cores {{ ai_tier1_lxc_cores }}
+      --memory {{ ai_tier1_lxc_memory }}
+      --swap {{ ai_tier1_lxc_swap }}
+      --rootfs {{ ai_tier1_lxc_rootfs }}
+      --net0 name=eth0,bridge={{ ai_tier1_lxc_bridge }},ip={{ ai_tier1_lxc_ip }}/{{ ai_tier1_lxc_cidr }},gw={{ ai_tier1_lxc_gateway }}
+      --nameserver {{ ai_tier1_lxc_nameserver }}
+      --searchdomain {{ ai_tier1_lxc_searchdomain }}
+      --unprivileged {{ ai_tier1_lxc_unprivileged }}
+      --start 0
+  when: lxc_exists.rc != 0
+  changed_when: lxc_exists.rc != 0   # LXC did not exist → this is a real change
+  tags:
+    - lxc
+    - create
+
+# ── cgroup2 device passthrough configuration ───────────────────────────────────
+# Proxmox stores LXC config at /etc/pve/lxc/<vmid>.conf
+# We use blockinfile so our entries survive pct set operations (Proxmox
+# only rewrites its own managed sections; our block with BEGIN/END markers
+# is preserved as "extra config" at the bottom of the file).
+#
+# Device allow entries:
+#   c 195:* rwm  → /dev/nvidia0, /dev/nvidiactl, /dev/nvidia-modeset (stable major)
+#   c <uvm>:* rwm → /dev/nvidia-uvm, /dev/nvidia-uvm-tools (dynamic major)
+#
+# Mount entries bind the device nodes into the container filesystem.
+# optional=true: LXC still starts if a device node doesn't exist (e.g., nvidia-uvm
+# not yet loaded). create=file: create the target path in the LXC rootfs if absent.
+#
+# PREREQUISITE: nvidia_uvm_major_fact must be set (from host_driver.yml).
+
+- name: Assert nvidia_uvm_major_fact is available
+  ansible.builtin.assert:
+    that:
+      - nvidia_uvm_major_fact is defined
+      - nvidia_uvm_major_fact | string | length > 0
+    fail_msg: >
+      nvidia_uvm_major_fact is not set. host_driver.yml must run before lxc_provision.yml.
+      Check that the nvidia-uvm module loaded and /proc/devices has a 'nvidia-uvm' entry.
+  tags:
+    - lxc
+    - cgroup
+
+- name: Write NVIDIA cgroup2 + device-mount config to LXC conf
+  ansible.builtin.blockinfile:
+    path: "/etc/pve/lxc/{{ ai_tier1_lxc_id }}.conf"
+    marker: "# {mark} OPS-564 NVIDIA CGROUP-PASSTHROUGH — managed by Ansible pve4-nvidia-gpu"
+    block: |
+      # NVIDIA cgroup2 device allow rules
+      # c 195 = nvidia char devices (nvidia0, nvidiactl, nvidia-modeset)
+      lxc.cgroup2.devices.allow: c {{ nvidia_cgroup_major_nvidia }}:* rwm
+      # c {{ nvidia_uvm_major_fact }} = nvidia-uvm (dynamic; detected from /proc/devices at role run time)
+      lxc.cgroup2.devices.allow: c {{ nvidia_uvm_major_fact }}:* rwm
+      # Device bind mounts into LXC rootfs
+      lxc.mount.entry: /dev/nvidia0 dev/nvidia0 none bind,optional,create=file
+      lxc.mount.entry: /dev/nvidiactl dev/nvidiactl none bind,optional,create=file
+      lxc.mount.entry: /dev/nvidia-uvm dev/nvidia-uvm none bind,optional,create=file
+      lxc.mount.entry: /dev/nvidia-uvm-tools dev/nvidia-uvm-tools none bind,optional,create=file
+    state: present
+    create: false
+  tags:
+    - lxc
+    - cgroup
+
+# ── Start the LXC ─────────────────────────────────────────────────────────────
+
+- name: Ensure ai-tier1 LXC is running
+  ansible.builtin.command:
+    cmd: "pct status {{ ai_tier1_lxc_id }}"
+  register: lxc_status
+  changed_when: false
+  tags:
+    - lxc
+    - start
+
+- name: Start ai-tier1 LXC if not running
+  ansible.builtin.command:
+    cmd: "pct start {{ ai_tier1_lxc_id }}"
+  when: "'running' not in lxc_status.stdout"
+  changed_when: "'running' not in lxc_status.stdout"   # Only changes state if LXC was stopped
+  tags:
+    - lxc
+    - start
+
+- name: Wait for ai-tier1 LXC networking to be ready (30s max)
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- ip route show default"
+  register: lxc_network_ready
+  until: lxc_network_ready.rc == 0 and lxc_network_ready.stdout != ""
+  retries: 6
+  delay: 5
+  changed_when: false
+  tags:
+    - lxc
+    - start
+
+# ── Validate cgroup device access from inside LXC ─────────────────────────────
+
+- name: Verify /dev/nvidia0 is accessible inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- test -e /dev/nvidia0"
+  register: nvidia_dev_in_lxc
+  changed_when: false
+  failed_when: nvidia_dev_in_lxc.rc != 0
+  tags:
+    - lxc
+    - verify
+
+- name: Verify /dev/nvidiactl is accessible inside ai-tier1 LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- test -e /dev/nvidiactl"
+  register: nvidiactl_dev_in_lxc
+  changed_when: false
+  failed_when: nvidiactl_dev_in_lxc.rc != 0
+  tags:
+    - lxc
+    - verify

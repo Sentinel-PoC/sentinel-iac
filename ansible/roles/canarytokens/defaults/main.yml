@@ -1,0 +1,71 @@
+---
+# Canarytokens self-hosted deployment
+# Upstream: https://github.com/thinkst/canarytokens-docker
+# OPS-572 — Plan G'/02 passive-beacon deception layer
+
+canarytokens_dir: "/opt/canarytokens"
+canarytokens_data_dir: "/opt/canarytokens/data"
+canarytokens_log_dir: "/opt/canarytokens/logs"
+
+# Docker Hub image — thinkst/canarytokens (Docker Hub, NOT GHCR)
+# Available tags: latest, master, sha-<commit>. No semver tags exist upstream.
+# Pin to a commit-SHA tag for reproducible deploys; update deliberately.
+# Source: https://hub.docker.com/r/thinkst/canarytokens/tags
+canarytokens_image_tag: "sha-c18517c"
+
+# Nginx image (pre-built on Docker Hub; separate image from main app)
+canarytokens_nginx_image: "thinkst/canarytokens_nginx:latest"
+
+# Redis image (pinned to match upstream common-services.yml)
+canarytokens_redis_image: "redis:7.0.10"
+
+# Ports — override defaults for non-privileged / loopback-only binding
+# Frontend admin UI (proxied by Pangolin → Keycloak; not exposed directly)
+canarytokens_frontend_port: 8082
+# Nginx HTTP listener (bind to LAN IP; Pangolin proxies through)
+canarytokens_nginx_http_port: 80
+# Switchboard DNS canary receiver (avoid collision with systemd-resolved on :53)
+canarytokens_switchboard_dns_port: 5354     # upstream default; map to host :5354
+# Switchboard HTTP canary receiver
+canarytokens_switchboard_http_port: 8083
+
+# Domain configuration — CANARY_* prefix matches upstream env var names
+# Source: frontend.env.dist and switchboard.env.dist
+CANARY_PUBLIC_IP: "192.168.12.210"
+CANARY_DOMAINS: "canary.208.haist.farm"
+CANARY_NXDOMAINS: "nx.canary.208.haist.farm"
+CANARY_PUBLIC_DOMAIN: "canary.208.haist.farm"   # used by switchboard
+
+# WireGuard key seed (random; used by switchboard for WG canary tokens)
+# Generate: python3 -c "import secrets; print(secrets.token_hex(32))"
+# Store in Vault at {{ canarytokens_vault_path }}:wg_private_key_seed
+CANARY_WG_PRIVATE_KEY_SEED: ""
+
+# SMTP alert settings (optional; comment out to disable)
+# Uncomment and populate CANARY_SMTP_* in switchboard.env.j2 if needed
+canarytokens_smtp_enabled: false
+canarytokens_smtp_username: ""
+canarytokens_smtp_password: ""
+canarytokens_smtp_server: ""
+canarytokens_smtp_port: "587"
+canarytokens_alert_email_from: ""
+
+# Admin UI domain (proxied through Pangolin with Keycloak ForwardAuth)
+canarytokens_admin_domain: "canarytokens.208.haist.farm"
+
+# Webhook alert receiver (local Python micro-service that writes JSON alerts)
+# Wazuh monitors the JSON log file via localfile stanza
+canarytokens_webhook_port: 9001
+canarytokens_alert_log: "{{ canarytokens_log_dir }}/alerts.json"
+
+# Keycloak / Pangolin access control for admin UI
+canarytokens_keycloak_realm: "sentinel"
+canarytokens_keycloak_client_id: "canarytokens"
+canarytokens_keycloak_discovery_url: "https://auth.haist.farm/realms/sentinel/.well-known/openid-configuration"
+
+# Certbot / Let's Encrypt settings (used by certbot.env; not required for Pangolin-proxied deploys)
+canarytokens_certbot_domain: "canarytokens.208.haist.farm"
+canarytokens_certbot_email: "admin@haist.farm"
+
+# Vault path for secrets
+canarytokens_vault_path: "secret/canarytokens"

@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: spire_oidc_discovery_provider
+  author: sentinel-platform
+  description: >-
+    Deploy the SPIFFE oidc-discovery-provider sidecar to expose SPIRE Server's
+    JWKS over HTTPS at https://spire-oidc.208.haist.farm:8443. Bridges SPIRE's
+    gRPC-only bundle API to OIDC-standard /.well-known/openid-configuration
+    + /keys so Vault's JWT auth backend can consume it.
+    OPS-537 / OPS-351 Phase 4.4a.
+  license: BSD-3-Clause
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions: [jammy, noble]
+
+# Runs on the SPIRE Server host (iac-control). Depends on the iac-control
+# role having already deployed spire-server (the container whose API socket
+# this provider reads via shared bind-mount).
+dependencies: []

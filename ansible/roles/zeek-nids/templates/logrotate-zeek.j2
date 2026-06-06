@@ -1,0 +1,19 @@
+# /etc/logrotate.d/zeek — deployed by ansible/roles/zeek-nids (OPS-568)
+# Rotates archived Zeek logs under {{ zeek_log_dir }}/.
+# Note: zeekctl manages {{ zeek_log_dir }}/current/ (active logs) via its own cron.
+# This logrotate only covers archived logs that zeekctl has already rotated out.
+
+{{ zeek_log_dir }}/*/*.log {
+    daily
+    rotate {{ zeek_log_retention_days }}
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        # No-op: zeekctl handles its own log management.
+        # This rotate is purely for archival cleanup.
+        true
+    endscript
+}

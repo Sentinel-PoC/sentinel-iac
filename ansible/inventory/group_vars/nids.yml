@@ -1,0 +1,52 @@
+---
+# group_vars/nids.yml — OPS-568 + OPS-569
+# Variables for hosts in the [nids] Ansible inventory group.
+# Applied to all NIDS hosts (Zeek + Suricata co-location per OPS-568/OPS-569 architecture).
+# Override per-host in host_vars/<hostname>/ as needed.
+#
+# NIST SI-4: Information System Monitoring
+# Zeek provides full-flow + protocol-level visibility with JA3/JA4 TLS fingerprinting.
+# Suricata provides signature-based IDS alongside Zeek (see OPS-569).
+
+# --- Shared ---
+# Wazuh manager address (shared by Zeek and Suricata forwarder config)
+wazuh_manager_ip: "192.168.12.100"
+
+# --- Zeek (OPS-568) ---
+# Capture interface receiving port-mirror/SPAN traffic (OPS-567)
+# Override per host in host_vars/<hostname>/zeek.yml for hosts with non-standard
+# interface naming. This default targets the SPAN/mirror VLAN port (see OPS-567).
+zeek_capture_interface: "eth1"
+
+# Log retention
+zeek_log_retention_days: 7
+
+# JA3/JA4
+zeek_enable_ja3: true
+zeek_enable_ja4: true
+
+# JSON output (required for Wazuh)
+zeek_json_logs: true
+
+# zeekctl mail (disabled for automation)
+zeekctl_mail_to: ""
+
+# --- Suricata (OPS-569) ---
+# Capture interface receiving port-mirror/SPAN traffic (OPS-567)
+# This MUST match the interface configured in OPS-567 (UDM port-mirror VLAN).
+# Override in host_vars when host has a non-standard interface name.
+suricata_capture_interface: "eth1"
+
+# Suricata PCAP rotation parameters
+suricata_pcap_file_max_size: "1gb"
+suricata_pcap_file_max_files: 10
+
+# Wazuh integration — enable eve.json forwarding
+suricata_wazuh_localfile_enabled: true
+
+# suricata-update refresh cadence
+suricata_update_timer_oncalendar: "daily"
+suricata_update_timer_randomized_delay: "1h"
+
+# AF_PACKET thread count — start conservative, tune post-deployment
+suricata_af_packet_threads: 1

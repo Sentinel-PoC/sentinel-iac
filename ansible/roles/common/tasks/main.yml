@@ -1,0 +1,311 @@
+---
+# OPS-238: Remove stale Trivy apt source before any apt_update so this task
+# file (and every downstream role that does `update_cache: true`) doesn't
+# fail on the rotated aquasecurity signing key. Trivy is installed as a
+# binary via scripts/binaries (see binary_tools in iac-control role). The
+# apt repo is leftover drift from an earlier manual install; nothing in
+# GitOps depends on it. `state: absent` with file paths is idempotent and
+# safe on hosts that never had the repo.
+- name: Remove stale Trivy apt source and keyring (OPS-238)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/trivy.list
+    - /usr/share/keyrings/trivy.gpg
+  tags:
+    - common
+    - apt
+
+# OPS-514: gate on virtualization type. qemu-guest-agent only has a peer
+# in QEMU/KVM environments (where the hypervisor's QGA channel receives
+# guest events). Installing on bare-metal hosts (e.g., Raspberry Pi at
+# 208-pi-001) wastes disk + leaves a running service with nothing to do.
+# LXC containers also have no QGA peer.
+# OPS-520 refinement: ansible_virtualization_type=kvm matches BOTH kvm-hosts
+# (bare-metal CPUs with KVM capability, e.g. Pi5, modern aarch64 servers) AND
+# kvm-guests (VMs). The disambiguator is ansible_virtualization_role: 'guest'
+# means the host is itself a VM; 'host' means bare-metal that can host VMs.
+# qemu-guest-agent is only meaningful for 'guest' role.
+- name: Install qemu-guest-agent (QEMU/KVM guests only)
+  ansible.builtin.apt:
+    name: qemu-guest-agent
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when:
+    - ansible_virtualization_type in ['kvm', 'qemu']
+    - ansible_virtualization_role == 'guest'
+  tags:
+    - common
+    - qemu
+
+# OPS-716: ensure qemu-guest-agent service is enabled + running after install.
+# The apt task above only installs the package; without this systemd task the
+# service remains inactive until next reboot (or never, if package was already
+# present). `qm guest exec` / graceful shutdown / fsfreeze-based snapshots all
+# require the service to be running — not just installed.
+# Same when-gate as the install task: QEMU/KVM guests only.
+- name: Enable and start qemu-guest-agent service (QEMU/KVM guests only)
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
+    enabled: true
+    state: started
+    daemon_reload: false
+  when:
+    - ansible_virtualization_type in ['kvm', 'qemu']
+    - ansible_virtualization_role == 'guest'
+  tags:
+    - common
+    - qemu
+
+# OPS-232: ensure the standard 'ubuntu' admin user exists on every managed
+# host. Most hosts get ubuntu from cloud-init in their Packer template, but
+# some (wazuh-server, anything built from a non-sentinel base image) don't.
+# Without this user, Vault-signed JIT SSH certs cannot log in because sshd's
+# AuthorizedPrincipalsFile %u expansion expects the target username to exist
+# in /etc/passwd.
+- name: Ensure ubuntu admin user exists (OPS-232)
+  ansible.builtin.user:
+    name: ubuntu
+    shell: /bin/bash
+    groups: sudo
+    append: true
+    create_home: true
+    state: present
+  tags:
+    - common
+    - users
+    - ssh
+
+# OPS-712: ensure the 'koiakoia' operator user exists on every managed host.
+# This role already writes /etc/ssh/auth_principals/koiakoia (via sshd_auth_principals
+# default), which tells sshd to accept Vault-signed JIT certs with principal
+# 'koiakoia'. That file is useless if the Linux user does not exist — sshd
+# emits "Invalid user koiakoia" and closes the connection before cert evaluation.
+# Discovered: koiakoia was missing on iac-control while present on seedbox-vm,
+# causing JIT cert auth to fail on the Ansible control host (2026-05-17).
+# uid is intentionally not specified: iac-control has uid=1001 taken by
+# gitlab-runner and uid=1002 by forgejo-runner; auto-assignment is safer
+# across the fleet.
+- name: Ensure koiakoia operator user exists (OPS-712)
+  ansible.builtin.user:
+    name: koiakoia
+    shell: /bin/bash
+    groups: sudo,adm,docker
+    append: true
+    create_home: true
+    state: present
+  tags:
+    - common
+    - users
+    - ssh
+
+- name: Ensure ubuntu has passwordless sudo (OPS-232)
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/90-ubuntu-nopasswd
+    content: |
+      # Ansible managed — common role, OPS-232
+      ubuntu ALL=(ALL) NOPASSWD: ALL
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  tags:
+    - common
+    - users
+    - sudo
+
+- name: Deploy SSH banner
+  ansible.builtin.template:
+    src: issue.net.j2
+    dest: /etc/issue.net
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - common
+    - ssh
+    - banner
+
+- name: Configure sshd Banner directive
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?Banner\s'
+    line: "Banner /etc/issue.net"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - common
+    - ssh
+
+- name: Configure sshd TrustedUserCAKeys directive
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?TrustedUserCAKeys\s'
+    line: "TrustedUserCAKeys /etc/ssh/trusted-ca.pem"
+    state: present
+    validate: "sshd -t -f %s"
+  notify: Restart sshd
+  tags:
+    - common
+    - ssh
+    - vault-ssh
+
+- name: Deploy Vault SSH CA public key
+  ansible.builtin.template:
+    src: trusted-ca.pem.j2
+    dest: /etc/ssh/trusted-ca.pem
+    owner: root
+    group: root
+    mode: "0644"
+  when: vault_ssh_ca_public_key | length > 0
+  notify: Restart sshd
+  tags:
+    - common
+    - ssh
+    - vault-ssh
+
+- name: Deploy session timeout script
+  ansible.builtin.template:
+    src: session-timeout.sh.j2
+    dest: /etc/profile.d/session-timeout.sh
+    owner: root
+    group: root
+    mode: "0644"
+  tags:
+    - common
+    - hardening
+    - session-timeout
+
+- name: Remove conflicting logrotate config (duplicates distro rsyslog config)
+  ansible.builtin.file:
+    path: /etc/logrotate.d/sentinel-logs
+    state: absent
+  tags:
+    - common
+    - logging
+
+# OPS-995: sudo I/O logs accumulate without bound when log_input/log_output are
+# enabled (set in /etc/sudoers.d/99-sentinel-logging on all sentinel hosts).
+# Each sudo session writes a depth-3 directory under /var/log/sudo-io/.
+# This daily cron purges session dirs older than log_retention_days (default: 14).
+- name: Deploy sudo-io session log cleanup cron (OPS-995)
+  ansible.builtin.template:
+    src: sudo-io-cleanup.sh.j2
+    dest: /etc/cron.daily/sudo-io-cleanup
+    owner: root
+    group: root
+    mode: "0750"
+  tags:
+    - common
+    - logging
+
+- name: Install AIDE
+  ansible.builtin.apt:
+    name: aide
+    state: present
+  when: aide_enabled
+  tags:
+    - common
+    - aide
+    - fim
+
+- name: Deploy AIDE configuration
+  ansible.builtin.template:
+    src: aide.conf.j2
+    dest: /etc/aide/aide.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: aide_enabled
+  tags:
+    - common
+    - aide
+    - fim
+
+- name: Check if AIDE database exists
+  ansible.builtin.stat:
+    path: /var/lib/aide/aide.db
+  register: aide_db
+  when: aide_enabled
+  tags:
+    - common
+    - aide
+    - fim
+
+- name: Initialize AIDE database
+  ansible.builtin.command:
+    cmd: aideinit
+    creates: /var/lib/aide/aide.db.new
+  when:
+    - aide_enabled
+    - not aide_db.stat.exists
+  changed_when: true
+  async: 600
+  poll: 30
+  tags:
+    - common
+    - aide
+    - fim
+
+- name: Copy AIDE baseline database
+  ansible.builtin.copy:
+    src: /var/lib/aide/aide.db.new
+    dest: /var/lib/aide/aide.db
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - aide_enabled
+    - not aide_db.stat.exists
+  tags:
+    - common
+    - aide
+    - fim
+
+- name: Deploy AIDE daily cron
+  ansible.builtin.template:
+    src: aide-cron.j2
+    dest: /etc/cron.d/aide-check
+    owner: root
+    group: root
+    mode: "0644"
+  when: aide_enabled
+  tags:
+    - common
+    - aide
+    - fim
+
+- name: Include time synchronization tasks
+  ansible.builtin.include_tasks: time-sync.yml
+  tags:
+    - common
+    - ntp
+    - time
+
+- name: Include SSH hardening tasks
+  ansible.builtin.import_tasks: sshd-hardening.yml
+
+- name: Include PAM hardening tasks
+  ansible.builtin.import_tasks: pam-hardening.yml
+
+- name: Include OS hardening tasks
+  ansible.builtin.import_tasks: os-hardening.yml
+
+- name: Include auditd tasks
+  ansible.builtin.import_tasks: auditd.yml
+
+- name: Include firewall tasks
+  ansible.builtin.import_tasks: firewall.yml
+
+- name: Include wazuh-agent tasks
+  ansible.builtin.include_role:
+    name: wazuh-agent
+  when: "'wazuh' not in group_names"
+  tags:
+    - common
+    - wazuh
+    - siem

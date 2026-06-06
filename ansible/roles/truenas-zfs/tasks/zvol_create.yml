@@ -1,0 +1,53 @@
+---
+# truenas-zfs | zvol_create — idempotent VOLUME (zvol) creation (OPS-947)
+#
+# Creates a zvol if it does not already exist.
+# Will not modify an existing zvol.
+# Requires truenas_zfs_zvol_name and truenas_zfs_zvol_volsize to be set.
+
+- name: truenas-zfs/zvol_create | validate required variables
+  ansible.builtin.assert:
+    that:
+      - truenas_zfs_zvol_name | length > 0
+      - truenas_zfs_zvol_volsize | length > 0
+    fail_msg: "truenas_zfs_zvol_name and truenas_zfs_zvol_volsize must be set"
+
+- name: truenas-zfs/zvol_create | check if zvol already exists
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/pool/dataset/id/{{ truenas_zfs_zvol_name | urlencode }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: [200, 404]
+  register: truenas_zfs_zvol_check
+  changed_when: false
+
+- name: truenas-zfs/zvol_create | create zvol (skip if exists)
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/pool/dataset"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ truenas_zfs_zvol_name }}"
+      type: "VOLUME"
+      volsize: "{{ truenas_zfs_zvol_volsize }}"
+      volblocksize: "{{ truenas_zfs_zvol_blocksize | string + 'B' }}"
+      sparse: "{{ truenas_zfs_zvol_sparse }}"
+      compression: "{{ truenas_zfs_zvol_compression }}"
+      comments: "{{ truenas_zfs_zvol_comments }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  when: truenas_zfs_zvol_check.status == 404
+  register: truenas_zfs_zvol_create_result
+
+- name: truenas-zfs/zvol_create | report outcome
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Created zvol: ' + truenas_zfs_zvol_name + ' size=' + truenas_zfs_zvol_volsize
+         if truenas_zfs_zvol_check.status == 404
+         else 'zvol already exists (no-op): ' + truenas_zfs_zvol_name }}
+  changed_when: false

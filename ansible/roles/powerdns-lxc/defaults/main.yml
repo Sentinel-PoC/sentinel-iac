@@ -1,0 +1,57 @@
+---
+# OPS-673: powerdns-lxc role defaults
+# Provisioning parameters for a PowerDNS nameserver LXC on Proxmox.
+# All vars prefixed pdns_lxc_* to avoid collision with other roles.
+# Pattern mirrors ha-lxc role (OPS-585).
+
+# ---------------------------------------------------------------------------
+# LXC identity — REQUIRED (no sensible defaults)
+# ---------------------------------------------------------------------------
+pdns_lxc_id: ""           # VMID — must be unique in the PVE cluster
+pdns_lxc_name: ""         # Hostname for the LXC container
+
+# ---------------------------------------------------------------------------
+# Network — REQUIRED
+# ---------------------------------------------------------------------------
+pdns_lxc_ip: ""           # LXC IP address (same as ansible_host for nameserver)
+pdns_lxc_cidr: "24"
+pdns_lxc_gateway: "192.168.12.1"
+pdns_lxc_nameserver: "192.168.12.210"   # iac-control dnsmasq — bootstrap DNS
+pdns_lxc_searchdomain: "208.haist.farm"
+pdns_lxc_bridge: "vmbr0"
+
+# ---------------------------------------------------------------------------
+# Template storage
+# ---------------------------------------------------------------------------
+pdns_lxc_template_storage: "local"
+pdns_lxc_rootfs_storage: "local-lvm"
+pdns_lxc_rootfs_size: "8"              # GB
+pdns_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+# OPS-1009: discard (TRIM/UNMAP) mount option for local-lvm thinpool reclamation.
+# mountoptions=discard tells Proxmox to pass discard/UNMAP to the underlying
+# LVM-thin device so guest fstrim calls free blocks back to the thinpool.
+pdns_lxc_rootfs_mountoptions: "discard"
+
+# ---------------------------------------------------------------------------
+# Compute
+# ---------------------------------------------------------------------------
+pdns_lxc_cores: 1
+pdns_lxc_memory: 512      # MiB
+pdns_lxc_swap: 256        # MiB
+
+# ---------------------------------------------------------------------------
+# Security + boot order
+# unprivileged=1: PowerDNS does not need Docker-in-LXC or elevated capabilities.
+# Secure default — contrasts with ha-lxc (unprivileged=0) which runs Docker.
+# onboot + startup ensure DNS survives PVE host reboots (critical for a nameserver).
+# ---------------------------------------------------------------------------
+pdns_lxc_unprivileged: 1
+pdns_lxc_onboot: 1
+pdns_lxc_startup: "order=1,up=30"      # Boot early (before application-tier LXCs)
+
+# ---------------------------------------------------------------------------
+# SSH bootstrap — key to inject for ansible ubuntu user
+# lookup('file', ...) runs on the Ansible controller (iac-control as ubuntu).
+# ---------------------------------------------------------------------------
+pdns_lxc_admin_user: "ubuntu"
+pdns_lxc_admin_ssh_key_file: "~/.ssh/id_sentinel.pub"

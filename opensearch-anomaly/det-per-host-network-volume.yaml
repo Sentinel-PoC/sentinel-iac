@@ -1,0 +1,72 @@
+# OPS-575: RCF Detector — Per-Host Network Volume by Direction
+# Detects anomalous inbound or outbound network byte volume per host.
+# Entity-side baseline: each (host, direction) pair gets its own RCF model.
+#
+# Apply via: POST /_plugins/_anomaly_detection/detectors
+# See compliance-vault/runbooks/rcf-tuning.md for deployment procedure.
+#
+# Input: Zeek conn.log forwarded to OpenSearch via filebeat/logstash.
+# Expected index pattern: zeek-conn-* (or logs-zeek.conn-* for Elastic-style naming)
+
+detector:
+  name: per-host-network-volume
+  description: >
+    RCF detector for per-host network byte volume, grouped by direction
+    (inbound vs outbound). Detects anomalous data exfiltration or ingestion
+    patterns per host. Entity-side baseline per OPS-575 / Plan G' architecture
+    (OPS-555, OPS-563). Input: Zeek conn.log.
+  time_field: "@timestamp"
+
+  # Input: Zeek conn.log index
+  # Adjust to match your actual Zeek index pattern
+  indices:
+    - zeek-conn-*
+
+  # Two features: bytes in and bytes out, summed per window
+  features:
+    - feature_name: bytes_out
+      feature_enabled: true
+      aggregation_query:
+        bytes_out:
+          sum:
+            field: resp_bytes      # Zeek: bytes sent by responder (outbound from perspective of orig)
+
+    - feature_name: bytes_in
+      feature_enabled: true
+      aggregation_query:
+        bytes_in:
+          sum:
+            field: orig_bytes      # Zeek: bytes sent by originator (inbound to responder)
+
+  # Entity config: per (source host, direction implied by feature split)
+  # Zeek id.orig_h = source IP; map to hostname via enrichment if available
+  category_field:
+    - id.orig_h
+
+  # Detection window: 15-minute buckets (aligns with Zeek conn log rotation)
+  detection_interval:
+    period:
+      interval: 15
+      unit: Minutes
+
+  shingle_size: 8
+
+  window_delay:
+    period:
+      interval: 2
+      unit: Minutes
+
+  # Filter: exclude internal-to-internal RFC1918 loopback
+  filter_query:
+    bool:
+      must_not:
+        - prefix:
+            id.resp_h: "127."
+      must:
+        - exists:
+            field: id.orig_h
+
+  # Operational note: bytes thresholds will vary widely by host role.
+  # After 14 days of training, review anomaly score distribution per host.
+  # High-throughput hosts (backup server, media server) may need grade
+  # threshold adjustment. See rcf-tuning.md.

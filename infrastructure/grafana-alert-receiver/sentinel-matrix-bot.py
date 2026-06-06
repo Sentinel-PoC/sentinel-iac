@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Sentinel Matrix Bot — Webhook receiver that forwards alerts to Matrix rooms.
+
+Replaces grafana-alert-receiver.py. Listens on port 9095 with path-based routing:
+  POST /grafana  — Grafana alert notifications
+  POST /wazuh    — Wazuh security alerts
+  POST /gitlab   — GitLab webhook events
+
+Configuration via environment variables (see sentinel-matrix-bot.env):
+  MATRIX_HOMESERVER   — Synapse base URL
+  MATRIX_TOKEN        — Bot access token
+  MATRIX_ROOM_GRAFANA — Room ID for Grafana alerts
+  MATRIX_ROOM_WAZUH   — Room ID for Wazuh alerts
+  MATRIX_ROOM_GITLAB  — Room ID for GitLab events
+"""
+
+import json
+import logging
+import os
+import ssl
+import hashlib
+import time
+from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.request import Request, urlopen
+from urllib.error import URLError
+
+PORT = int(os.environ.get("MATRIX_BOT_PORT", "9095"))
+LOG_FILE = os.environ.get("MATRIX_BOT_LOG", "/var/log/sentinel-matrix-bot.log")
+
+MATRIX_HOMESERVER = os.environ.get("MATRIX_HOMESERVER", "https://matrix.208.haist.farm")
+MATRIX_TOKEN = os.environ.get("MATRIX_TOKEN", "")
+MATRIX_ROOM_GRAFANA = os.environ.get("MATRIX_ROOM_GRAFANA", "")
+MATRIX_ROOM_WAZUH = os.environ.get("MATRIX_ROOM_WAZUH", "")
+MATRIX_ROOM_GITLAB = os.environ.get("MATRIX_ROOM_GITLAB", "")
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+_ssl_ctx = ssl.create_default_context()
+_ssl_ctx.check_hostname = False
+_ssl_ctx.verify_mode = ssl.CERT_NONE
+
+
+def send_to_matrix(room_id, plain_body, html_body):
+    if not MATRIX_TOKEN or not room_id:
+        logging.error("Matrix token or room ID not configured")
+        return False
+
+    txn_id = hashlib.sha256(
+        f"{time.time_ns()}-{room_id}-{plain_body[:50]}".encode()
+    ).hexdigest()[:16]
+
+    url = (
+        f"{MATRIX_HOMESERVER}/_matrix/client/v3/rooms/"
+        f"{room_id}/send/m.room.message/{txn_id}"
+    )
+    body = json.dumps({
+        "msgtype": "m.text",
+        "body": plain_body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": html_body,
+    }).encode()
+
+    req = Request(url, data=body, method="PUT")
+    req.add_header("Authorization", f"Bearer {MATRIX_TOKEN}")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urlopen(req, context=_ssl_ctx, timeout=10) as resp:  # nosec B310 — internal API call to operator-configured https endpoint; same authorized pattern as claude-config audit_*.py
+            if resp.status == 200:
+                logging.info(f"Sent message to room {room_id}")
+                return True
+            else:
+                logging.error(f"Matrix API returned {resp.status}")
+                return False
+    except URLError as e:
+        logging.error(f"Failed to send to Matrix: {e}")
+        return False
+
+
+def format_grafana_alert(payload):
+    alerts = payload.get("alerts", [])
+    if not alerts:
+        return None, None
+
+    parts_plain = []
+    parts_html = []
+
+    for alert in alerts:
+        status = alert.get("status", "unknown").upper()
+        labels = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        alertname = labels.get("alertname", "unnamed")
+        severity = labels.get("severity", "unknown")
+        summary = annotations.get("summary", "no summary")
+        description = annotations.get("description", "")
+
+        color = "#dc3545" if status == "FIRING" else "#28a745"
+        icon = "&#x1F6A8;" if status == "FIRING" else "&#x2705;"
+
+        parts_plain.append(f"[{status}] {alertname} ({severity}): {summary}")
+        parts_html.append(
+            f'<p>{icon} <strong style="color:{color}">{status}</strong> '
+            f'<b>{alertname}</b> ({severity})<br/>{summary}'
+            f'{"<br/><em>" + description + "</em>" if description else ""}</p>'
+        )
+
+    title = f"Grafana Alert ({len(alerts)} alert{'s' if len(alerts) != 1 else ''})"
+    return f"{title}\n" + "\n".join(parts_plain), f"<h4>&#x1F4CA; {title}</h4>" + "".join(parts_html)
+
+
+def format_wazuh_alert(payload):
+    rule = payload.get("rule", {})
+    agent = payload.get("agent", {})
+    data = payload.get("data", {})
+
+    level = rule.get("level", 0)
+    description = rule.get("description", "no description")
+    rule_id = rule.get("id", "?")
+    groups = ", ".join(rule.get("groups", []))
+    agent_name = agent.get("name", "unknown")
+    agent_ip = agent.get("ip", "?")
+    timestamp = payload.get("timestamp", datetime.now(timezone.utc).isoformat())
+    srcip = data.get("srcip", "")
+
+    if level >= 12:
+        color, severity = "#dc3545", "CRITICAL"
+    elif level >= 10:
+        color, severity = "#fd7e14", "HIGH"
+    elif level >= 7:
+        color, severity = "#ffc107", "MEDIUM"
+    else:
+        color, severity = "#17a2b8", "LOW"
+
+    plain = (
+        f"[{severity}] Wazuh Alert (Level {level}, Rule {rule_id})\n"
+        f"Agent: {agent_name} ({agent_ip})\nDescription: {description}\nGroups: {groups}"
+    )
+    if srcip:
+        plain += f"\nSource IP: {srcip}"
+
+    html = (
+        f'<h4>&#x1F6E1;&#xFE0F; Wazuh Alert</h4>'
+        f'<p><strong style="color:{color}">{severity}</strong> (Level {level}, Rule {rule_id})</p>'
+        f'<p><b>Agent:</b> {agent_name} ({agent_ip})<br/>'
+        f'<b>Description:</b> {description}<br/><b>Groups:</b> {groups}'
+    )
+    if srcip:
+        html += f'<br/><b>Source IP:</b> {srcip}'
+    html += f'<br/><em>{timestamp}</em></p>'
+    return plain, html
+
+
+def format_gitlab_event(payload):
+    kind = payload.get("object_kind", "unknown")
+    project = payload.get("project", {})
+    project_name = project.get("name", "unknown")
+    user = payload.get("user", {}).get("name", payload.get("user_name", "unknown"))
+
+    if kind == "pipeline":
+        attrs = payload.get("object_attributes", {})
+        status = attrs.get("status", "unknown")
+        ref = attrs.get("ref", "?")
+        pipeline_id = attrs.get("id", "?")
+        url = project.get("web_url", "")
+        if status == "failed":
+            color, icon = "#dc3545", "&#x274C;"
+        elif status == "success":
+            color, icon = "#28a745", "&#x2705;"
+        else:
+            color, icon = "#ffc107", "&#x23F3;"
+        plain = f"[{status.upper()}] Pipeline #{pipeline_id} on {project_name}/{ref} by {user}"
+        html = (
+            f'<p>{icon} <strong style="color:{color}">{status.upper()}</strong> '
+            f'Pipeline #{pipeline_id} on <b>{project_name}</b>/{ref}<br/>By {user}'
+            f'{" | <a href=" + chr(34) + url + "/pipelines/" + str(pipeline_id) + chr(34) + ">View</a>" if url else ""}</p>'
+        )
+        return plain, html
+
+    elif kind == "merge_request":
+        attrs = payload.get("object_attributes", {})
+        action = attrs.get("action", "unknown")
+        title = attrs.get("title", "untitled")
+        mr_url = attrs.get("url", "")
+        source = attrs.get("source_branch", "?")
+        target = attrs.get("target_branch", "?")
+        plain = f"[MR {action.upper()}] {project_name}: {title} ({source} -> {target}) by {user}"
+        html = (
+            f'<p>&#x1F500; <b>MR {action}</b> in <b>{project_name}</b><br/>'
+            f'{title} (<code>{source}</code> &rarr; <code>{target}</code>)<br/>By {user}'
+            f'{" | <a href=" + chr(34) + mr_url + chr(34) + ">View</a>" if mr_url else ""}</p>'
+        )
+        return plain, html
+
+    elif kind == "push":
+        ref = payload.get("ref", "?").replace("refs/heads/", "")
+        commits = payload.get("commits", [])
+        total = payload.get("total_commits_count", len(commits))
+        commit_lines = []
+        for c in commits[:3]:
+            msg = c.get("message", "").split("\n")[0][:80]
+            commit_lines.append(f"  {c.get('id', '?')[:8]} {msg}")
+        plain = f"[PUSH] {project_name}/{ref}: {total} commit(s) by {user}\n" + "\n".join(commit_lines)
+        html = (
+            f'<p>&#x1F4E6; <b>Push</b> to <b>{project_name}</b>/{ref} '
+            f'({total} commit{"s" if total != 1 else ""}) by {user}</p>'
+            f'<ul>{"".join("<li><code>" + c.get("id","?")[:8] + "</code> " + c.get("message","").split(chr(10))[0][:80] + "</li>" for c in commits[:3])}</ul>'
+        )
+        return plain, html
+
+    else:
+        plain = f"[{kind.upper()}] {project_name} event by {user}"
+        html = f'<p>&#x1F514; <b>{kind}</b> event in <b>{project_name}</b> by {user}</p>'
+        return plain, html
+
+
+class BotHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            logging.error(f"Invalid JSON on {self.path}: {body[:500]}")
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'{"error": "invalid json"}')
+            return
+
+        if self.path == "/grafana":
+            plain, html = format_grafana_alert(payload)
+            room_id = MATRIX_ROOM_GRAFANA
+        elif self.path == "/wazuh":
+            plain, html = format_wazuh_alert(payload)
+            room_id = MATRIX_ROOM_WAZUH
+        elif self.path == "/gitlab":
+            plain, html = format_gitlab_event(payload)
+            room_id = MATRIX_ROOM_GITLAB
+        else:
+            plain, html = format_grafana_alert(payload)
+            room_id = MATRIX_ROOM_GRAFANA
+
+        if plain and html:
+            logging.info(f"[{self.path}] {plain.splitlines()[0]}")
+            send_to_matrix(room_id, plain, html)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status": "ok"}')
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status": "ok", "service": "sentinel-matrix-bot"}')
+
+    def log_message(self, format, *args):
+        pass
+
+
+if __name__ == "__main__":
+    server = HTTPServer(("0.0.0.0", PORT), BotHandler)  # nosec B104 — service binds 0.0.0.0 by design; host-level ufw restricts source CIDR (firewall coverage audit at OPS-342)
+    logging.info(f"Sentinel Matrix bot started on port {PORT}")
+    print(f"Listening on port {PORT}, logging to {LOG_FILE}")
+    server.serve_forever()

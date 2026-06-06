@@ -1,0 +1,18 @@
+---
+- name: Restart minio
+  ansible.builtin.systemd:
+    name: minio
+    state: restarted
+  tags: [minio]
+
+- name: Daemon reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+  tags: [minio]
+
+- name: Restart vault-agent-minio
+  ansible.builtin.systemd:
+    name: vault-agent-minio.service
+    state: restarted
+    daemon_reload: true
+  tags: [minio, minio-approle]

@@ -1,0 +1,167 @@
+---
+# runner_relabel.yml — OPS-1026: remove stale buildah label from pve4 runner .runner files
+#
+# Background:
+#   During OPS-913 tooling install, the buildah label was added directly to the Forgejo
+#   DB for runners 4-9 (runner-pve4-1 through runner-pve4-6). Unprivileged LXC containers
+#   cannot create UDP sockets, so buildah jobs dispatched to pve4 runners immediately fail:
+#     dial udp 192.168.12.210:53: socket: permission denied
+#   This was the primary failure mode for OPS-1025 backstage build-and-push CI.
+#
+#   OPS-1025 fixed the immediate symptom by changing workflows from runs-on: buildah to
+#   runs-on: iac-buildah. This task removes the stale buildah label at the IaC source:
+#   the .runner file on each LXC that runners read on startup. Without this fix, re-
+#   running runner_register.yml would re-introduce buildah into the DB.
+#
+# IaC authority:
+#   defaults/main.yml → forgejo_runner_pool_instances[*].labels does NOT include buildah.
+#   The .runner files on the LXCs were written at OPS-913 registration time with buildah
+#   included. This task corrects that drift by patching .runner files in-place.
+#
+# Sync direction:
+#   On runner startup, the runner reads labels from .runner and reports them to Forgejo.
+#   The Forgejo DB agent_labels column is updated accordingly. Restarting the runner
+#   service after patching .runner causes the DB to reflect the corrected label set.
+#
+# Idempotency:
+#   The python3 filter script exits 0 only if buildah was found and removed.
+#   The restart task is conditional on the file having changed.
+#   If buildah is already absent, no restart occurs.
+#
+# Operator usage:
+#   ansible-playbook -i ansible/inventory/hosts.yml --limit pve4-alienware \
+#     ansible/playbooks/forgejo-runner-pool.yml --tags runner-relabel
+#
+# Verification after run:
+#   For each runner, confirm:
+#     pct exec <VMID> -- python3 -c "import json; d=json.load(open('/opt/forgejo-runner/.runner')); print(d['labels'])"
+#   Expected: no entry containing 'buildah' in labels list.
+#   DB will self-correct when runner reconnects.
+
+# ── Check current labels in each .runner file ─────────────────────────────────
+
+- name: Read current labels from .runner file on each LXC
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.vmid }} --
+      python3 -c "import json; d=json.load(open('{{ forgejo_runner_workdir }}/.runner')); print(json.dumps(d.get('labels', [])))"
+  register: runner_current_labels
+  changed_when: false
+  failed_when: runner_current_labels.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+- name: Log current labels per runner (pre-relabel)
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} current labels: {{ item.stdout }}"
+  loop: "{{ runner_current_labels.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+# ── Patch .runner file — remove any label containing 'buildah' ───────────────
+
+- name: Remove buildah label from .runner file (if present)
+  # python3 reads .runner JSON, filters out any label whose string contains 'buildah',
+  # writes back atomically only if the label set changed. Exit code:
+  #   0 = buildah was present and removed (changed)
+  #   1 = buildah not found, no change needed
+  # The exit-code distinction drives the restart-on-change logic below.
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.vmid }} --
+      python3 -c "
+      import json, sys, os
+      path = '{{ forgejo_runner_workdir }}/.runner'
+      with open(path) as f:
+          d = json.load(f)
+      original = list(d.get('labels', []))
+      filtered = [l for l in original if 'buildah' not in l]
+      if filtered == original:
+          sys.exit(1)
+      d['labels'] = filtered
+      tmp = path + '.tmp'
+      with open(tmp, 'w') as f:
+          json.dump(d, f, indent=2)
+          f.write('\n')
+      os.replace(tmp, path)
+      print('removed buildah from labels: was', original, '-> now', filtered)
+      sys.exit(0)
+      "
+  register: relabel_result
+  changed_when: relabel_result.rc == 0
+  failed_when: relabel_result.rc not in [0, 1]
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+- name: Log relabel result per runner
+  ansible.builtin.debug:
+    msg: >
+      {{ item.item.name }} (VMID {{ item.item.vmid }}):
+      {% if item.rc == 0 %}
+      CHANGED — {{ item.stdout | default('buildah removed') }}
+      {% else %}
+      NO CHANGE — buildah was not in labels (already clean)
+      {% endif %}
+  loop: "{{ relabel_result.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+# ── Restart runner service where .runner file was patched ─────────────────────
+# The runner reads labels from .runner on startup and reports them to Forgejo.
+# Restart causes the Forgejo DB agent_labels to update to the corrected set.
+
+- name: Restart forgejo-runner service on runners where .runner was patched
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.item.vmid }} -- systemctl restart forgejo-runner"
+  when: item.rc == 0   # only where buildah was found and removed
+  changed_when: item.rc == 0
+  loop: "{{ relabel_result.results }}"
+  loop_control:
+    label: "{{ item.item.name }} (VMID {{ item.item.vmid }})"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+# ── Verify: confirm buildah is absent from .runner after patch ────────────────
+
+- name: Verify buildah label is absent from .runner after relabel
+  ansible.builtin.command:
+    cmd: >-
+      pct exec {{ item.vmid }} --
+      python3 -c "
+      import json, sys
+      d = json.load(open('{{ forgejo_runner_workdir }}/.runner'))
+      bad = [l for l in d.get('labels', []) if 'buildah' in l]
+      if bad:
+          print('FAIL: buildah still in labels:', bad)
+          sys.exit(1)
+      print('OK: labels are', d['labels'])
+      "
+  register: verify_relabel
+  changed_when: false
+  failed_when: verify_relabel.rc != 0
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+- name: Display post-relabel label verification per runner
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }}: {{ item.stdout }}"
+  loop: "{{ verify_relabel.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, runner-relabel]
+
+- name: Relabel summary
+  ansible.builtin.debug:
+    msg:
+      - "=== OPS-1026 runner-relabel summary ==="
+      - "Runners patched (buildah removed): {{ relabel_result.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+      - "Runners already clean (no change): {{ relabel_result.results | selectattr('rc', 'equalto', 1) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+      - "Post-relabel verify passed: {{ verify_relabel.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ forgejo_runner_pool_instances | length }}"
+  tags: [forgejo-runner-pool, runner-relabel]

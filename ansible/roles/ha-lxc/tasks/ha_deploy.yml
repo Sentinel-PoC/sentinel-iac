@@ -1,0 +1,125 @@
+---
+# ha_deploy.yml — Phase 3: Deploy Home Assistant Container inside LXC
+# OPS-585
+#
+# Uses pct push to copy files into the LXC, then pct exec to configure.
+# pct push: "pct push <vmid> <hostfile> <guestfile>" — copies from PVE host to LXC.
+#
+# HA Container Docker Compose config from official docs (container/compose.md):
+#   services:
+#     homeassistant:
+#       image: "homeassistant/home-assistant:stable"
+#       volumes: [/config:/config, /run/dbus:/run/dbus:ro]
+#       restart: unless-stopped
+#       privileged: true
+#       network_mode: host
+#       environment: { TZ: ... }
+#
+# network_mode=host: required for mDNS/discovery + local network device detection.
+# privileged: true: required for HA Container hardware access.
+
+# ── Write Docker Compose file (via temp on PVE host + pct push) ───────────────
+
+- name: Create /opt/home-assistant directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p /opt/home-assistant"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, deploy]
+
+- name: Write Docker Compose file to PVE host temp location
+  ansible.builtin.copy:
+    dest: /tmp/ha-compose.yaml
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Ansible managed — OPS-585 ha-lxc role
+      # Home Assistant Container via Docker Compose
+      # Source: https://www.home-assistant.io/installation/linux#install-home-assistant-container
+      # "docker run -d --name homeassistant --privileged --restart=unless-stopped
+      #  -e TZ=MY_TIME_ZONE -v /PATH_TO_YOUR_CONFIG:/config
+      #  -v /run/dbus:/run/dbus:ro --network=host homeassistant/home-assistant:stable"
+      services:
+        homeassistant:
+          container_name: homeassistant
+          image: "{{ ha_image }}"
+          volumes:
+            - {{ ha_config_dir }}:/config
+            - /run/dbus:/run/dbus:ro
+          restart: unless-stopped
+          privileged: true
+          network_mode: host
+          environment:
+            TZ: {{ ha_timezone }}
+  tags: [ha-lxc, homeassistant, deploy]
+
+- name: Push Docker Compose file into LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-compose.yaml /opt/home-assistant/compose.yaml"
+  changed_when: true
+  tags: [ha-lxc, homeassistant, deploy]
+
+# ── Write systemd unit (via temp + pct push) ──────────────────────────────────
+
+- name: Write home-assistant systemd unit to PVE host temp location
+  ansible.builtin.copy:
+    dest: /tmp/ha-homeassistant.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Ansible managed — OPS-585 ha-lxc role
+      [Unit]
+      Description=Home Assistant Container
+      Documentation=https://www.home-assistant.io/
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      WorkingDirectory=/opt/home-assistant
+      ExecStart=/usr/bin/docker compose up -d --pull=always
+      ExecStop=/usr/bin/docker compose down
+      TimeoutStartSec=300
+
+      [Install]
+      WantedBy=multi-user.target
+  tags: [ha-lxc, homeassistant, systemd]
+
+- name: Push systemd unit into LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-homeassistant.service /etc/systemd/system/home-assistant.service"
+  changed_when: true
+  tags: [ha-lxc, homeassistant, systemd]
+
+# ── Enable and start via pct exec ─────────────────────────────────────────────
+
+- name: Reload systemd daemon inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- systemctl daemon-reload"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, systemd]
+
+- name: Enable home-assistant systemd unit inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- systemctl enable home-assistant"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, systemd]
+
+- name: Start home-assistant (pulls HA image + starts container — may take 2-5 min)
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- systemctl start home-assistant"
+  changed_when: true
+  tags: [ha-lxc, homeassistant, start]
+
+# ── Cleanup temp files ────────────────────────────────────────────────────────
+
+- name: Remove temp files from PVE host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/ha-compose.yaml
+    - /tmp/ha-homeassistant.service
+  tags: [ha-lxc, homeassistant, cleanup]

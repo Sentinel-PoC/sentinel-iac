@@ -1,0 +1,31 @@
+[Unit]
+Description=iac-control periodic disk sweep — prune podman + journal (OPS-776)
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/issues
+After=network-online.target podman.socket
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/iac-disk-sweep.sh
+
+[Service]
+Type=oneshot
+User=root
+
+# Configurable alert threshold (% disk usage to trigger syslog crit).
+# Override in /etc/iac-disk-sweep/env if needed.
+Environment=DISK_ALERT_THRESHOLD_PCT=75
+EnvironmentFile=-/etc/iac-disk-sweep/env
+
+ExecStart=/usr/local/bin/iac-disk-sweep.sh
+
+# Allow up to 15 minutes — podman prune on large image sets can be slow.
+TimeoutStartSec=900
+
+# Log to journal; Wazuh monitors journald and syslog for alerts.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iac-disk-sweep
+
+# Do not auto-restart — alert-on-failure is handled by Wazuh log monitor.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

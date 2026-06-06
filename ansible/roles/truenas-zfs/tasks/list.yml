@@ -1,0 +1,47 @@
+---
+# truenas-zfs | list — read-only dataset and portal enumeration (OPS-947)
+#
+# Always safe to run. Gathers current state without making any changes.
+# Output: truenas_zfs_datasets_result, truenas_zfs_portal_result
+
+- name: truenas-zfs/list | fetch all datasets
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/pool/dataset"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_zfs_datasets_result
+  changed_when: false
+
+- name: truenas-zfs/list | display dataset summary
+  ansible.builtin.debug:
+    msg: >-
+      TrueNAS datasets ({{ truenas_zfs_datasets_result.json | length }} total):
+      {% for ds in truenas_zfs_datasets_result.json %}
+      {{ ds.name }} type={{ ds.type }}
+      compression={{ ds.compression.value | default(ds.compression) }}
+      {% if ds.type == 'FILESYSTEM' %}atime={{ ds.atime.value | default(ds.atime) }}{% endif %}
+      {% endfor %}
+  changed_when: false
+
+- name: truenas-zfs/list | fetch iSCSI portals
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/portal"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_zfs_portal_result
+  changed_when: false
+
+- name: truenas-zfs/list | display portal summary
+  ansible.builtin.debug:
+    msg: >-
+      iSCSI portals ({{ truenas_zfs_portal_result.json | length }} total):
+      {% for p in truenas_zfs_portal_result.json %}
+      tag={{ p.tag }} listen={{ p.listen | map(attribute='ip') | list }}:{{ p.listen | map(attribute='port') | list }}
+      {% endfor %}
+  changed_when: false

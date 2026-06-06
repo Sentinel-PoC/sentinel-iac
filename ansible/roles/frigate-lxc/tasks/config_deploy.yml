@@ -1,0 +1,91 @@
+---
+# config_deploy.yml — Deploy Frigate config.yml and docker-compose.yml to LXC 203
+# OPS-956 Phase 2 (2026-05-26)
+#
+# Pattern (mirrors ha-lxc role): render template to PVE host temp path,
+# push into LXC with pct push, notify handler to restart Frigate container.
+#
+# Vault secrets fetched before this file is included:
+#   frigate_hub_user      — from secret/reolink:hub_user
+#   frigate_hub_password  — from secret/reolink:hub_password (may contain '#')
+#   frigate_mqtt_password — from secret/home-assistant:mqtt_password
+
+# ── Render frigate config.yml to PVE host temp path ──────────────────────────
+
+- name: Render Frigate config.yml to PVE host temp location
+  ansible.builtin.template:
+    src: frigate_config.yml.j2
+    dest: /tmp/frigate-config.yml
+    owner: root
+    group: root
+    mode: "0640"
+  no_log: true  # template contains RTSP credentials
+  tags: [frigate-lxc, frigate-config]
+
+# ── Push config.yml into LXC 203 ─────────────────────────────────────────────
+
+- name: Push config.yml into Frigate LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ frigate_lxc_id }} /tmp/frigate-config.yml {{ frigate_config_dir }}/config.yml"
+  changed_when: true
+  notify: restart frigate
+  tags: [frigate-lxc, frigate-config]
+
+# ── Cleanup temp file ─────────────────────────────────────────────────────────
+
+- name: Remove config.yml temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/frigate-config.yml
+    state: absent
+  tags: [frigate-lxc, frigate-config]
+
+# ── Render docker-compose.yml ─────────────────────────────────────────────────
+
+- name: Render docker-compose.yml to PVE host temp location
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: /tmp/frigate-docker-compose.yml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [frigate-lxc, frigate-config]
+
+- name: Push docker-compose.yml into Frigate LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ frigate_lxc_id }} /tmp/frigate-docker-compose.yml {{ frigate_compose_dir }}/docker-compose.yml"
+  changed_when: true
+  notify: restart frigate
+  tags: [frigate-lxc, frigate-config]
+
+- name: Remove docker-compose.yml temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/frigate-docker-compose.yml
+    state: absent
+  tags: [frigate-lxc, frigate-config]
+
+# ── Write FRIGATE_MQTT_PASSWORD env file ──────────────────────────────────────
+# Frigate docker-compose reads FRIGATE_MQTT_PASSWORD from environment.
+# We write a .env file into the compose directory in the LXC.
+
+- name: Render Frigate .env file to PVE host temp location
+  ansible.builtin.copy:
+    dest: /tmp/frigate-env
+    content: |
+      FRIGATE_MQTT_PASSWORD={{ frigate_mqtt_password }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  tags: [frigate-lxc, frigate-config]
+
+- name: Push .env into Frigate LXC compose directory
+  ansible.builtin.command:
+    cmd: "pct push {{ frigate_lxc_id }} /tmp/frigate-env {{ frigate_compose_dir }}/.env"
+  changed_when: true
+  tags: [frigate-lxc, frigate-config]
+
+- name: Remove .env temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/frigate-env
+    state: absent
+  tags: [frigate-lxc, frigate-config]

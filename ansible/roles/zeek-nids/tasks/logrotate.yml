@@ -1,0 +1,11 @@
+---
+# zeek-nids/tasks/logrotate.yml — 7-day local Zeek log retention policy
+# OPS-568 — Wazuh/OpenSearch is canonical; local retention is housekeeping only.
+
+- name: Deploy Zeek logrotate configuration
+  ansible.builtin.template:
+    src: logrotate-zeek.j2
+    dest: /etc/logrotate.d/zeek
+    owner: root
+    group: root
+    mode: "0644"

@@ -1,0 +1,17 @@
+[Unit]
+Description=Harbor→mirror-registry sync — daily at 04:00 UTC (OPS-624)
+Documentation=https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/src/branch/main/docs/runbooks/18-harbor-mirror-sync.md
+
+[Timer]
+# Run daily at 04:00 UTC — after harbor-sweep (03:00) which pushes new upstream
+# images to Harbor, before nist-compliance-check (06:00).
+# This ensures the mirror reflects the latest Harbor state before morning scans.
+OnCalendar=*-*-* 04:00:00 UTC
+# Randomize start within 10 minutes to avoid thundering herd with other timers
+RandomizedDelaySec=600
+# Run immediately on boot if the last run was missed (e.g., host was down)
+Persistent=true
+Unit=harbor-mirror-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+# {{ ansible_managed }}
+# Primary interface configuration for iac-control
+# OPS-445: Binds cluster API VIP ({{ okd_api_vip }}) and apps VIP ({{ okd_apps_vip }})
+# as static addresses alongside the management IP ({{ eth0_primary_ip }}).
+# HAProxy listens on *:6443/*:443/*:80 and answers on all three addresses.
+# Note: Ansible takes ownership of this file from cloud-init (cloud-init already ran;
+# it will not regenerate this file unless explicitly re-run).
+network:
+  version: 2
+  ethernets:
+    {{ primary_interface }}:
+      match:
+        macaddress: "{{ eth0_mac }}"
+      addresses:
+        - {{ eth0_primary_ip }}/24
+        - {{ okd_api_vip }}/24
+        - {{ okd_apps_vip }}/24
+      nameservers:
+        addresses:
+          - 1.1.1.1
+          - 8.8.8.8
+        search:
+          - haist.farm
+      set-name: "{{ primary_interface }}"
+      routes:
+        - to: "default"
+          via: "{{ eth0_gateway }}"

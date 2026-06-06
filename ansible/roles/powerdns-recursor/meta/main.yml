@@ -1,0 +1,29 @@
+---
+# OPS-670: powerdns-recursor — sentinel-iac wrapper for PowerDNS Recursor
+#
+# Galaxy role PowerDNS.pdns_recursor (v2.1.0) handles: package install,
+# systemd management, YAML config templating. This wrapper adds: opinionated
+# forwarding setup (haist.farm → local auth, . → 1.1.1.1/9.9.9.9), explicit
+# listen address per-host, and bind coordination with powerdns-auth.
+#
+# Install Galaxy dep before running:
+#   ansible-galaxy role install PowerDNS.pdns_recursor
+
+galaxy_info:
+  role_name: powerdns_recursor
+  author: sentinel-iac
+  description: >-
+    PowerDNS Recursor — sentinel-iac wrapper (OPS-670). Listens on LXC
+    main IP:53, forwards haist.farm to local auth (127.0.0.1:5300), external
+    queries to 1.1.1.1/9.9.9.9.
+  license: proprietary
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - "all"
+
+dependencies: []
+
+collections:
+  - community.general

@@ -1,0 +1,18 @@
+# PLANNING ONLY — do not apply until OPS-866 runbook is operator-approved.
+# In the real deployment this namespace is created by ArgoCD via CreateNamespace=true.
+# It is listed here as an explicit planning artifact so reviewers can see the
+# intended namespace name and labels.
+#
+# See: docs/runbooks/30-renovate-deployment.md §3.2
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: renovate
+  labels:
+    app.kubernetes.io/managed-by: argocd
+    # argocd.argoproj.io/managed-by label required for OKD namespace adoption:
+    argocd.argoproj.io/managed-by: openshift-gitops
+  annotations:
+    # OPS-866 — Renovate planning; namespace created in execution child issue
+    ops-issue: "OPS-866"

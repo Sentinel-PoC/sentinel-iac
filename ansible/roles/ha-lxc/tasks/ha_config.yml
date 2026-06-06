@@ -1,0 +1,45 @@
+---
+# ha_config.yml — Phase 4: Deploy HA reverse-proxy configuration
+# OPS-590
+#
+# Adds http.use_x_forwarded_for + trusted_proxies to configuration.yaml so
+# Home Assistant logs real client IPs when accessed via Pangolin reverse proxy
+# at https://ha.208.haist.farm.
+#
+# Pattern mirrors ha_deploy.yml: render template to PVE host temp path,
+# push into LXC with pct push, notify handler to restart HA container.
+#
+# Ref: https://www.home-assistant.io/integrations/http/#trusted_proxies
+#      "use_x_forwarded_for: true + trusted_proxies: [<proxy_ip>]"
+#
+# NOTE: This template manages the FULL configuration.yaml. Re-running this
+# task will overwrite UI-only changes to configuration.yaml. Use !include
+# files for persistent UI-driven configuration sections.
+
+# ── Render configuration.yaml to PVE host temp path ──────────────────────────
+
+- name: Write HA configuration.yaml to PVE host temp location
+  ansible.builtin.template:
+    src: configuration.yaml.j2
+    dest: /tmp/ha-configuration.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-config]
+
+# ── Push into LXC ─────────────────────────────────────────────────────────────
+
+- name: Push configuration.yaml into HA LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-configuration.yaml {{ ha_config_dir }}/configuration.yaml"
+  changed_when: true
+  notify: Restart home-assistant container
+  tags: [ha-lxc, homeassistant, ha-config]
+
+# ── Cleanup temp file ─────────────────────────────────────────────────────────
+
+- name: Remove ha-configuration.yaml temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-configuration.yaml
+    state: absent
+  tags: [ha-lxc, homeassistant, ha-config]

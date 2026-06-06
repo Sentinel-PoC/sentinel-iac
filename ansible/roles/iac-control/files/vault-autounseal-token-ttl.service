@@ -1,0 +1,14 @@
+[Unit]
+Description=Vault auto-unseal token TTL monitor (OPS-190)
+# Runs FROM iac-control — queries the Transit Vault on iac-control itself
+# for the prod-Vault auto-unseal token's remaining lease.
+# Fails LOUD when remaining lease drops below the warning/critical threshold,
+# so the operator gets ~7 days of warning before the next SEC-44-class outage.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vault-autounseal-token-ttl.sh
+User=root
+# Don't restart on non-zero exit — WARN (1) and CRIT (2) are intentional signals,
+# not faults. Log file + journald + Wazuh decoders carry the alerting weight.
+SuccessExitStatus=0 1 2

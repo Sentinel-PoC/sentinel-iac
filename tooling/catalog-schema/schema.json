@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forgejo.208.haist.farm/sentinel-admin/sentinel-iac/raw/branch/main/tooling/catalog-schema/schema.json",
+  "title": "Backstage Catalog Entity Schema — Project Sentinel",
+  "description": "JSON Schema validating catalog-info.yaml entities in the sentinel platform. Covers Component, Resource, and API kinds. Scoped to actual usage in overwatch-gitops/backstage-catalog/.",
+  "$defs": {
+    "metadataBase": {
+      "type": "object",
+      "description": "Common metadata fields required on all catalog entities",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$",
+          "minLength": 1,
+          "maxLength": 63,
+          "description": "Entity name — lowercase alphanumeric and hyphens only, max 63 chars (Backstage EntityRef constraint)"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable description of the entity"
+        },
+        "namespace": {
+          "type": "string",
+          "default": "default",
+          "description": "Backstage namespace; defaults to 'default'"
+        },
+        "annotations": {
+          "type": ["object", "null"],
+          "description": "Key/value annotations. Standard Backstage annotations and sentinel.platform/* custom annotations are documented below. May be null/empty if no annotations are set.",
+          "properties": {
+            "backstage.io/source-location": {
+              "type": "string",
+              "description": "Source code location, e.g. url:https://forgejo.208.haist.farm/sentinel-admin/<repo>"
+            },
+            "backstage.io/techdocs-ref": {
+              "type": "string",
+              "description": "TechDocs reference, e.g. dir:../../techdocs/<service> or url:https://forgejo.208.haist.farm/..."
+            },
+            "backstage.io/kubernetes-namespace": {
+              "type": "string",
+              "description": "Kubernetes namespace the component runs in (for K8s-deployed components)"
+            },
+            "backstage.io/kubernetes-label-selector": {
+              "type": "string",
+              "description": "Label selector to identify K8s resources, e.g. app.kubernetes.io/name=grafana"
+            },
+            "argocd/app-name": {
+              "type": "string",
+              "description": "ArgoCD application name (only for ArgoCD-managed components)"
+            },
+            "grafana/dashboard-url": {
+              "type": "string",
+              "format": "uri",
+              "description": "URL to the Grafana dashboard for this service"
+            },
+            "sentinel.platform/lan-ip": {
+              "type": "string",
+              "description": "[NET-NEW] LAN IP address of the service or VM, e.g. 192.168.12.206"
+            },
+            "sentinel.platform/vlan": {
+              "type": "string",
+              "description": "[NET-NEW] VLAN name or ID the service resides on, e.g. mgmt, iot, servers"
+            },
+            "sentinel.platform/runbook-url": {
+              "type": "string",
+              "format": "uri",
+              "description": "[NET-NEW] URL to the operational runbook for this service"
+            }
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "description": "Lowercase hyphenated tags. 'overwatch' tag is conventional on all sentinel platform entities."
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["url", "title"],
+            "properties": {
+              "url": { "type": "string", "format": "uri" },
+              "title": { "type": "string" },
+              "icon": { "type": "string" }
+            }
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "specBase": {
+      "type": "object",
+      "description": "Common spec fields required on Component, Resource, and API entities",
+      "required": ["lifecycle", "owner", "system"],
+      "properties": {
+        "lifecycle": {
+          "type": "string",
+          "enum": ["production", "experimental", "deprecated"],
+          "description": "Entity lifecycle stage. Use 'production' for live services, 'experimental' for dev/staging, 'deprecated' for sunset services."
+        },
+        "owner": {
+          "type": "string",
+          "description": "Entity owner reference, e.g. 'platform-team'. Must match a Group or User entity name."
+        },
+        "system": {
+          "type": "string",
+          "description": "System this entity belongs to. Sentinel platform entities use 'sentinel-platform'."
+        }
+      }
+    },
+    "componentSpec": {
+      "allOf": [
+        { "$ref": "#/$defs/specBase" },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "service",
+                "website",
+                "library",
+                "pipeline",
+                "database",
+                "operator",
+                "proxy",
+                "agent"
+              ],
+              "description": "Component type. 'service' is most common for deployed workloads."
+            },
+            "dependsOn": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^(component|resource|api):[a-z0-9-]+$"
+              },
+              "description": "List of entity refs this component depends on, e.g. ['component:keycloak', 'resource:vault-server']"
+            },
+            "providesApis": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "List of API entity names this component exposes"
+            },
+            "consumesApis": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "List of API entity names this component consumes"
+            },
+            "subcomponentOf": {
+              "type": "string",
+              "description": "Parent component name if this is a subcomponent"
+            }
+          }
+        }
+      ]
+    },
+    "resourceSpec": {
+      "allOf": [
+        { "$ref": "#/$defs/specBase" },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "vm",
+                "lxc",
+                "lxc-container",
+                "hypervisor",
+                "compute-cluster",
+                "kubernetes-cluster",
+                "database",
+                "storage",
+                "network-device",
+                "network-controller",
+                "nas",
+                "ups",
+                "pdu"
+              ],
+              "description": "Resource type. Use 'vm' for VMs, 'lxc'/'lxc-container' for LXC containers, 'hypervisor' for Proxmox hosts, 'network-controller' for UCG-Fiber/UniFi, etc."
+            },
+            "dependsOn": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^(component|resource|api):[a-z0-9-]+$"
+              },
+              "description": "List of entity refs this resource depends on"
+            },
+            "providesApis": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      ]
+    },
+    "apiSpec": {
+      "allOf": [
+        { "$ref": "#/$defs/specBase" },
+        {
+          "type": "object",
+          "required": ["type", "definition"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["openapi", "asyncapi", "graphql", "grpc"],
+              "description": "API definition format. Most sentinel APIs use 'openapi'."
+            },
+            "definition": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Inline API definition (OpenAPI YAML string, etc.)"
+            }
+          }
+        }
+      ]
+    },
+    "systemSpec": {
+      "type": "object",
+      "required": ["owner"],
+      "properties": {
+        "owner": { "type": "string" }
+      }
+    },
+    "groupSpec": {
+      "type": "object",
+      "required": ["type", "children"],
+      "properties": {
+        "type": { "type": "string" },
+        "children": { "type": "array", "items": { "type": "string" } },
+        "parent": { "type": "string" }
+      }
+    },
+    "userSpec": {
+      "type": "object",
+      "required": ["memberOf"],
+      "properties": {
+        "profile": {
+          "type": "object",
+          "properties": {
+            "displayName": { "type": "string" },
+            "email": { "type": "string", "format": "email" },
+            "picture": { "type": "string", "format": "uri" }
+          }
+        },
+        "memberOf": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        }
+      }
+    },
+    "locationSpec": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["url", "file"] },
+        "target": { "type": "string" },
+        "targets": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "backstage.io/v1alpha1",
+      "description": "Backstage catalog API version. Must be 'backstage.io/v1alpha1'."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["Component", "Resource", "API", "System", "Group", "User", "Location"],
+      "description": "Entity kind. Primary workload entities are Component (deployed services), Resource (infrastructure), and API (service interfaces)."
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadataBase"
+    }
+  },
+  "if": {
+    "properties": { "kind": { "const": "Component" } }
+  },
+  "then": {
+    "required": ["spec"],
+    "properties": {
+      "spec": { "$ref": "#/$defs/componentSpec" }
+    }
+  },
+  "else": {
+    "if": {
+      "properties": { "kind": { "const": "Resource" } }
+    },
+    "then": {
+      "required": ["spec"],
+      "properties": {
+        "spec": { "$ref": "#/$defs/resourceSpec" }
+      }
+    },
+    "else": {
+      "if": {
+        "properties": { "kind": { "const": "API" } }
+      },
+      "then": {
+        "required": ["spec"],
+        "properties": {
+          "spec": { "$ref": "#/$defs/apiSpec" }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": { "kind": { "const": "System" } }
+        },
+        "then": {
+          "required": ["spec"],
+          "properties": {
+            "spec": { "$ref": "#/$defs/systemSpec" }
+          }
+        },
+        "else": {
+          "if": {
+            "properties": { "kind": { "const": "Group" } }
+          },
+          "then": {
+            "required": ["spec"],
+            "properties": {
+              "spec": { "$ref": "#/$defs/groupSpec" }
+            }
+          },
+          "else": {
+            "if": {
+              "properties": { "kind": { "const": "User" } }
+            },
+            "then": {
+              "required": ["spec"],
+              "properties": {
+                "spec": { "$ref": "#/$defs/userSpec" }
+              }
+            },
+            "else": {
+              "if": {
+                "properties": { "kind": { "const": "Location" } }
+              },
+              "then": {
+                "properties": {
+                  "spec": { "$ref": "#/$defs/locationSpec" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+{{ vault_log_dir }}/audit.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

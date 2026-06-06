@@ -1,0 +1,96 @@
+---
+# ha_theme.yml — Phase 5: Deploy Haists branded theme + favicon assets
+# OPS-586 Section A
+#
+# Deploys:
+#   - themes/haists.yaml → {{ ha_config_dir }}/themes/haists.yaml
+#     (loaded automatically via "themes: !include_dir_merge_named themes"
+#      in configuration.yaml — already present from OPS-590 ha_config.yml)
+#   - www/favicon-32.svg  → {{ ha_config_dir }}/www/favicon-32.svg
+#   - www/haists-favicon.js → {{ ha_config_dir }}/www/haists-favicon.js
+#     (served by HA at /local/; loaded via extra_module_url in configuration.yaml)
+#
+# Deployment pattern: pct push copies file from PVE host to LXC.
+# Pattern mirrors ha_config.yml (OPS-590).
+#
+# Default theme selection: per-user in HA UI (Settings → Profile → Theme → Haists IT).
+# No configuration.yaml key exists for a system-wide default_theme.
+# Ref: https://www.home-assistant.io/integrations/frontend/#setting-themes
+
+# ── Ensure themes/ directory exists inside LXC ────────────────────────────────
+
+- name: Create HA themes directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/themes"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+# ── Ensure www/ directory exists inside LXC ──────────────────────────────────
+
+- name: Create HA www directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/www"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+# ── Copy files to PVE host temp location ────────────────────────────────────
+
+- name: Copy haists.yaml theme to PVE host temp location
+  ansible.builtin.copy:
+    src: themes/haists.yaml
+    dest: /tmp/ha-haists-theme.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+- name: Copy favicon SVG to PVE host temp location
+  ansible.builtin.copy:
+    src: www/favicon-32.svg
+    dest: /tmp/ha-favicon-32.svg
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+- name: Copy favicon JS to PVE host temp location
+  ansible.builtin.copy:
+    src: www/haists-favicon.js
+    dest: /tmp/ha-haists-favicon.js
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+# ── Push files into LXC ───────────────────────────────────────────────────────
+
+- name: Push haists.yaml theme into LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-haists-theme.yaml {{ ha_config_dir }}/themes/haists.yaml"
+  changed_when: true
+  notify: Restart home-assistant container
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+- name: Push favicon SVG into LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-favicon-32.svg {{ ha_config_dir }}/www/favicon-32.svg"
+  changed_when: true
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+- name: Push favicon JS into LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-haists-favicon.js {{ ha_config_dir }}/www/haists-favicon.js"
+  changed_when: true
+  tags: [ha-lxc, homeassistant, ha-theme]
+
+# ── Cleanup temp files ───────────────────────────────────────────────────────
+
+- name: Remove theme/favicon temp files from PVE host
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/ha-haists-theme.yaml
+    - /tmp/ha-favicon-32.svg
+    - /tmp/ha-haists-favicon.js
+  tags: [ha-lxc, homeassistant, ha-theme]

@@ -1,0 +1,30 @@
+---
+# Local Storage Operator — installs from the openshift-marketplace catalog.
+# OperatorGroup limits the operator to its own namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-local-storage
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-local-storage
+  namespace: openshift-local-storage
+spec:
+  targetNamespaces:
+    - openshift-local-storage
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: local-storage-operator
+  namespace: openshift-local-storage
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: local-storage-operator
+  source: community-operators
+  sourceNamespace: openshift-marketplace

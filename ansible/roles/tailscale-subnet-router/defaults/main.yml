@@ -1,0 +1,89 @@
+---
+# defaults/main.yml -- tailscale-subnet-router role (OPS-671)
+#
+# Configures Tailscale as a subnet router on a Linux host.
+# Designed for 208-pi-001 (Ubuntu 24.04 aarch64) advertising the
+# 192.168.12.0/24 LAN segment into the haist tailnet.
+#
+# Override these in host_vars or group_vars as needed.
+
+# -- APT repository ------------------------------------------------------------
+# Tailscale stable channel for Ubuntu noble (24.04)
+tailscale_apt_keyring_url: "https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg"
+tailscale_apt_keyring_dest: "/usr/share/keyrings/tailscale-archive-keyring.gpg"
+tailscale_apt_repo_url: "https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list"
+tailscale_apt_repo_dest: "/etc/apt/sources.list.d/tailscale.list"
+
+# -- Tailscale up flags --------------------------------------------------------
+# Subnet CIDR(s) to advertise (comma-separated for multiple routes)
+tailscale_advertise_routes: "192.168.12.0/24"
+
+# Hostname to register in the tailnet console
+tailscale_hostname: "{{ inventory_hostname }}"
+
+# Whether to accept DNS pushed by the tailnet coordinator
+# false = keep local resolver, avoid overriding Pi's DNS
+tailscale_accept_dns: false
+
+# -- Vault path for auth key (static path -- used when tailscale_use_oauth: false) --
+# `vault kv get -field=<tailscale_auth_key_field> <tailscale_auth_key_vault_path>`
+# Auth key is only needed on first authentication (BackendState != Running).
+tailscale_auth_key_vault_path: "secret/tailscale"
+tailscale_auth_key_vault_field: "auth_key"
+
+# -- OAuth client (OPS-503) ----------------------------------------------------
+# Set tailscale_use_oauth: true once the operator has created the OAuth client
+# and stored credentials at tailscale_oauth_vault_path (see operator steps below).
+#
+# When true, the role dynamically generates a one-time auth key via the
+# Tailscale API (scope: devices:create) instead of using a static pre-generated
+# auth_key from Vault. This eliminates the 90-day rotation risk on the API key.
+#
+# Operator browser steps to enable (do once, before flipping this flag):
+#   1. https://login.tailscale.com/admin/settings/oauth
+#      -> "Generate OAuth client"
+#      -> Scopes: policy_file:write + devices:create
+#      -> Copy client_id and client_secret
+#   2. vault kv put secret/tailscale/oauth \
+#        client_id="<id>" client_secret="<secret>"
+#   3. Set tailscale_use_oauth: true in host_vars (or group_vars) for each node
+#
+# Default: false -- retains existing static auth_key behaviour, no disruption.
+tailscale_use_oauth: false
+
+# Vault path and field names for the OAuth client credentials
+tailscale_oauth_vault_path: "secret/tailscale/oauth"
+tailscale_oauth_client_id_field: "client_id"
+tailscale_oauth_client_secret_field: "client_secret"
+
+# Tailscale API endpoints (do not change unless Tailscale changes their API)
+tailscale_oauth_token_url: "https://api.tailscale.com/api/v2/oauth/token"
+tailscale_oauth_authkeys_url: "https://api.tailscale.com/api/v2/tailnet/-/keys"
+
+# Settings for the dynamically-generated one-time auth key
+# reusable: false     -- single-use, safer than a reusable key
+# ephemeral: false    -- node persists in the tailnet after disconnect
+# preauthorized: true -- node joins without manual admin console approval
+#   (if tailnet lock is enabled, node still requires hardware-key sign-off
+#   regardless of this flag; see tasks/main.yml OPS-671 note)
+# expiry_seconds: 300 -- key expires in 5 minutes (consumed immediately by tailscale up)
+tailscale_oauth_authkey_reusable: false
+tailscale_oauth_authkey_ephemeral: false
+tailscale_oauth_authkey_preauthorized: true
+tailscale_oauth_authkey_expiry_seconds: 300
+tailscale_oauth_authkey_description: "sentinel-iac ansible generated (OPS-503)"
+
+# -- Route acceptance ----------------------------------------------------------
+# Whether to accept routes advertised by other tailnet peers.
+# Set to false to prevent asymmetric routing on hosts that only advertise
+# routes but should not route traffic back through the tailnet.
+# Example: CT320 (ts-personal-50, OPS-504) must be false -- it advertises
+# 192.168.12.0/24 outward but must not accept the Pi's return routes or
+# the DERP keepalive path breaks (asymmetric-routing bug, OPS-499).
+# null (default) = omit the flag from tailscale up (keeps current node setting).
+# true/false    = explicitly pass --accept-routes=true/false on every role apply.
+tailscale_accept_routes: null
+
+# -- sysctl --------------------------------------------------------------------
+# File deployed to enable IP forwarding (required for subnet routing)
+tailscale_sysctl_conf: "/etc/sysctl.d/99-tailscale.conf"

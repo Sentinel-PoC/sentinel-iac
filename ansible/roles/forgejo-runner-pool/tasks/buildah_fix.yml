@@ -1,0 +1,162 @@
+---
+# buildah_fix.yml — OPS-1136: Fix buildah UDP socket denial in Ubuntu 24.04 LXC
+#
+# Root cause (discovered during OPS-1135/OPS-1136 investigation 2026-06-02):
+#   Ubuntu 24.04 ships AppArmor 4.0 (beta) which loads the buildah AppArmor profile
+#   in ENFORCE mode inside LXC containers, even though the profile declares
+#   flags=(unconfined). The profile lacks an explicit "network inet," rule, so
+#   AF_INET SOCK_DGRAM socket creation is denied. This blocks buildah from opening
+#   a UDP socket to the DNS resolver (192.168.12.210:53), causing all base-image
+#   pulls to fail with: "socket: permission denied".
+#
+#   Confirmed via kernel audit log:
+#     apparmor="DENIED" operation="create" class="net" info="failed af match"
+#     namespace="root//lxc-210_<-var-lib-lxc>" profile="buildah"
+#     family="inet" sock_type="dgram" protocol=0 requested="create"
+#
+#   Direct LXC UDP works fine; the denial is specific to the buildah process context.
+#
+# Fix 1 — AppArmor local override:
+#   /etc/apparmor.d/local/buildah adds "network inet,", "network inet6,", "network unix,"
+#   The local/ override mechanism is the intended customisation path for Ubuntu
+#   AppArmor profiles (profile includes "include if exists <local/buildah>").
+#   Profile is reloaded after writing the override file.
+#
+# Fix 2 — containers storage.conf:
+#   The unprivileged LXC maps container UIDs 0-65535 to host UIDs 100000-165535.
+#   The ubuntu user's subuid range (100000-165535) maps to host UIDs 200000-265535
+#   which is outside the LXC's allocation. newuidmap fails → buildah falls back to
+#   single-UID mapping → cannot lchown files to non-zero GIDs (e.g. GID 42 / shadow).
+#   Fix: ignore_chown_errors = "true" in containers/storage.conf. This is the
+#   standard recommendation for rootless buildah in unprivileged LXC environments.
+#   Security note: chown errors on container image files are cosmetic — ownership
+#   bits inside the image don't affect the host system's security posture.
+#
+# Idempotency:
+#   Both tasks use creates:/when: conditions to skip if already applied.
+#   AppArmor profile reload is always run (idempotent: apparmor_parser -r).
+#
+# Tags: forgejo-runner-pool, buildah, buildah-fix
+
+# ── Fix 1: AppArmor local override ────────────────────────────────────────────
+
+- name: Create /etc/apparmor.d/local/ directory in each runner LXC  # OPS-1136
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- mkdir -p /etc/apparmor.d/local"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, buildah, buildah-fix]
+
+- name: Write buildah AppArmor local override (network inet permission)  # OPS-1136
+  # Writes /etc/apparmor.d/local/buildah inside each LXC.
+  # The main /etc/apparmor.d/buildah profile (Ubuntu 24.04 package) includes this
+  # file via "include if exists <local/buildah>". Adding network inet, here
+  # grants AF_INET socket creation to buildah processes without touching the
+  # Ubuntu-managed profile (which would be overwritten on package updates).
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - bash
+      - "-c"
+      - |
+        cat > /etc/apparmor.d/local/buildah << 'AAEOF'
+        # OPS-1136: Allow buildah network access (UDP for DNS, TCP for registry pulls)
+        # Ubuntu 24.04 AppArmor 4.0 enforce-mode profile lacks network inet by default.
+        network inet,
+        network inet6,
+        network unix,
+        AAEOF
+        apparmor_parser -r /etc/apparmor.d/buildah
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, buildah, buildah-fix]
+
+# ── Fix 2: containers storage.conf (ignore_chown_errors) ─────────────────────
+
+- name: Create ubuntu user containers config dir in each runner LXC  # OPS-1136
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- bash -c 'mkdir -p /home/ubuntu/.config/containers && chown -R ubuntu:ubuntu /home/ubuntu/.config'"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, buildah, buildah-fix]
+
+- name: Write containers storage.conf (ignore_chown_errors) for ubuntu user  # OPS-1136
+  # Writes /home/ubuntu/.config/containers/storage.conf inside each LXC.
+  # ignore_chown_errors: buildah falls back to single-UID mapping in unprivileged LXC
+  # (newuidmap cannot write sub-namespace UID maps outside the LXC's allowed range).
+  # With single mapping, it cannot lchown files to non-zero GIDs like shadow (42).
+  # ignore_chown_errors tells containers/storage to skip the lchown and continue —
+  # acceptable because ownership bits on image storage files don't affect host security.
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - bash
+      - "-c"
+      - |
+        cat > /home/ubuntu/.config/containers/storage.conf << 'STEOF'
+        # OPS-1136: ignore_chown_errors for rootless buildah in unprivileged LXC
+        # newuidmap fails outside LXC UID range; single-mapping can't lchown to GID 42+
+        [storage]
+          driver = "overlay"
+
+        [storage.options]
+          ignore_chown_errors = "true"
+        STEOF
+        chown -R ubuntu:ubuntu /home/ubuntu/.config/containers
+  changed_when: true
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, buildah, buildah-fix]
+
+# ── Verify: buildah can pull a base image ─────────────────────────────────────
+
+- name: Verify buildah can pull python:3.12-slim base image in each LXC  # OPS-1136
+  ansible.builtin.command:
+    argv:
+      - pct
+      - exec
+      - "{{ item.vmid }}"
+      - "--"
+      - su
+      - "-s"
+      - "/bin/bash"
+      - ubuntu
+      - "-c"
+      - "echo 'FROM python:3.12-slim' | buildah bud -t ops1136-verify:latest - 2>&1"
+  register: buildah_verify
+  changed_when: false
+  failed_when: "'Successfully tagged' not in buildah_verify.stdout"
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, buildah, buildah-fix, buildah-verify]
+
+- name: Clean up OPS-1136 verify image from each LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ item.vmid }} -- su -s /bin/bash ubuntu -c 'buildah rmi ops1136-verify:latest 2>/dev/null || true'"
+  changed_when: false
+  loop: "{{ forgejo_runner_pool_instances }}"
+  loop_control:
+    label: "{{ item.name }} (VMID {{ item.vmid }})"
+  tags: [forgejo-runner-pool, buildah, buildah-fix, buildah-verify]
+
+- name: Log buildah verify result per runner
+  ansible.builtin.debug:
+    msg: "{{ item.item.name }} (VMID {{ item.item.vmid }}): buildah pull OK — {{ item.stdout | regex_search('Successfully tagged [^ ]+') }}"
+  loop: "{{ buildah_verify.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  tags: [forgejo-runner-pool, buildah, buildah-fix, buildah-verify]

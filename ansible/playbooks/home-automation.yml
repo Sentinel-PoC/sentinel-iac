@@ -1,0 +1,229 @@
+---
+# home-automation.yml — Home automation stack orchestration
+# OPS-585: HA Container (LXC on pve4) + zwave-js-ui (workstation) + zigbee2mqtt (208-pi-001)
+#
+# Architecture (bridge-on-host, operator-authorized 2026-05-13):
+#   HA LXC (.81) connects to:
+#     - Z-Wave JS UI via WebSocket    → workstation (.55) port 3000
+#     - MQTT (zigbee2mqtt topics)     → 208-pi-001 (.197) port 1883
+#
+# Each play can run independently via --limit or --tags:
+#
+# Apply all three plays:
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     ansible/playbooks/home-automation.yml
+#
+# Apply only zwave-js-ui (workstation):
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit 208pc001 ansible/playbooks/home-automation.yml
+#
+# Apply only zigbee2mqtt (pi):
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit 208-pi-001 ansible/playbooks/home-automation.yml
+#
+# Apply only HA LXC (pve4):
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware ansible/playbooks/home-automation.yml
+#
+# Tag-based execution:
+#   --tags zwave-js-ui      # zwave-js-ui tasks only
+#   --tags zigbee2mqtt      # zigbee2mqtt + mosquitto tasks only
+#   --tags ha-lxc           # HA LXC tasks only
+#   --tags tailscale        # Tailscale subnet router tasks only
+#   --tags verify           # Smoke-check tasks only
+#
+# Prerequisites:
+#   1. VAULT_TOKEN with access to secret/home-assistant/* (read + write)
+#   2. pve4-alienware: already onboarded (pve4-alienware.yml applied)
+#   3. 208-pi-001: already onboarded (base-host.yml applied, UFW active)
+#   4. Workstation: runs this playbook locally (tmux session on the workstation)
+#
+# Post-deploy manual steps:
+#   1. Add Z-Wave JS integration in HA UI:
+#      ws://192.168.12.55:3000 + auth token from Vault secret/home-assistant/zwave
+#   2. Add MQTT integration in HA UI:
+#      mqtt://192.168.12.197:1883 + credentials from Vault secret/home-assistant/mqtt-credentials
+#   3. Put Z-Wave/Zigbee devices in pairing mode to include them in HA
+#      (AC #7 requires a real device join for end-to-end verification)
+
+# ── Play 1: zwave-js-ui on workstation (CachyOS/Arch, local connection) ────────
+- name: Install zwave-js-ui on workstation
+  hosts: workstation
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert this is the CachyOS/Arch workstation
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Archlinux'
+        fail_msg: >
+          zwave-js-ui-host role is written for Arch/CachyOS.
+          Target {{ inventory_hostname }} reports OS family: {{ ansible_os_family }}.
+      tags:
+        - always
+
+    - name: Display zwave-js-ui target
+      ansible.builtin.debug:
+        msg: >-
+          Installing zwave-js-ui on {{ inventory_hostname }}
+          ({{ ansible_host }}, {{ ansible_distribution }}).
+          ZWA-2 path: {{ zwavejs_serial_port | default('/dev/serial/by-id/usb-Nabu_Casa_ZWA-2_80B54EE62650-if00') }}
+      tags:
+        - always
+
+  roles:
+    - role: zwave-js-ui-host
+      tags:
+        - zwave-js-ui
+
+# ── Play 2: zigbee2mqtt + mosquitto on 208-pi-001 (Ubuntu 24.04 aarch64) ───────
+- name: Install zigbee2mqtt and mosquitto on 208-pi-001
+  hosts: 208-pi-001
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert this is a Debian/Ubuntu host (Ubuntu 24.04 aarch64)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: >
+          zigbee2mqtt-host role requires Debian/Ubuntu (for apt + NodeSource).
+          Target {{ inventory_hostname }} reports OS family: {{ ansible_os_family }}.
+      tags:
+        - always
+
+    - name: Display zigbee2mqtt target
+      ansible.builtin.debug:
+        msg: >-
+          Installing zigbee2mqtt + mosquitto on {{ inventory_hostname }}
+          ({{ ansible_host }}, {{ ansible_distribution }} {{ ansible_distribution_version }}).
+          ZBT-1 path: {{ zigbee2mqtt_serial_port | default('/dev/serial/by-id/usb-Nabu_Casa_Home_Assistant_Connect_ZBT-1_f42334c96a39ef11809559f454516304-if00-port0') }}
+      tags:
+        - always
+
+  roles:
+    - role: zigbee2mqtt-host
+      tags:
+        - zigbee2mqtt
+
+# ── Play 3: Home Assistant Container LXC on pve4-alienware ────────────────────
+- name: Provision Home Assistant Container LXC on pve4
+  hosts: pve4-alienware
+  become: false  # ansible_user=root, no sudo needed
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert this is the pve4-alienware Proxmox host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+          - inventory_hostname == 'pve4-alienware'
+        fail_msg: >
+          ha-lxc role is scoped to pve4-alienware (Debian/Proxmox).
+          Target: {{ inventory_hostname }} ({{ ansible_distribution }}).
+      tags:
+        - always
+
+    - name: Display HA LXC target
+      ansible.builtin.debug:
+        msg: >-
+          Provisioning home-assistant LXC (VMID {{ ha_lxc_id }})
+          on {{ inventory_hostname }} ({{ ansible_host }}).
+          LXC IP: {{ ha_lxc_ip }}
+          HA image: {{ ha_image }}
+      tags:
+        - always
+
+  roles:
+    - role: ha-lxc
+      tags:
+        - ha-lxc
+
+# ── Play 4: Tailscale subnet router on 208-pi-001 (OPS-671) ──────────────────
+# Configures 208-pi-001 as a Tailscale subnet router advertising 192.168.12.0/24.
+# Auth key pulled from Vault: secret/tailscale (auth_key field).
+#
+# Apply only Tailscale:
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit 208-pi-001 --tags tailscale \
+#     ansible/playbooks/home-automation.yml
+#
+# NOTE: After first authentication, operator must approve 208-pi-001 in the
+# Tailscale admin console and sign with the tailnet lock hardware key (if enabled).
+- name: Configure Tailscale subnet router on 208-pi-001
+  hosts: 208-pi-001
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Display Tailscale play target
+      ansible.builtin.debug:
+        msg: >-
+          Configuring Tailscale subnet router on {{ inventory_hostname }}
+          ({{ ansible_host }}). Advertising {{ tailscale_advertise_routes | default('192.168.12.0/24') }}.
+      tags:
+        - always
+
+  roles:
+    - role: tailscale-subnet-router
+      tags:
+        - tailscale
+
+# ── Play 5: Frigate NVR on pve4-alienware (OPS-840 / OPS-956) ────────────────
+# Manages Frigate NVR LXC 203: iSCSI storage mount (host-side) +
+# config.yml + docker-compose.yml (pushed into LXC via pct push).
+# Cameras: 2x Reolink via Home Hub at 192.168.100.150 (camera VLAN).
+#
+# Apply only Frigate:
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware --tags frigate-lxc \
+#     ansible/playbooks/home-automation.yml
+#
+# Apply only iSCSI mount (host-side):
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware --tags frigate-iscsi \
+#     ansible/playbooks/home-automation.yml
+#
+# Apply only config (no iSCSI):
+#   VAULT_TOKEN=<t> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware --tags frigate-config \
+#     ansible/playbooks/home-automation.yml
+#
+# Prerequisites:
+#   - LXC 203 provisioned and running (OPS-840)
+#   - TrueNAS iSCSI target iqn.2026-03.farm.haist:frigate-recordings online
+#   - Firewall rule: LXC 203 → 192.168.100.150:554/tcp (camera VLAN)
+#   - VAULT_TOKEN with: secret/reolink + secret/home-assistant read access
+- name: Manage Frigate NVR LXC 203 on pve4-alienware
+  hosts: pve4-alienware
+  become: false  # ansible_user=root, no sudo needed
+  gather_facts: true
+
+  pre_tasks:
+    - name: Assert this is the pve4-alienware Proxmox host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+          - inventory_hostname == 'pve4-alienware'
+        fail_msg: >
+          frigate-lxc role is scoped to pve4-alienware (Debian/Proxmox).
+          Target: {{ inventory_hostname }} ({{ ansible_distribution }}).
+      tags:
+        - always
+
+    - name: Display Frigate LXC target
+      ansible.builtin.debug:
+        msg: >-
+          Managing Frigate NVR LXC {{ frigate_lxc_id }} ({{ frigate_lxc_ip }})
+          on {{ inventory_hostname }} ({{ ansible_host }}).
+          iSCSI LUN: {{ frigate_iscsi_iqn }}
+          Hub: {{ frigate_hub_ip }}:{{ frigate_hub_rtsp_port }}
+      tags:
+        - always
+
+  roles:
+    - role: frigate-lxc
+      tags:
+        - frigate-lxc

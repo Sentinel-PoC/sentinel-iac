@@ -1,0 +1,133 @@
+---
+# integrations.yml — Section E: media + presence + comms basics
+# OPS-586 Section E | OPS-617 telegram_bot YAML removal
+#
+# Deploys configuration fragments for Home Assistant integrations.
+#
+# ALL six Section E integrations use HA config flow (UI setup):
+#   1. Jellyfin    — Settings → D&S → Add Integration → Jellyfin
+#   2. UniFi UDM   — Settings → D&S → Add Integration → UniFi Network
+#   3. Telegram    — Settings → D&S → Add Integration → Telegram bot
+#                    (YAML config removed in OPS-617 — HA 2026.5.1 rejects YAML
+#                     for telegram_bot; CONFIG_SCHEMA = config_entry_only_config_schema)
+#   4. Google Cal  — OAuth via Settings → D&S → Add Integration → Google Calendar
+#   5. NWS         — Settings → D&S → Add Integration → National Weather Service
+#   6. TrueNAS     — HACS + Settings → D&S → Add Integration → TrueNAS
+#
+# Ansible deploys:
+#   - packages/section_e_automations.yaml (automations using telegram_bot.send_message
+#     service — works once Telegram bot is configured via UI)
+#   - lovelace/section_e.yaml (side-dashboard with all Section E cards)
+#   - Re-renders configuration.yaml (lovelace dashboards + packages config)
+#
+# Upstream refs:
+#   Jellyfin:     https://www.home-assistant.io/integrations/jellyfin/
+#   UniFi:        https://www.home-assistant.io/integrations/unifi/
+#   Telegram bot: https://www.home-assistant.io/integrations/telegram_bot/
+#   Google Cal:   https://www.home-assistant.io/integrations/google/
+#   NWS:          https://www.home-assistant.io/integrations/nws/
+#   TrueNAS HACS: https://github.com/tomaae/homeassistant-truenas
+#
+# NOTE on TrueNAS repo: operator brief cited "ellis-rebernick/hass-truenas"
+# which does not exist on GitHub (verified 2026-05-13 via GitHub API).
+# The canonical HACS TrueNAS integration is tomaae/homeassistant-truenas.
+#
+# Pattern: render Jinja2 template → write to PVE host /tmp/ → pct push into LXC
+# Handler: notify "Restart home-assistant container" on config changes
+
+# ── 1. Ensure config subdirectories exist inside LXC ─────────────────────────
+
+- name: Create HA packages directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/packages"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+- name: Create HA lovelace directory inside LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ha_lxc_id }} -- mkdir -p {{ ha_config_dir }}/lovelace"
+  changed_when: false
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+# ── 2. Render + push packages/section_e_automations.yaml ─────────────────────
+# Automations:
+#   - Telegram /status command → echo HA uptime + timestamp
+#     (requires Telegram bot set up via HA UI — Settings → D&S → Telegram bot)
+#   - NWS morning weather summary → Telegram notification at 07:00
+
+- name: Render section_e_automations.yaml to PVE host temp location
+  ansible.builtin.template:
+    src: packages/section_e_automations.yaml.j2
+    dest: /tmp/ha-section-e-automations.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+- name: Push section_e_automations.yaml into HA LXC packages/
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-section-e-automations.yaml {{ ha_config_dir }}/packages/section_e_automations.yaml"
+  changed_when: true
+  notify: Restart home-assistant container
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+- name: Remove section_e_automations.yaml temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-section-e-automations.yaml
+    state: absent
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+# ── 3. Render + push lovelace/section_e.yaml ─────────────────────────────────
+# Lovelace side-dashboard (mode: yaml, sidebar entry "Media & Comms").
+# Cards assume operator has completed UI setup for Jellyfin, UniFi, GCal, NWS.
+# Entity IDs are documented in defaults/main.yml comments.
+# Ref: https://www.home-assistant.io/dashboards/dashboards/
+
+- name: Render section_e lovelace dashboard to PVE host temp location
+  ansible.builtin.template:
+    src: lovelace/section_e.yaml.j2
+    dest: /tmp/ha-lovelace-section-e.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-integrations, lovelace]
+
+- name: Push section_e lovelace dashboard into HA LXC lovelace/
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-lovelace-section-e.yaml {{ ha_config_dir }}/lovelace/section_e.yaml"
+  changed_when: true
+  tags: [ha-lxc, homeassistant, ha-integrations, lovelace]
+
+- name: Remove section_e lovelace temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-lovelace-section-e.yaml
+    state: absent
+  tags: [ha-lxc, homeassistant, ha-integrations, lovelace]
+
+# ── 4. Update configuration.yaml (re-render and push) ────────────────────────
+# configuration.yaml.j2 includes (OPS-617: telegram_bot !include removed):
+#   - homeassistant: packages: !include_dir_named packages
+#   - lovelace: dashboards: lovelace-media-comms: (yaml, section_e.yaml)
+# Re-run ha_config tasks to push the updated template.
+
+- name: Re-render configuration.yaml to PVE host temp location (Section E additions)
+  ansible.builtin.template:
+    src: configuration.yaml.j2
+    dest: /tmp/ha-configuration.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+- name: Re-push configuration.yaml into HA LXC
+  ansible.builtin.command:
+    cmd: "pct push {{ ha_lxc_id }} /tmp/ha-configuration.yaml {{ ha_config_dir }}/configuration.yaml"
+  changed_when: true
+  notify: Restart home-assistant container
+  tags: [ha-lxc, homeassistant, ha-integrations]
+
+- name: Remove configuration.yaml temp file from PVE host
+  ansible.builtin.file:
+    path: /tmp/ha-configuration.yaml
+    state: absent
+  tags: [ha-lxc, homeassistant, ha-integrations]

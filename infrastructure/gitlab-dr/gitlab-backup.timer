@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly GitLab Data Backup
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

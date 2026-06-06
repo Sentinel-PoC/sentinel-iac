@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Sync all MinIO buckets to Backblaze B2 via rclone crypt
+set -euo pipefail
+
+echo "[$(date)] Starting B2 backup sync..."
+
+{% for bucket in minio_buckets %}
+echo "[$(date)] Syncing {{ bucket }}..."
+rclone sync "minio:{{ bucket }}" "b2-encrypted:{{ bucket }}" \
+    --transfers 4 \
+    --checkers 8 \
+    --log-level INFO
+{% endfor %}
+
+echo "[$(date)] B2 backup sync completed successfully"

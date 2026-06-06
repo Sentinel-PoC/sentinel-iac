@@ -1,0 +1,28 @@
+---
+# main.yml — scanopy-daemon-lxc role entry point (OPS-1123)
+#
+# This role runs against pve4-alienware (the Proxmox host), NOT inside the LXC.
+# Container interactions during bootstrap happen via pct exec from the host.
+# After SSH bootstrap, subsequent tasks can target the LXC directly.
+#
+# Pattern mirrors powerdns-lxc (OPS-673) and ha-lxc (OPS-585).
+#
+# Operator constraints (OPS-1123):
+# - LXC VMID 305, IP 192.168.12.93, hostname scanopy-daemon
+# - SCANOPY_INTERFACES=eth0 (192.168.12.0/24 interface only — scope restriction)
+# - SCANOPY_SERVER_URL=https://scanopy.208.haist.farm (via Pangolin -> OKD Route)
+# - Harbor pull creds from Vault: secret/harbor/robot-pull
+# - cosign verify at /etc/cosign/cosign.pub before container start
+#
+# Tags:
+#   scanopy-lxc       — LXC provisioning (pct create, start, bootstrap)
+#   scanopy-daemon    — daemon container deploy (podman pull, verify, systemd unit)
+#   scanopy-verify    — post-deploy health checks
+
+- name: Include LXC provisioning tasks
+  ansible.builtin.import_tasks: lxc_provision.yml
+  tags: [scanopy-lxc, lxc, provision]
+
+- name: Include daemon deploy tasks
+  ansible.builtin.import_tasks: daemon_deploy.yml
+  tags: [scanopy-daemon, daemon, deploy]

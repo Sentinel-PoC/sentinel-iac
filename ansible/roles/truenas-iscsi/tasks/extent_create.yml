@@ -1,0 +1,105 @@
+---
+# truenas-iscsi | extent_create — idempotent iSCSI extent creation (OPS-1011)
+#
+# Creates an iSCSI extent if one with truenas_iscsi_extent_name does not already exist.
+# Will not modify an existing extent.
+# Requires truenas_iscsi_extent_name and (for DISK type) truenas_iscsi_extent_disk.
+#
+# DISK-backed extent: set truenas_iscsi_extent_type: "DISK"
+#                     set truenas_iscsi_extent_disk: "zvol/POOL/PATH"
+#                     e.g. "zvol/SSD/iscsi-okd/minio-replica-pg"
+#
+# FILE-backed extent: set truenas_iscsi_extent_type: "FILE"
+#                     set truenas_iscsi_extent_filepath: "/mnt/POOL/path/name.img"
+#                     set truenas_iscsi_extent_filesize (in bytes)
+
+- name: truenas-iscsi/extent_create | validate required variables
+  ansible.builtin.assert:
+    that:
+      - truenas_iscsi_extent_name | length > 0
+      - >-
+        (truenas_iscsi_extent_type == 'DISK' and truenas_iscsi_extent_disk | length > 0)
+        or
+        (truenas_iscsi_extent_type == 'FILE' and truenas_iscsi_extent_filepath | length > 0)
+    fail_msg: >
+      truenas_iscsi_extent_name must be set, and for DISK type truenas_iscsi_extent_disk
+      must be set (e.g. 'zvol/SSD/iscsi-okd/name'); for FILE type
+      truenas_iscsi_extent_filepath must be set.
+
+- name: truenas-iscsi/extent_create | fetch all extents to check for existing
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_iscsi_all_extents
+  changed_when: false
+
+- name: truenas-iscsi/extent_create | check if extent already exists by name
+  ansible.builtin.set_fact:
+    truenas_iscsi_extent_existing: >-
+      {{
+        truenas_iscsi_all_extents.json
+        | selectattr('name', 'equalto', truenas_iscsi_extent_name)
+        | list
+      }}
+
+- name: truenas-iscsi/extent_create | create DISK-backed extent (skip if exists)
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ truenas_iscsi_extent_name }}"
+      type: "DISK"
+      disk: "{{ truenas_iscsi_extent_disk }}"
+      blocksize: "{{ truenas_iscsi_extent_blocksize | int }}"
+      rpm: "{{ truenas_iscsi_extent_rpm }}"
+      comment: "{{ truenas_iscsi_extent_comment }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  when:
+    - truenas_iscsi_extent_existing | length == 0
+    - truenas_iscsi_extent_type == 'DISK'
+  register: truenas_iscsi_extent_create_result
+
+- name: truenas-iscsi/extent_create | create FILE-backed extent (skip if exists)
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/iscsi/extent"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ truenas_iscsi_extent_name }}"
+      type: "FILE"
+      path: "{{ truenas_iscsi_extent_filepath }}"
+      filesize: "{{ truenas_iscsi_extent_filesize }}"
+      blocksize: "{{ truenas_iscsi_extent_blocksize | int }}"
+      comment: "{{ truenas_iscsi_extent_comment }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  when:
+    - truenas_iscsi_extent_existing | length == 0
+    - truenas_iscsi_extent_type == 'FILE'
+  register: truenas_iscsi_extent_create_file_result
+
+- name: truenas-iscsi/extent_create | report outcome
+  ansible.builtin.debug:
+    msg: >-
+      {{
+        'Created extent: ' + truenas_iscsi_extent_name
+        + ' type=' + truenas_iscsi_extent_type
+        + (' disk=' + truenas_iscsi_extent_disk if truenas_iscsi_extent_type == 'DISK'
+           else ' path=' + truenas_iscsi_extent_filepath)
+        if truenas_iscsi_extent_existing | length == 0
+        else 'Extent already exists (no-op): ' + truenas_iscsi_extent_name
+        + ' id=' + (truenas_iscsi_extent_existing | first).id | string
+      }}
+  changed_when: false

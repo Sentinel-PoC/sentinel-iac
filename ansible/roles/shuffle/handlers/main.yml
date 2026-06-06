@@ -1,0 +1,9 @@
+---
+# handlers/main.yml — OPS-573
+
+- name: restart shuffle-full
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ shuffle_dir }}"
+  listen: "restart shuffle-full"
+  changed_when: true

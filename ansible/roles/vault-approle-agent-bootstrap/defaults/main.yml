@@ -1,0 +1,29 @@
+---
+# vault-approle-agent-bootstrap — defaults
+# Tracking: OPS-464 (Phase A + Phase B)
+#
+# Non-sensitive configuration only.
+# Sensitive vars (vault_token) MUST be supplied via -e — never stored here.
+
+agent_roles:
+  - worker
+  - planner
+  - judge
+  - scribe
+
+vault_addr: "https://vault.208.haist.farm"
+
+# AppRole auth method mount path (already enabled on this platform)
+vault_approle_mount_path: "approle"
+
+# Bootstrap AppRole token parameters (per SEC-49 design doc §"What New Vault Objects Are Required")
+# secret_id_num_uses=1:  single-use; leaked secret_id cannot be replayed
+# secret_id_ttl=1h:      matches operator session start window
+# token_ttl=5m:          bootstrap token lives only long enough to read KC creds
+# token_no_default_policy=true: strip Vault default policy; only bootstrap policy granted
+vault_bootstrap_secret_id_num_uses: 1
+vault_bootstrap_secret_id_ttl: "1h"
+vault_bootstrap_token_ttl: "5m"
+vault_bootstrap_token_max_ttl: "5m"
+vault_bootstrap_token_explicit_max_ttl: "5m"
+vault_bootstrap_token_no_default_policy: true

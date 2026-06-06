@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Proxmox VM Snapshot Automation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxmox-snapshot.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=proxmox-snapshot
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

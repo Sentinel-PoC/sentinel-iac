@@ -1,0 +1,14 @@
+---
+- name: Configure config-server for HA resilience
+  hosts: config-server
+  become: true
+  roles:
+    - common
+    - config-server
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Tag-gated; --tags jit-ssh-trust runs only this.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

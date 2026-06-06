@@ -1,0 +1,36 @@
+---
+# sentinel-agent-workload role entry point.
+# OPS-545 / OPS-351 Phase 4.5.
+#
+# Apply ORDER:
+#   1. group  — sentinel-agents (PLURAL); hard-guard against singular collision
+#   2. users  — per-role user (sentinel-worker for Phase 4.5)
+#   3. spire-agent CLI host binary — only if not already installed
+#   4. sudoers — interactive user → sentinel-<role> for the auth script
+#
+# Idempotency: every task is name-or-attribute-keyed; 3-run pass should produce
+# N/0/0 (first apply changes, second + third are no-ops).
+
+- name: Apply group + singular-vs-plural hard guard
+  ansible.builtin.import_tasks: group.yml
+  tags: [sentinel-agent-workload, sentinel-workload-group]
+
+- name: Provision per-role workload users
+  ansible.builtin.include_tasks: user.yml
+  loop: "{{ sentinel_workload_roles }}"
+  loop_control:
+    loop_var: workload_role
+    label: "sentinel-{{ workload_role }}"
+  tags: [sentinel-agent-workload, sentinel-workload-user]
+
+- name: Install spire-agent CLI host binary (if not already present)
+  ansible.builtin.import_tasks: spire-agent-cli.yml
+  tags: [sentinel-agent-workload, spire-agent-cli]
+
+- name: Configure sudoers for re-exec of agent-vault-auth.sh as role user
+  ansible.builtin.include_tasks: sudoers.yml
+  loop: "{{ sentinel_workload_roles }}"
+  loop_control:
+    loop_var: workload_role
+    label: "sudoers-sentinel-{{ workload_role }}"
+  tags: [sentinel-agent-workload, sentinel-workload-sudoers]

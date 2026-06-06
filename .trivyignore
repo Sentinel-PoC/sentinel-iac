@@ -1,0 +1,2 @@
+# Trivy ignore file - add accepted finding IDs here
+# Format: AVD-XXX-XXXX or CVE-XXXX-XXXXX

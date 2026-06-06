@@ -1,0 +1,28 @@
+---
+# MISP role — main task entry point — OPS-571
+# Deploys MISP via Docker Compose (upstream: MISP/misp-docker) with:
+#   - MariaDB 10.11 backing (upstream: mariadb:10.11 — PostgreSQL explicitly unsupported)
+#   - Keycloak OIDC SSO
+#   - 5 configured threat intel feeds
+#   - Wazuh integration (custom-misp script on wazuh-server)
+
+- name: Include vault-secrets tasks
+  ansible.builtin.include_tasks: vault-secrets.yml
+  tags: [misp, vault]
+
+- name: Include deploy tasks
+  ansible.builtin.include_tasks: deploy.yml
+  tags: [misp, deploy]
+
+- name: Include configure tasks
+  ansible.builtin.include_tasks: configure.yml
+  tags: [misp, configure]
+
+- name: Include feeds tasks
+  ansible.builtin.include_tasks: feeds.yml
+  tags: [misp, feeds]
+
+- name: Include wazuh-integration tasks
+  ansible.builtin.include_tasks: wazuh-integration.yml
+  when: misp_wazuh_enabled | bool
+  tags: [misp, wazuh]

@@ -1,0 +1,114 @@
+---
+# OPS-670/OPS-673/OPS-676: powerdns-recursor tasks
+#
+# Flow:
+#   1. Build forward_zones list: internal zones -> auth, . -> upstream resolvers
+#   2. Assemble pdns_rec_config YAML dict for Galaxy role
+#   3. Ensure recursor.conf exists with valid (empty) traditional format content
+#   4. Call PowerDNS.pdns_recursor Galaxy role (writes YAML to recursor.yml)
+#   5. Write recursor.conf in full traditional key=value format (pdns-recursor 4.9.x)
+#
+# pdns-recursor 4.9.3 (Ubuntu 24.04 noble/universe) version notes:
+#   - Does NOT use YAML config via recursor.yml (YAML is a 5.x feature in practice)
+#   - Reads recursor.conf in traditional key=value format
+#   - Galaxy role v2.1.0 generates YAML; we direct it to recursor.yml (harmless)
+#   - pdns_recursor --config=check validates recursor.conf (traditional):
+#       - empty file -> exits 0 (no invalid settings to reject)
+#       - YAML content -> exits 1 (unknown settings)
+#   - Strategy: ensure empty recursor.conf before Galaxy, Galaxy writes YAML to
+#     recursor.yml, config-check passes on empty recursor.conf, then we write
+#     full traditional-format recursor.conf (with dont-query fix) and trigger restart.
+#
+# OPS-676: Root cause of SERVFAIL was dont-query=127.0.0.0/8 (default) blocking
+#   forward-zones targets at 127.0.0.1:5300. Fix in templates/recursor-traditional.conf.j2
+#   and defaults/main.yml (pdns_rec_svc_dont_query variable).
+
+# ---------------------------------------------------------------------------
+# 1. Build forward zones
+# ---------------------------------------------------------------------------
+- name: Build internal zone forwarders list
+  ansible.builtin.set_fact:
+    _pdns_rec_internal_forward_zones: >-
+      {{ _pdns_rec_internal_forward_zones | default([]) + [
+        {
+          'zone': item,
+          'forwarders': [pdns_rec_svc_auth_address ~ ':' ~ pdns_rec_svc_auth_port],
+          'recurse': false
+        }
+      ] }}
+  loop: "{{ pdns_rec_svc_internal_zones }}"
+  tags: [powerdns-recursor, pdns-recursor]
+
+- name: Build external forwarder entry (forward-all via zone ".")
+  ansible.builtin.set_fact:
+    _pdns_rec_external_forward_zones:
+      - zone: "."
+        forwarders: "{{ pdns_rec_svc_upstream_resolvers }}"
+        recurse: true
+  tags: [powerdns-recursor, pdns-recursor]
+
+# ---------------------------------------------------------------------------
+# 2. Assemble pdns_rec_config YAML dict (passed to Galaxy for recursor.yml)
+# ---------------------------------------------------------------------------
+- name: Assemble pdns_rec_config dict
+  ansible.builtin.set_fact:
+    _pdns_rec_config_computed:
+      incoming:
+        listen: >-
+          {{ pdns_rec_svc_listen_addresses | map('regex_replace', '$', ':53') | list }}
+        allow_from: "{{ pdns_rec_svc_allow_from }}"
+      recursor:
+        forward_zones: "{{ _pdns_rec_internal_forward_zones }}"
+        forward_zones_recurse: "{{ _pdns_rec_external_forward_zones }}"
+      logging:
+        log_common_errors: true
+        quiet: "{{ not pdns_rec_svc_log_queries }}"
+  tags: [powerdns-recursor, pdns-recursor]
+
+# ---------------------------------------------------------------------------
+# 3. Ensure recursor.conf is empty (or created) before Galaxy role runs
+#    pdns_recursor --config=check exits 0 on an empty recursor.conf.
+#    When recursor.conf has stale YAML content it exits 1 (unknown setting).
+#    Galaxy role will write YAML to recursor.yml (see step 4 vars below).
+#    Full traditional-format config (with dont-query fix) is written in step 5.
+# ---------------------------------------------------------------------------
+- name: Ensure recursor.conf exists and is empty (so Galaxy config-check passes)
+  ansible.builtin.copy:
+    content: "# Ansible managed — replaced by full config in next task\n"
+    dest: /etc/powerdns/recursor.conf
+    owner: root
+    group: pdns
+    mode: "0640"
+    force: true    # Always overwrite — stale YAML causes --config=check to fail
+  tags: [powerdns-recursor, pdns-recursor]
+
+# ---------------------------------------------------------------------------
+# 4. Invoke Galaxy role — PowerDNS.pdns_recursor
+#    pdns_rec_config_file: recursor.yml — Galaxy writes YAML to recursor.yml
+#    (NOT recursor.conf). --config=check validates recursor.conf (empty/placeholder).
+# ---------------------------------------------------------------------------
+- name: Apply PowerDNS.pdns_recursor (Galaxy) role — install + configure
+  ansible.builtin.include_role:
+    name: PowerDNS.pdns_recursor
+  vars:
+    pdns_rec_install_repo: "{{ pdns_rec_svc_install_repo }}"
+    pdns_rec_config: "{{ _pdns_rec_config_computed }}"
+    pdns_rec_config_file: "recursor.yml"    # Galaxy writes YAML here (harmless for 4.9.x)
+  tags: [powerdns-recursor, pdns-recursor]
+
+# ---------------------------------------------------------------------------
+# 5. Write recursor.conf in traditional key=value format for pdns-recursor 4.9.x
+#    Overwrites the placeholder from step 3 with the full working config.
+#    pdns-recursor 4.9.x reads recursor.conf as traditional format only;
+#    recursor.yml (YAML tech-preview) was not built into 4.9.3-1build3.Ubuntu.
+#    Includes dont-query override (OPS-676) to allow forwarding to 127.0.0.1:5300.
+# ---------------------------------------------------------------------------
+- name: Write recursor.conf in traditional key=value format (pdns-recursor 4.9.x)
+  ansible.builtin.template:
+    src: recursor-traditional.conf.j2
+    dest: /etc/powerdns/recursor.conf
+    owner: root
+    group: pdns
+    mode: "0640"
+  notify: restart pdns-recursor
+  tags: [powerdns-recursor, pdns-recursor]

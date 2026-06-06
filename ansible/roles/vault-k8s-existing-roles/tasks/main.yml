@@ -1,0 +1,79 @@
+---
+# vault-k8s-existing-roles tasks
+# Tracking: OPS-1206
+#
+# Codifies the 3 Vault Kubernetes auth roles (+ their backing policies) that
+# existed in live Vault with no IaC source of truth. Discovered during OPS-1202
+# when the cert-manager role audit revealed all k8s auth roles were out-of-band.
+#
+# Roles codified (sourced from vault read auth/kubernetes/role/* 2026-06-05):
+#   etcd-backup     — etcd-backup-sa / sentinel-ops ns / etcd-backup-policy / 1h
+#   external-secrets — multiple SAs / multiple ns / eso-read-secrets / 1h
+#   sentinel-ops    — sentinel-ops-sa / sentinel-ops ns / sentinel-ops-policy / 24h
+#
+# All three roles and their policies already exist in Vault.
+# This play is an idempotent upsert — re-applying writes identical data,
+# so live state is unchanged. Safe to re-run.
+#
+# After a Vault DR restore, run this play (and vault-k8s-cert-manager.yml)
+# to restore all 4 k8s auth roles from IaC.
+#
+# Idempotency:
+#   - sys/policies/acl/<name>: idempotent upsert (same HCL → no change in effect)
+#   - auth/kubernetes/role/<name>: idempotent upsert (same config → no change)
+#   - vault_write may report changed=true on re-runs (response-echo quirk)
+#
+# Requires at runtime:
+#   vault_token — Vault token with sys/policies/acl + auth/kubernetes/role write scope
+
+# ─── Pre-flight ───────────────────────────────────────────────────────────────
+
+- name: Pre-flight | assert vault_token is provided
+  ansible.builtin.assert:
+    that:
+      - vault_token | default('') | length > 0
+    fail_msg: >-
+      vault_token is required. Pass via:
+        -e vault_token=<token>
+  no_log: false
+  tags: [vault-k8s-existing, validation]
+
+# ─── Phase 1: Upsert Vault policies ──────────────────────────────────────────
+# Write each policy from the HCL file in files/policies/.
+# Policy file naming: <policy_name>.hcl (matches the policy_name in the role config).
+
+- name: "Phase 1 | Write Vault policy | {{ role_item.policy_name }}"
+  community.hashi_vault.vault_write:
+    path: "sys/policies/acl/{{ role_item.policy_name }}"
+    data:
+      policy: "{{ lookup('file', role_path + '/files/policies/' + role_item.policy_name + '.hcl') }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ vault_k8s_existing_roles }}"
+  loop_control:
+    loop_var: role_item
+    label: "{{ role_item.policy_name }}"
+  tags: [vault-k8s-existing, policies]
+
+# ─── Phase 2: Upsert Kubernetes auth roles ────────────────────────────────────
+# Write each k8s auth role binding the service accounts to the policy.
+# All roles live under auth/{{ vault_k8s_mount_path }}/role/<name>.
+
+- name: "Phase 2 | Write k8s auth role | {{ role_item.role_name }}"
+  community.hashi_vault.vault_write:
+    path: "auth/{{ vault_k8s_mount_path }}/role/{{ role_item.role_name }}"
+    data:
+      bound_service_account_names: "{{ role_item.sa_names }}"
+      bound_service_account_namespaces: "{{ role_item.namespaces }}"
+      policies:
+        - "{{ role_item.policy_name }}"
+      ttl: "{{ role_item.ttl }}"
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+  loop: "{{ vault_k8s_existing_roles }}"
+  loop_control:
+    loop_var: role_item
+    label: "{{ role_item.role_name }}"
+  tags: [vault-k8s-existing, roles]

@@ -1,0 +1,58 @@
+---
+# defaults/main.yml — jellyfin-lxc role (OPS-1030)
+#
+# Role targets the Jellyfin LXC (100) directly at 192.168.12.61 via SSH.
+# Jellyfin is LAN-only per operator decision 2026-05-28 (OPS-1032 cancelled).
+#
+# Key fix: PublishedServerUriBySubnet must be empty — the stale entries
+# pointed to https://192.168.12.168 (Pangolin VIP, decommissioned OPS-974).
+# EnablePublishedServerUriByRequest is false — no reverse proxy in use.
+
+# --- Network XML path ---
+jellyfin_network_xml_path: /etc/jellyfin/network.xml
+
+# --- Port config ---
+jellyfin_internal_http_port: 8096
+jellyfin_internal_https_port: 8920
+jellyfin_public_http_port: 443
+jellyfin_public_https_port: 443
+
+# --- TLS (disabled; LAN-only, no external cert) ---
+jellyfin_enable_https: false
+jellyfin_require_https: false
+jellyfin_certificate_path: ""
+jellyfin_certificate_password: ""
+
+# --- Discovery ---
+jellyfin_auto_discovery: true
+jellyfin_enable_upnp: false
+
+# --- Network stack ---
+jellyfin_enable_ipv4: true
+jellyfin_enable_ipv6: false
+jellyfin_enable_remote_access: true
+
+# --- LAN subnets (used for LocalNetworkSubnets) ---
+jellyfin_local_network_subnets:
+  - 192.168.12.0/24
+  - 192.168.50.0/24
+
+# --- Known proxies (Wireguard/WAN ranges) ---
+jellyfin_known_proxies:
+  - 10.128.0.0/14
+  - 172.30.0.0/16
+
+# --- Virtual interface exclusion ---
+jellyfin_ignore_virtual_interfaces: true
+jellyfin_virtual_interface_names:
+  - veth
+
+# --- Published server URI override (MUST be empty for LAN-only) ---
+# OPS-1030: stale entries were: [192.168.12.0/24]https://192.168.12.168
+# and [192.168.50.0/24]https://192.168.12.168.
+# Pangolin VIP 192.168.12.168 was decommissioned by OPS-974 on 2026-05-26.
+# Empty list → Jellyfin advertises its own LAN IP for auto-discovery.
+jellyfin_published_server_uri_by_subnet: []
+
+# --- Disable URI-by-request (no reverse proxy) ---
+jellyfin_enable_published_server_uri_by_request: false

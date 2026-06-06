@@ -1,0 +1,223 @@
+---
+# federation.yml — OPS-605 Phase 2
+# Provisions Authentik <-> Keycloak OIDC federation via Authentik API.
+#
+# Creates an OAuth/OIDC source in Authentik that federates Keycloak
+# (sentinel realm) as an upstream IdP. Existing Keycloak users can sign
+# into Authentik via "Sign in with Keycloak" without password migration.
+#
+# Self-contained: reads required secrets from Vault directly (so this file
+# is safely runnable standalone with --tags federation).
+# If vault-secrets.yml already ran in the same play, the set_fact tasks here
+# will overwrite with the same values (no-op).
+#
+# Vault paths:
+#   secret/authentik.admin_token              — Authentik API token
+#   secret/authentik/keycloak-upstream        — client_id + client_secret
+#
+# Idempotency: checks for existing source by slug before creating.
+# If source exists, issues a PATCH to reconcile state.
+
+# ─── Pre-flight: read Vault secrets ──────────────────────────────────────────
+
+- name: "Federation | Read Authentik admin token from Vault"
+  community.hashi_vault.vault_kv2_get:
+    engine_mount_point: secret
+    path: authentik
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+    validate_certs: false
+  register: _fed_authentik_vault
+  no_log: true
+  tags: [authentik, federation]
+
+- name: "Federation | Read Keycloak federation secret from Vault"
+  community.hashi_vault.vault_kv2_get:
+    engine_mount_point: secret
+    path: authentik/keycloak-upstream
+    url: "{{ vault_addr }}"
+    token: "{{ vault_token }}"
+    auth_method: token
+    validate_certs: false
+  register: _fed_keycloak_vault
+  no_log: true
+  tags: [authentik, federation]
+
+- name: "Federation | Set federation credential facts"
+  ansible.builtin.set_fact:
+    authentik_admin_token: "{{ _fed_authentik_vault.secret.admin_token }}"
+    authentik_keycloak_client_id: "{{ _fed_keycloak_vault.secret.client_id }}"
+    authentik_keycloak_client_secret: "{{ _fed_keycloak_vault.secret.client_secret }}"
+  no_log: true
+  tags: [authentik, federation]
+#
+# Vault paths:
+#   secret/authentik.admin_token          — Authentik API token (bootstrap)
+#   secret/authentik/keycloak-upstream    — client_id + client_secret
+#   secret/keycloak/admin                 — Keycloak admin (used to create client in Phase 2)
+#
+# Keycloak client: "authentik-federation" in realm "sentinel"
+# Keycloak client UUID: 994693be-2dd4-46d0-94c2-50784c16ad51
+# Redirect URI:  https://auth-next.208.haist.farm/source/oauth/callback/keycloak-upstream/
+#
+# Tracking: OPS-605
+
+# ─── Step 1: Resolve flow UUIDs by slug ──────────────────────────────────────
+# Resolve dynamically rather than hardcoding UUIDs so this role is portable
+# to a fresh Authentik instance.
+
+- name: "Federation | Resolve authentication flow UUID by slug"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/flows/instances/?slug=default-source-authentication"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_auth_flow_result
+  tags: [authentik, federation]
+
+- name: "Federation | Resolve enrollment flow UUID by slug"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/flows/instances/?slug=default-source-enrollment"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_enroll_flow_result
+  tags: [authentik, federation]
+
+- name: "Federation | Set flow UUID facts"
+  ansible.builtin.set_fact:
+    authentik_source_auth_flow_uuid: "{{ authentik_auth_flow_result.json.results[0].pk }}"
+    authentik_source_enroll_flow_uuid: "{{ authentik_enroll_flow_result.json.results[0].pk }}"
+  tags: [authentik, federation]
+
+# ─── Step 2: Check if source already exists ──────────────────────────────────
+
+- name: "Federation | Check if keycloak-upstream source exists"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/sources/oauth/?slug=keycloak-upstream"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_source_check
+  tags: [authentik, federation]
+
+- name: "Federation | Set source existence fact"
+  ansible.builtin.set_fact:
+    authentik_source_exists: "{{ authentik_source_check.json.pagination.count | int > 0 }}"
+    authentik_source_pk: >-
+      {{
+        authentik_source_check.json.results[0].pk
+        if (authentik_source_check.json.pagination.count | int > 0)
+        else ''
+      }}
+  tags: [authentik, federation]
+
+# ─── Step 3: Create source if absent ─────────────────────────────────────────
+# POST /api/v3/sources/oauth/ — only when source does not exist.
+# provider_type "openidconnect" uses OIDC discovery URL to resolve endpoints.
+# user_matching_mode "email_link": link new Authentik accounts to existing
+# accounts that share the same email address from Keycloak claims.
+
+- name: "Federation | Create keycloak-upstream OAuth source"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/sources/oauth/"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "keycloak-upstream"
+      slug: "keycloak-upstream"
+      provider_type: "openidconnect"
+      consumer_key: "{{ authentik_keycloak_client_id }}"
+      consumer_secret: "{{ authentik_keycloak_client_secret }}"
+      oidc_well_known_url: "{{ authentik_keycloak_discovery_url }}"
+      user_matching_mode: "email_link"
+      enrollment_flow: "{{ authentik_source_enroll_flow_uuid }}"
+      authentication_flow: "{{ authentik_source_auth_flow_uuid }}"
+      additional_scopes: "openid email profile groups"
+      enabled: true
+    status_code: 201
+    return_content: true
+  when: not authentik_source_exists
+  register: authentik_source_create
+  no_log: true
+  tags: [authentik, federation]
+
+- name: "Federation | Log creation result (slug only)"
+  ansible.builtin.debug:
+    msg: "Created keycloak-upstream source: pk={{ authentik_source_create.json.pk }}"
+  when:
+    - not authentik_source_exists
+    - authentik_source_create is defined
+    - authentik_source_create.json is defined
+  tags: [authentik, federation]
+
+# ─── Step 4: Reconcile source if already exists ───────────────────────────────
+# PATCH /api/v3/sources/oauth/{slug}/ — only when source already exists.
+# Reconciles key fields without touching PKs or managed fields.
+
+- name: "Federation | Reconcile keycloak-upstream source (PATCH)"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/sources/oauth/keycloak-upstream/"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      consumer_key: "{{ authentik_keycloak_client_id }}"
+      consumer_secret: "{{ authentik_keycloak_client_secret }}"
+      oidc_well_known_url: "{{ authentik_keycloak_discovery_url }}"
+      user_matching_mode: "email_link"
+      enrollment_flow: "{{ authentik_source_enroll_flow_uuid }}"
+      authentication_flow: "{{ authentik_source_auth_flow_uuid }}"
+      additional_scopes: "openid email profile groups"
+      enabled: true
+    status_code: 200
+    return_content: true
+  when: authentik_source_exists
+  register: authentik_source_patch
+  no_log: true
+  tags: [authentik, federation]
+
+- name: "Federation | Log reconcile result"
+  ansible.builtin.debug:
+    msg: "Reconciled keycloak-upstream source: pk={{ authentik_source_pk }}"
+  when: authentik_source_exists
+  tags: [authentik, federation]
+
+# ─── Step 5: Verify source is present ────────────────────────────────────────
+
+- name: "Federation | Verify keycloak-upstream source is present and enabled"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/sources/oauth/?slug=keycloak-upstream"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_source_verify
+  failed_when: >
+    authentik_source_verify.json.pagination.count | int == 0
+    or not authentik_source_verify.json.results[0].enabled
+  tags: [authentik, federation, verify]
+
+- name: "Federation | Assert source slug and provider_type"
+  ansible.builtin.assert:
+    that:
+      - authentik_source_verify.json.results[0].slug == 'keycloak-upstream'
+      - authentik_source_verify.json.results[0].provider_type == 'openidconnect'
+    success_msg: "keycloak-upstream OIDC source present and enabled"
+    fail_msg: >-
+      keycloak-upstream source missing or wrong provider_type:
+      {{ authentik_source_verify.json | to_nice_json }}
+  tags: [authentik, federation, verify]

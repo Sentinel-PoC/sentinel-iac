@@ -1,0 +1,53 @@
+---
+# defaults/main.yml — zwave-js-ui-host role (OPS-585)
+#
+# Installs zwave-js-ui as a systemd service on the host that physically has
+# the ZWA-2 USB radio. Designed for CachyOS / Arch but any systemd Linux host
+# with pacman or npm should work (Arch path; extend for apt hosts as needed).
+#
+# Upstream: https://github.com/zwave-js/zwave-js-ui
+# Upstream version at write time: v11.17.0 (Node.js >= 20.19 required).
+# Node.js requirement: https://raw.githubusercontent.com/zwave-js/zwave-js-ui/master/package.json
+#   "engines": { "node": ">= 20.19" }
+# Install method: npm install -g zwave-js-ui (from other-methods.md)
+# Run: STORE_DIR=/var/lib/zwave-js-ui zwave-js-ui
+
+# ── Service user ──────────────────────────────────────────────────────────────
+zwavejs_user: zwavejs
+zwavejs_group: zwavejs
+# The uucp group is the Arch/CachyOS serial-port group (equivalent of dialout
+# on Debian). zwavejs user MUST be in this group to access /dev/serial/by-id/*.
+zwavejs_serial_group: uucp
+
+# ── USB device path ───────────────────────────────────────────────────────────
+# STABLE by-id path only — never /dev/ttyACM*
+# Upstream quick-start: "Do not use /dev/ttyUSBX serial devices, as those
+# mappings can change over time. Instead, use the /dev/serial/by-id/X serial
+# device for your Z-Wave stick."
+# Physical note: ZWA-2 moved to direct USB port (not behind hub) for cleaner
+# 900 MHz reception. Future replacements must honor this physical-port discipline.
+zwavejs_serial_port: "/dev/serial/by-id/usb-Nabu_Casa_ZWA-2_80B54EE62650-if00"
+
+# ── Store directory ────────────────────────────────────────────────────────────
+# Persistent state: Z-Wave node database, security keys, session data.
+# Keep out of /tmp; survives package updates.
+zwavejs_store_dir: "/var/lib/zwave-js-ui"
+
+# ── Network ports ─────────────────────────────────────────────────────────────
+# WebSocket (HA Z-Wave JS integration): 3000
+# Web UI: 8091
+zwavejs_ws_port: 3000
+zwavejs_ui_port: 8091
+
+# ── Vault path for secrets ────────────────────────────────────────────────────
+# Z-Wave network security keys (S0, S2 Unauth, S2 Auth, S2 Access Control)
+# Auth token for zwave-js-ui WebSocket (used by HA Z-Wave JS integration)
+zwavejs_vault_path: "secret/home-assistant/zwave"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+zwavejs_log_level: "warn"
+
+# ── Home Assistant LXC IP (for firewall note in README) ──────────────────────
+# IP of the HA LXC that will connect to this service. Used for documentation
+# purposes; actual firewall rules are operator-managed on the workstation.
+ha_lxc_ip: "192.168.12.81"

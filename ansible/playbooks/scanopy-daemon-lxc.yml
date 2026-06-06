@@ -1,0 +1,79 @@
+---
+# scanopy-daemon-lxc.yml — Provision scanopy-daemon LXC on pve4-alienware (OPS-1123)
+#
+# Addresses OPS-1123: In-cluster OKD daemon cannot ARP-scan 192.168.12.0/24.
+# Solution: dedicated privileged LXC (VMID 305, 192.168.12.93) on pve4-alienware
+# with NET_RAW capability for ARP scanning, pinned to eth0 (192.168.12.0/24 only).
+#
+# What this playbook does:
+#   Play 1 (pve4-alienware): LXC provision + daemon container deploy
+#     1. scanopy-daemon-lxc role:
+#        - Creates LXC 305 (scanopy-daemon, 192.168.12.93, Ubuntu 24.04, privileged)
+#        - Bootstrap packages: curl, openssh-server, podman, cosign
+#        - Fetches Harbor pull creds + cosign pubkey from Vault
+#        - Pulls + cosign-verifies scanopy-daemon image from Harbor
+#        - Deploys systemd unit (podman run --network host --cap-add NET_RAW)
+#        - SCANOPY_INTERFACES=eth0 (192.168.12.0/24 scope restriction)
+#        - SCANOPY_SERVER_URL=https://scanopy.208.haist.farm
+#        - Verifies /api/health responds on port 60073
+#
+# Prerequisites:
+#   1. Pangolin Traefik route for scanopy.208.haist.farm must be deployed
+#      (sentinel-okd-services.yml updated in this PR — apply pangolin-proxy role first)
+#   2. Verify: curl https://scanopy.208.haist.farm/api/health returns 200
+#   3. VAULT_TOKEN env var with access to:
+#      - secret/harbor/robot-pull (Harbor robot credentials)
+#      - secret/cosign (cosign public key)
+#
+# Ordering: Run pangolin-proxy.yml first, THEN this playbook.
+#
+# Run dry-run:
+#   ansible-playbook --check --diff -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware ansible/playbooks/scanopy-daemon-lxc.yml
+#
+# Apply LXC provisioning only:
+#   VAULT_TOKEN=<token> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware --tags scanopy-lxc \
+#     ansible/playbooks/scanopy-daemon-lxc.yml
+#
+# Apply daemon deploy only (LXC already provisioned):
+#   VAULT_TOKEN=<token> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware --tags scanopy-daemon \
+#     ansible/playbooks/scanopy-daemon-lxc.yml
+#
+# Apply full stack:
+#   VAULT_TOKEN=<token> ansible-playbook -i ansible/inventory/hosts.ini \
+#     --limit pve4-alienware ansible/playbooks/scanopy-daemon-lxc.yml
+
+- name: Provision scanopy-daemon LXC and deploy daemon container — OPS-1123
+  hosts: pve4-alienware
+  # ansible_user=root (host_vars): PVE host, run directly as root, no become needed
+  become: false
+  gather_facts: true
+
+  pre_tasks:
+    - name: Verify target is pve4-alienware standalone Proxmox host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Debian'
+        fail_msg: "This playbook is for pve4-alienware (Proxmox/Debian) only"
+      tags:
+        - always
+
+    - name: Display target and LXC plan
+      ansible.builtin.debug:
+        msg: >-
+          Provisioning LXC {{ scanopy_lxc_id }} ({{ scanopy_lxc_name }}) at
+          {{ scanopy_lxc_ip }}/24 on {{ inventory_hostname }}.
+          Daemon: {{ scanopy_daemon_image }}.
+          SCANOPY_INTERFACES={{ scanopy_daemon_interfaces }} (scope: 192.168.12.0/24 only).
+          SCANOPY_SERVER_URL={{ scanopy_daemon_server_url }}.
+      tags:
+        - always
+
+  roles:
+    - role: scanopy-daemon-lxc
+      tags:
+        - scanopy-lxc
+        - scanopy-daemon
+        - scanopy-verify

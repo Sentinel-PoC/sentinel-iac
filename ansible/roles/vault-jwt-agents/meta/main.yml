@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  role_name: vault_jwt_agents
+  author: sentinel-iac
+  description: >-
+    Enables the Vault JWT auth method trusting the Keycloak sentinel realm,
+    creates 4 per-role Vault policies (agent-worker/-planner/-judge/-scribe)
+    with least-privilege KV access, and creates matching JWT roles
+    (sentinel-worker/-planner/-judge/-scribe) bound to bound_claims.azp
+    with TTL ≤ 1h and token_no_default_policy=true.
+  license: proprietary
+  min_ansible_version: "2.15"
+
+dependencies: []
+
+# Collection version requirements declared in ansible/requirements.yml
+collections:
+  - community.hashi_vault
+  - community.general

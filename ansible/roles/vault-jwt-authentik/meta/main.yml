@@ -1,0 +1,24 @@
+---
+galaxy_info:
+  role_name: vault_jwt_authentik
+  author: sentinel-iac
+  description: >-
+    Enables the Vault JWT auth method at auth/jwt-authentik/ trusting Authentik
+    (auth-next.208.haist.farm) as the JWT issuer, and creates 4 JWT roles
+    (sentinel-worker/-planner/-judge/-scribe) bound to per-Authentik-application
+    client_ids (bound_audiences) and per-app issuer URLs (bound_claims.iss).
+    Each role maps to the existing per-agent Vault policy (agent-worker/-planner/
+    -judge/-scribe) authored by OPS-345 — NO policy files are created or modified
+    by this role. This mount runs in parallel with jwt/ (Keycloak) during
+    migration to Authentik (OPS-630, OPS-605 Phase 4).
+  license: proprietary
+  min_ansible_version: "2.15"
+
+dependencies: []
+
+# Collection version requirements declared in ansible/requirements.yml
+# (community.hashi_vault >=6.0.0 is installed in the iac-control runtime
+# environment; pattern matches roles/vault-jwt-agents and roles/vault-jwt-spire).
+collections:
+  - community.hashi_vault
+  - community.general

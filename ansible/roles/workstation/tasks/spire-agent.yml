@@ -1,0 +1,399 @@
+---
+# SPIRE Agent install + attestation + supervision on workstation.
+# Parent issue: OPS-533 (OPS-351 Phase 4.2b)
+# OPS-553: migrated from join_token to x509pop NodeAttestor.
+# Sibling 4.2a: OPS-528 — roles/iac-control/tasks/docker-services.yml SPIRE Agent block.
+#
+# Differences vs the iac-control 4.2a flow:
+#   * Bare-host install (no Docker) — binary in /usr/local/bin/, systemd unit
+#   * Cross-host cert provisioning — node cert issued from Vault PKI (spire-pki/
+#     spire-node role) via the Ansible controller, written to workstation disk
+#   * No bootstrap state machine — x509pop agents always present the cert;
+#     no one-shot token. The startup wrapper is simplified to check cert presence.
+#
+# OPS-553 bootstrap change vs join_token:
+#   BEFORE: gate on agent-data.json; if absent → generate join_token → write file → start
+#   AFTER:  gate on node cert presence; if absent → issue cert from Vault → write to disk → start
+#           On EVERY restart, agent re-attests with the cert. No stale token files.
+
+# ── 0. Node cert gate ────────────────────────────────────────────────────────
+# Check whether the node identity cert already exists on disk. If missing (first
+# deploy or recovery), issue a fresh cert from Vault spire-pki/ using the
+# spire-node role. The cert key is generated locally on the Ansible controller
+# then shipped to disk — never passes through Vault KV unencrypted.
+#
+# Re-issuance trigger: cert absent OR within 30 days of expiry (openssl check).
+# Normal case: cert is present + not near expiry → skip issuance (idempotent).
+
+- name: Stat SPIRE Agent node identity cert on workstation
+  ansible.builtin.stat:
+    path: "{{ spire_agent_node_cert_file }}"
+  register: spire_node_cert_stat
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: Check SPIRE Agent node cert expiry (if cert exists)
+  ansible.builtin.command:
+    cmd: >
+      openssl x509 -in {{ spire_agent_node_cert_file }}
+      -noout -checkend 2592000
+  register: spire_node_cert_expiry_check
+  changed_when: false
+  failed_when: false
+  when: spire_node_cert_stat.stat.exists
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: Determine if SPIRE Agent node cert needs (re-)issuance
+  # Needs issuance when:
+  #   (a) cert file does not exist (fresh install or recovery)
+  #   (b) cert exists but openssl -checkend 2592000 returns rc != 0 (expires <30d)
+  ansible.builtin.set_fact:
+    spire_node_cert_needs_issue: >-
+      {{ (not spire_node_cert_stat.stat.exists) or
+         (spire_node_cert_expiry_check is not skipped and
+          spire_node_cert_expiry_check.rc is defined and
+          spire_node_cert_expiry_check.rc != 0) }}
+  tags: [spire-agent, spire-node-certs, workstation]
+
+# ── 0a. x509pop node cert provisioning (OPS-553) ────────────────────────────
+# Issue a node identity cert from Vault spire-pki/ if needed.
+# The cert key is generated on the Ansible controller in /tmp (ephemeral),
+# the cert is issued via Vault API, and both are written to the workstation.
+# The private key never touches Vault storage — only the CSR is sent.
+#
+# Vault auth: uses the root token from the Ansible controller environment
+# (same as the vault-server spire-pki.yml tasks). In production, a dedicated
+# AppRole policy could replace root-token issuance; root-token issuance is
+# acceptable here because this runs only at deploy/renewal time.
+
+- name: OPS-553 Generate SPIRE node cert private key on Ansible controller (local)
+  community.crypto.openssl_privatekey:
+    path: "/tmp/spire-node-workstation.key"
+    type: RSA
+    size: 2048
+    mode: "0644"
+  delegate_to: localhost
+  # mode 0644 (not 0600) so the key is readable by the ansible runner for
+  # lookup('file',...) regardless of which user wrote it (become:true may write
+  # as root, making a 0600 file unreadable by the koiakoia runner).
+  # The key is transient (deleted after write to target); final on-disk mode
+  # is enforced by the Write task below (mode 0600).
+  run_once: false
+  when: spire_node_cert_needs_issue
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: OPS-553 Generate SPIRE node cert CSR on Ansible controller
+  community.crypto.openssl_csr_pipe:
+    privatekey_path: "/tmp/spire-node-workstation.key"
+    common_name: "{{ spire_agent_node_cert_cn }}"
+    extended_key_usage:
+      - clientAuth
+    use_common_name_for_san: false
+  register: spire_node_csr
+  delegate_to: localhost
+  changed_when: false
+  when: spire_node_cert_needs_issue
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: OPS-553 Issue SPIRE node cert from Vault spire-pki/ (sign CSR)
+  ansible.builtin.uri:
+    url: "https://vault.208.haist.farm/v1/{{ spire_node_vault_pki_mount }}/sign/{{ spire_node_vault_pki_role }}"
+    method: POST
+    headers:
+      X-Vault-Token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      csr: "{{ spire_node_csr.csr }}"
+      common_name: "{{ spire_agent_node_cert_cn }}"
+      ttl: "8760h"
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: spire_node_cert_response
+  delegate_to: localhost
+  no_log: false
+  when: spire_node_cert_needs_issue
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: OPS-553 Write SPIRE node cert to workstation
+  # Write the full PEM chain (cert + issuing CA) so the agent presents the
+  # complete chain to the server. x509pop verification walks the chain.
+  # Use explicit \n between blocks — >- folded scalar would collapse the
+  # inter-block boundary to a space, breaking strict PEM parsers.
+  ansible.builtin.copy:
+    dest: "{{ spire_agent_node_cert_file }}"
+    content: "{{ spire_node_cert_response.json.data.certificate }}\n{{ spire_node_cert_response.json.data.issuing_ca }}\n"
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "0644"
+  when: spire_node_cert_needs_issue
+  notify: Restart spire-agent
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: OPS-553 Write SPIRE node private key to workstation
+  ansible.builtin.copy:
+    dest: "{{ spire_agent_node_cert_key }}"
+    content: "{{ lookup('file', '/tmp/spire-node-workstation.key') }}"
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "0600"
+  when: spire_node_cert_needs_issue
+  notify: Restart spire-agent
+  no_log: true
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: OPS-553 Remove temp node cert key from Ansible controller
+  ansible.builtin.file:
+    path: "/tmp/spire-node-workstation.key"
+    state: absent
+  delegate_to: localhost
+  when: spire_node_cert_needs_issue
+  tags: [spire-agent, spire-node-certs, workstation]
+
+- name: OPS-553 Verify workstation node cert is valid PEM (openssl parse check)
+  # Fails the play if the written cert file is not a valid X.509 PEM certificate.
+  # Catches PEM concatenation bugs and Vault API response truncation before the
+  # agent ever tries to use the file. Runs unconditionally so a corrupted cert
+  # on disk is caught on every apply, not only at issuance time.
+  ansible.builtin.command:
+    cmd: "openssl x509 -in {{ spire_agent_node_cert_file }} -noout"
+  register: spire_node_cert_parse_ws
+  changed_when: false
+  failed_when: spire_node_cert_parse_ws.rc != 0
+  tags: [spire-agent, spire-node-certs, workstation]
+
+# ── 1. Install: directories ──────────────────────────────────────────────────
+
+- name: Create SPIRE Agent config directory
+  ansible.builtin.file:
+    path: "{{ spire_agent_config_dir }}"
+    state: directory
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "{{ spire_agent_config_dir_mode }}"
+  tags: [spire-agent, workstation]
+
+- name: Create SPIRE Agent data directory
+  ansible.builtin.file:
+    path: "{{ spire_agent_data_dir }}"
+    state: directory
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "{{ spire_agent_data_dir_mode }}"
+  tags: [spire-agent, workstation]
+
+- name: Create SPIRE Agent Workload API socket directory
+  # 0755 lets non-root workloads connect to the UDS in Phase 4.3+. Phase 4.2b
+  # has no workload entries yet, so the only client today is operator inspection.
+  ansible.builtin.file:
+    path: "{{ spire_agent_socket_dir }}"
+    state: directory
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "{{ spire_agent_socket_dir_mode }}"
+  tags: [spire-agent, workstation]
+
+# ── 2. Install: binary tarball + sha256 + extract ────────────────────────────
+# Pattern parallel to forgejo-runner (defaults/main.yml in iac-control role) —
+# get_url with checksum= forces sha256 verification at download time. The
+# binary is extracted to /usr/local/bin/spire-agent via unarchive, with strip
+# semantics handled by an extra_opts strip-components.
+
+- name: Download SPIRE release tarball to /tmp
+  ansible.builtin.get_url:
+    url: "{{ spire_agent_release_url }}"
+    dest: "/tmp/spire-{{ spire_agent_version }}-{{ spire_agent_release_arch }}.tar.gz"
+    checksum: "sha256:{{ spire_agent_release_sha256 }}"
+    mode: "0644"
+  register: spire_tarball_dl
+  tags: [spire-agent, workstation]
+
+- name: Extract spire-agent binary from tarball to /usr/local/bin/
+  # extra_opts strips the leading 'spire-{version}/bin/' so we only land
+  # spire-agent at /usr/local/bin/spire-agent. We do NOT extract spire-server
+  # (the workstation is an agent-only host).
+  ansible.builtin.unarchive:
+    src: "{{ spire_tarball_dl.dest }}"
+    dest: /usr/local/bin
+    remote_src: true
+    extra_opts:
+      - "--strip-components=2"
+      - "spire-{{ spire_agent_version }}/bin/spire-agent"
+    owner: root
+    group: root
+    mode: "0755"
+    creates: "{{ spire_agent_bin_path }}"
+  notify: Restart spire-agent
+  tags: [spire-agent, workstation]
+
+# Idempotent --version sanity check; harmless, registers a fact for acceptance #1.
+# Note: spire-agent prints --version output to stderr (rc=0), not stdout.
+# Confirmed empirically on 1.14.6: `stderr_lines: ["1.14.6"]`, `stdout: ""`.
+- name: Verify installed spire-agent reports 1.14.x
+  ansible.builtin.command: "{{ spire_agent_bin_path }} --version"
+  register: spire_agent_version_check
+  changed_when: false
+  failed_when: not (spire_agent_version_check.stderr | trim) is match('^1\\.14\\.')
+  tags: [spire-agent, workstation]
+
+# ── 3. Startup wrapper + systemd unit ────────────────────────────────────────
+# Order matters: drop wrapper FIRST (ExecStart=path must resolve when the unit
+# is loaded), THEN systemd unit. Both notify a daemon-reload + restart so
+# changes converge on the next play run.
+
+- name: Drop SPIRE Agent startup wrapper script
+  ansible.builtin.copy:
+    src: spire-agent-startup.sh
+    dest: "{{ spire_agent_startup_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart spire-agent
+  tags: [spire-agent, workstation]
+
+- name: Render SPIRE Agent systemd unit
+  ansible.builtin.template:
+    src: spire-agent.service.j2
+    dest: /etc/systemd/system/spire-agent.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon-reload
+    - Restart spire-agent
+  tags: [spire-agent, workstation]
+
+# ── 4. Agent config (HCL) ────────────────────────────────────────────────────
+
+- name: Render SPIRE Agent configuration (agent.conf)
+  ansible.builtin.template:
+    src: spire-agent.conf.j2
+    dest: "{{ spire_agent_config_path }}"
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "0600"
+  notify: Restart spire-agent
+  tags: [spire-agent, workstation]
+
+# ── 5. Trust bundle (cross-host fetch from iac-control's Server) ─────────────
+# Fetched only when the bundle file does not already exist on disk.
+# After first attestation the static bundle is stable; we don't re-fetch on
+# every apply (avoids accidental bundle-rotation surface during routine convergence).
+# With x509pop, the agent also re-attests on restart using the node cert — the
+# trust bundle only gates the first TLS connection to the Server.
+#
+# `become: false` because we use the koiakoia-owned JIT SSH cert; root would
+# work via "root reads everything" but it's cleaner to drop privs for the SSH
+# leg and re-elevate for the write.
+
+- name: Stat existing trust bundle on workstation
+  ansible.builtin.stat:
+    path: "{{ spire_agent_trust_bundle_path }}"
+  register: spire_trust_bundle_stat
+  tags: [spire-agent, workstation]
+
+- name: Fetch SPIRE trust bundle from iac-control (cross-host, JIT-cert SSH)
+  ansible.builtin.command:
+    cmd: >
+      ssh
+      -i {{ workstation_iac_control_ssh_key | default('/home/koiakoia/.ssh/claude_jit') }}
+      -o CertificateFile={{ workstation_iac_control_ssh_cert | default('/home/koiakoia/.ssh/claude_jit-cert.pub') }}
+      -o IdentitiesOnly=yes
+      -o StrictHostKeyChecking=accept-new
+      -o ConnectTimeout=5
+      -o BatchMode=yes
+      ubuntu@{{ spire_server_lan_ip }}
+      sudo docker exec spire-server /opt/spire/bin/spire-server bundle show
+      -format pem
+      -socketPath {{ spire_server_admin_socket_container }}
+  register: spire_bundle_fetch
+  become: false
+  changed_when: false
+  when: not spire_trust_bundle_stat.stat.exists
+  tags: [spire-agent, workstation]
+
+- name: Write SPIRE trust bundle for Agent
+  ansible.builtin.copy:
+    dest: "{{ spire_agent_trust_bundle_path }}"
+    content: "{{ spire_bundle_fetch.stdout }}\n"
+    owner: "{{ spire_agent_user }}"
+    group: "{{ spire_agent_group }}"
+    mode: "0644"
+  when: not spire_trust_bundle_stat.stat.exists
+  notify: Restart spire-agent
+  tags: [spire-agent, workstation]
+
+# ── 6. join_token bootstrap REMOVED (OPS-553) ────────────────────────────────
+# The join_token bootstrap state machine (generate token → write file → wrapper
+# reads file → passes -joinToken on first start) has been replaced by x509pop.
+# x509pop agents simply present the node cert file at attestation time — there
+# is no one-shot credential, no bootstrap-token file, and no state machine.
+# The startup wrapper (step 3 above) is simplified to check cert presence only.
+#
+# MIGRATION: If agent-data.json and .bootstrap_token from a prior join_token
+# deploy exist on disk, they are harmless (x509pop ignores them). The agent will
+# re-attest via x509pop using the new cert; the old join_token agent entry on the
+# SPIRE Server will expire naturally (TTL). The workload entry reparenting task
+# (spire-workload-entries role) creates new entries under the x509pop parent.
+
+- name: OPS-553 Remove stale join_token bootstrap token file (if present from prior deploy)
+  ansible.builtin.file:
+    path: "{{ spire_agent_bootstrap_token_path }}"
+    state: absent
+  tags: [spire-agent, workstation]
+
+# ── 7. Enable + start spire-agent ────────────────────────────────────────────
+# Flush pending handlers BEFORE this step so the unit picks up any newly-
+# rendered ExecStart / config / wrapper script before the service first starts.
+
+- name: Flush pending handlers (daemon-reload + restart) before first enable
+  ansible.builtin.meta: flush_handlers
+  tags: [spire-agent, workstation]
+
+- name: Enable and start spire-agent
+  ansible.builtin.systemd:
+    name: spire-agent
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags: [spire-agent, workstation]
+
+# ── 8. Health verification ───────────────────────────────────────────────────
+# 60-second window for the agent to come up and attest. The /ready endpoint
+# returns 200 once the agent has a usable SVID — that's the load-bearing
+# acceptance signal for first attestation success.
+
+- name: Verify SPIRE Agent /ready (acceptance criterion 4 / 6)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ spire_agent_health_port }}/ready"
+    status_code: [200]
+    timeout: 5
+  register: spire_agent_health
+  retries: 12
+  delay: 5
+  until: spire_agent_health is succeeded
+  changed_when: false
+  tags: [spire-agent, workstation]
+
+# ── 9. Post-attestation verification ────────────────────────────────────────
+# With x509pop there is no token file to clean up. The health check in step 8
+# is the acceptance criterion. We add an informational debug to show which
+# x509pop SPIFFE ID the agent attested as — this is the ID that must be used
+# in the spire-workload-entries parent lookup.
+
+- name: OPS-553 Show attested agent SPIFFE ID (informational — x509pop fingerprint)
+  ansible.builtin.command:
+    cmd: "openssl x509 -in {{ spire_agent_node_cert_file }} -noout -fingerprint -sha1"
+  register: spire_node_cert_fp
+  changed_when: false
+  failed_when: false
+  tags: [spire-agent, workstation]
+
+- name: OPS-553 Report node cert fingerprint (will become x509pop SPIFFE ID suffix)
+  ansible.builtin.debug:
+    msg: >-
+      Node cert fingerprint (SHA-1): {{ spire_node_cert_fp.stdout | default('unknown') }}
+      Expected SPIFFE ID: spiffe://{{ spire_trust_domain }}/spire/agent/x509pop/
+      <fingerprint-hex-no-colons-lowercase>
+      Run: spire-server agent list (on iac-control) to see the attested SPIFFE ID.
+  tags: [spire-agent, workstation]

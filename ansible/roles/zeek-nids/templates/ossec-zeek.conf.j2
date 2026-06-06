@@ -1,0 +1,100 @@
+<!--
+  Wazuh Agent ossec.conf — deployed by ansible/roles/zeek-nids (OPS-568)
+  Adds localfile stanzas for Zeek JSON log forwarding to Wazuh manager.
+  Zeek logs at: {{ zeek_log_dir }}/current/
+
+  NIST SI-4: Continuous monitoring — network traffic via Zeek NIDS
+-->
+
+<ossec_config>
+  <client>
+    <server>
+      <address>{{ wazuh_manager_ip }}</address>
+      <port>1514</port>
+      <protocol>tcp</protocol>
+    </server>
+    <config-profile>ubuntu, ubuntu24, ubuntu24.04</config-profile>
+    <notify_time>20</notify_time>
+    <time-reconnect>60</time-reconnect>
+    <auto_restart>yes</auto_restart>
+    <crypto_method>aes</crypto_method>
+    <enrollment>
+      <enabled>yes</enabled>
+      <agent_name>{{ inventory_hostname }}</agent_name>
+      <authorization_pass_path>etc/authd.pass</authorization_pass_path>
+    </enrollment>
+  </client>
+
+  <client_buffer>
+    <disabled>no</disabled>
+    <queue_size>5000</queue_size>
+    <events_per_second>500</events_per_second>
+  </client_buffer>
+
+  <!-- Zeek JSON log forwarding — OPS-568 -->
+  <!-- HTTP protocol logs -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/http.log</location>
+    <label key="zeek_log_type">http</label>
+  </localfile>
+
+  <!-- DNS protocol logs -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/dns.log</location>
+    <label key="zeek_log_type">dns</label>
+  </localfile>
+
+  <!-- TLS/SSL protocol logs (includes JA3/JA4 fields) -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/ssl.log</location>
+    <label key="zeek_log_type">ssl</label>
+  </localfile>
+
+  <!-- Connection summary logs -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/conn.log</location>
+    <label key="zeek_log_type">conn</label>
+  </localfile>
+
+  <!-- X.509 certificate logs -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/x509.log</location>
+    <label key="zeek_log_type">x509</label>
+  </localfile>
+
+  <!-- File metadata logs -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/files.log</location>
+    <label key="zeek_log_type">files</label>
+  </localfile>
+
+  <!-- Zeek notice/alert logs -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ zeek_log_dir }}/current/notice.log</location>
+    <label key="zeek_log_type">notice</label>
+  </localfile>
+
+  <rootcheck>
+    <disabled>no</disabled>
+  </rootcheck>
+
+  <wodle name="syscollector">
+    <disabled>no</disabled>
+    <interval>1h</interval>
+    <scan_on_start>yes</scan_on_start>
+  </wodle>
+
+  <sca>
+    <enabled>yes</enabled>
+    <scan_on_start>yes</scan_on_start>
+    <interval>12h</interval>
+  </sca>
+
+</ossec_config>

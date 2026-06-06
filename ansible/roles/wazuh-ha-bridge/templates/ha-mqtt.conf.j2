@@ -1,0 +1,9 @@
+# Ansible managed — wazuh-ha-bridge role (OPS-586 Section C)
+# MQTT credentials for Wazuh custom-ha-mqtt integration script.
+# Source: Vault {{ wazuh_mqtt_vault_path }}
+# Permissions: root:wazuh 0640 (wazuh-integratord runs as wazuh user)
+# DO NOT EDIT DIRECTLY — overwritten by Ansible role run.
+
+[mqtt]
+username = {{ wazuh_mqtt_creds.username }}
+password = {{ wazuh_mqtt_creds.password }}

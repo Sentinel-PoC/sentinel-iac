@@ -1,0 +1,26 @@
+# yk-ssh-cert-renew.timer — systemd user timer to auto-renew YubiKey PIV cert.
+#
+# Fires every 7 hours (cert TTL is 8h, so renewal happens before expiry).
+# OnBootSec fires 5 min after user login to cover the session-start case.
+#
+# Mirrors jit-ssh-cert-renew.timer from iac-control (system scope, 3h cadence
+# against 4h TTL). Same safety margin approach.
+#
+# NOTE: Timer fires even if YubiKey is not inserted. The service will fail
+# gracefully with exit 3 ("No key returned from PKCS11"). This is expected —
+# failures are logged to journal but the timer continues.
+#
+# OPS-744 — [hardware-key] Phase B2: YubiKey PIV uses Vault SSH CA certs
+
+[Unit]
+Description=Renew YubiKey PIV SSH cert every 7h (cert TTL is 8h)
+Documentation=file://%h/yk-ssh-renew
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=7h
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

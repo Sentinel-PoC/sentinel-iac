@@ -1,0 +1,46 @@
+# SPIRE OIDC Discovery Provider configuration
+# Deployed by Ansible — OPS-537 / OPS-351 Phase 4.4a
+# Trust domain: {{ spire_trust_domain | default('agents.haist.farm') }}
+# Managed: do not edit manually; changes will be overwritten on next Ansible run.
+#
+# Mode: server_api — reads spire-server's local gRPC API socket via shared
+# bind-mount. No SPIFFE auth needed; filesystem permissions on the socket
+# are the boundary.
+#
+# Listen: serving_cert_file with Vault-PKI-issued cert. File-watch reload
+# is enabled (file_sync_interval) so cert rotation doesn't require restart.
+
+log_level = "{{ spire_oidc_log_level }}"
+log_format = "{{ spire_oidc_log_format }}"
+
+# Host header allowlist. Provider rejects requests with non-matching Host.
+domains = [
+{% for d in spire_oidc_domains %}
+    "{{ d }}",
+{% endfor %}
+]
+
+# OIDC discovery document `issuer` field. Vault matches this against the
+# oidc_discovery_url it is configured with in Phase 4.4b.
+jwt_issuer = "{{ spire_oidc_jwt_issuer }}"
+
+# Source: SPIRE Server API over local Unix socket (mounted via bind-mount).
+server_api {
+    address = "{{ spire_oidc_socket_address }}"
+    poll_interval = "{{ spire_oidc_poll_interval }}"
+}
+
+# Serve HTTPS with a Vault-PKI-issued certificate. File-sync watches the
+# files for changes (cert rotation).
+serving_cert_file {
+    cert_file_path = "{{ spire_oidc_cert_path_container }}"
+    key_file_path  = "{{ spire_oidc_key_path_container }}"
+    addr           = ":{{ spire_oidc_container_listen_port }}"
+}
+
+# Liveness / readiness probes.
+health_checks {
+    bind_port = "{{ spire_oidc_health_port_container }}"
+    live_path = "/live"
+    ready_path = "/ready"
+}

@@ -1,0 +1,27 @@
+# {{ ansible_managed }}
+# OPS-940: vault-agent-minio.service populates /run/minio-secrets at boot.
+# minio.service declares After=vault-agent-minio.service so systemd starts
+# vault-agent first. ExecStartPre waits up to 30s for the file to appear,
+# ensuring MinIO never starts with a missing EnvironmentFile.
+[Unit]
+Description=MinIO Object Storage
+Documentation=https://min.io/docs
+After=network-online.target vault-agent-minio.service
+Wants=network-online.target vault-agent-minio.service
+
+[Service]
+User=minio-user
+Group=minio-user
+# Wait for vault-agent to render /run/minio-secrets before starting MinIO.
+# vault-agent-minio.service is started first (After= above) but Type=simple
+# means systemd considers it "up" once the process starts — the file may not
+# be written yet. This loop polls for up to 30s, then fails if missing.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do [ -f /run/minio-secrets ] && exit 0; echo "vault-agent: waiting for /run/minio-secrets (attempt $i/30)..."; sleep 1; done; echo "ERROR: /run/minio-secrets not created after 30s — vault-agent-minio.service may be failing"; exit 1'
+EnvironmentFile=/run/minio-secrets
+ExecStart=/usr/local/bin/minio server $MINIO_VOLUMES $MINIO_OPTS
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Forgejo backup — pg_dump + data directory, upload to MinIO.
+# OPS-820: MinIO upload is non-fatal; local prune runs unconditionally.
+set -euo pipefail
+
+{% raw %}
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+BUCKET="forgejo-backups"
+BACKUP_DIR="/opt/forgejo/backups"
+DB_BACKUP="${BACKUP_DIR}/db-${TIMESTAMP}.sql"
+DATA_BACKUP="${BACKUP_DIR}/data-${TIMESTAMP}.tar.gz"
+{% endraw %}
+# Retention and disk-guard thresholds (configured in defaults/main.yml)
+RETENTION_COUNT={{ forgejo_backup_retention_count | default(7) }}
+DISK_WARN_PCT={{ forgejo_backup_disk_warning_pct | default(75) }}
+{% raw %}
+
+echo "[$(date)] Starting Forgejo backup (retention=${RETENTION_COUNT}, disk_warn=${DISK_WARN_PCT}%)"
+{% endraw %}
+
+# Database backup via pg_dump inside the postgres container
+docker exec forgejo-postgres pg_dump -U {{ forgejo_db_user }} {{ forgejo_db_name }} > "${DB_BACKUP}"
+{% raw %}
+if [[ ! -s "${DB_BACKUP}" ]]; then
+    echo "[$(date)] ERROR: DB backup is empty or missing: ${DB_BACKUP}" >&2
+    exit 1
+fi
+echo "[$(date)] DB backup created: ${DB_BACKUP} ($(du -sh "${DB_BACKUP}" | cut -f1))"
+
+# Data directory backup
+tar czf "${DATA_BACKUP}" -C /opt/forgejo data/
+if [[ ! -s "${DATA_BACKUP}" ]]; then
+    echo "[$(date)] ERROR: Data backup is empty or missing: ${DATA_BACKUP}" >&2
+    exit 1
+fi
+echo "[$(date)] Data backup created: ${DATA_BACKUP} ($(du -sh "${DATA_BACKUP}" | cut -f1))"
+{% endraw %}
+
+# Upload to MinIO — non-fatal (OPS-820: prune must run even if MinIO is unreachable)
+mc alias set backup "{{ minio_endpoint }}" "{{ minio_access_key }}" "{{ minio_secret_key }}" --api S3v4 2>/dev/null || true
+{% raw %}
+# OPS-931: ensure bucket exists; recreates it if deleted (non-fatal)
+mc mb --ignore-existing "backup/${BUCKET}" 2>/dev/null || true
+MINIO_OK=true
+mc cp "${DB_BACKUP}"   "backup/${BUCKET}/" || MINIO_OK=false
+mc cp "${DATA_BACKUP}" "backup/${BUCKET}/" || MINIO_OK=false
+if [[ "${MINIO_OK}" == "true" ]]; then
+    echo "[$(date)] Uploaded both files to MinIO bucket ${BUCKET}"
+else
+    echo "[$(date)] WARNING: MinIO upload failed — backups are local-only this cycle" >&2
+fi
+
+# TODO(OPS-827): Off-host NFS shipping to TrueNAS (192.168.12.205) is NOT yet
+# implemented here. No NFS export path for Forgejo backups was found in the
+# forgejo-server role vars at the time OPS-820 was completed. When OPS-827 is
+# resolved, add an rsync task here, e.g.:
+#   rsync -az --bwlimit=50000 "${BACKUP_DIR}/" <nfs_mount_point>/forgejo/
+# and add forgejo_nfs_backup_mount and forgejo_nfs_enabled vars to defaults/main.yml.
+
+# Prune local backups — keep last ${RETENTION_COUNT} of each type.
+# OPS-820: unconditional; runs regardless of MinIO upload outcome so disk
+# never fills up even when MinIO credentials are absent or the endpoint is down.
+PRUNE_OFFSET=$((RETENTION_COUNT + 1))
+ls -t "${BACKUP_DIR}"/db-*.sql     2>/dev/null | tail -n +"${PRUNE_OFFSET}" | xargs -r rm -f
+ls -t "${BACKUP_DIR}"/data-*.tar.gz 2>/dev/null | tail -n +"${PRUNE_OFFSET}" | xargs -r rm -f
+echo "[$(date)] Pruned old local backups (keeping last ${RETENTION_COUNT} of each type)"
+
+# Disk usage guard — warn to journal if partition is over threshold (OPS-820).
+# This line is scraped by Promtail/Alloy → Loki; a Loki alert rule can fire on
+# level=warning + job=forgejo-backup to page the operator before the disk fills.
+DISK_PCT=$(df --output=pcent "${BACKUP_DIR}" | tail -1 | tr -d ' %')
+if [[ "${DISK_PCT}" -gt "${DISK_WARN_PCT}" ]]; then
+    echo "[$(date)] WARNING: backup partition ${DISK_PCT}% full (threshold ${DISK_WARN_PCT}%); investigate /opt/forgejo" >&2
+else
+    echo "[$(date)] Disk usage OK: ${DISK_PCT}% (threshold ${DISK_WARN_PCT}%)"
+fi
+
+echo "[$(date)] Forgejo backup completed successfully"
+{% endraw %}

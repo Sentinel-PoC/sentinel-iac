@@ -1,0 +1,135 @@
+---
+# [OPS-566] postgres-attacker-intel — RBAC tasks
+# Creates ro_user / rw_user / migrate_user and applies GRANT matrix.
+# Passwords sourced from caller vars (Vault: secret/attacker-db/*).
+# All commands run via docker exec psql — no psycopg2 dependency.
+
+- name: Create ro_user (Grafana datasource — SELECT only)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'ro_user') THEN
+              CREATE ROLE ro_user WITH LOGIN PASSWORD '{{ attacker_db_ro_password }}';
+            ELSE
+              ALTER ROLE ro_user WITH PASSWORD '{{ attacker_db_ro_password }}';
+            END IF;
+          END $$;"
+  changed_when: true
+  no_log: true
+  tags: [attacker-db, rbac]
+
+- name: Create rw_user (Shuffle SOAR + AI orchestrator — full CRUD)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rw_user') THEN
+              CREATE ROLE rw_user WITH LOGIN PASSWORD '{{ attacker_db_rw_password }}';
+            ELSE
+              ALTER ROLE rw_user WITH PASSWORD '{{ attacker_db_rw_password }}';
+            END IF;
+          END $$;"
+  changed_when: true
+  no_log: true
+  tags: [attacker-db, rbac]
+
+- name: Create migrate_user (DDL — schema migrations)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'migrate_user') THEN
+              CREATE ROLE migrate_user WITH LOGIN PASSWORD '{{ attacker_db_migrate_password }}';
+            ELSE
+              ALTER ROLE migrate_user WITH PASSWORD '{{ attacker_db_migrate_password }}';
+            END IF;
+          END $$;"
+  changed_when: true
+  no_log: true
+  tags: [attacker-db, rbac]
+
+- name: Apply CONNECT grants for all roles
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "GRANT CONNECT ON DATABASE {{ attacker_db_name }} TO ro_user, rw_user, migrate_user;
+          GRANT USAGE ON SCHEMA public TO ro_user, rw_user, migrate_user;"
+  changed_when: true
+  tags: [attacker-db, rbac]
+
+- name: Apply ro_user grants (SELECT only)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "GRANT SELECT ON ALL TABLES IN SCHEMA public TO ro_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ro_user;"
+  changed_when: true
+  tags: [attacker-db, rbac]
+
+- name: Apply rw_user grants (SELECT + INSERT + UPDATE + DELETE)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rw_user;
+          GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO rw_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rw_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+            GRANT USAGE ON SEQUENCES TO rw_user;"
+  changed_when: true
+  tags: [attacker-db, rbac]
+
+- name: Apply migrate_user grants (full DDL via superuser delegation)
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO migrate_user;
+          GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO migrate_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO migrate_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO migrate_user;"
+  changed_when: true
+  tags: [attacker-db, rbac]
+
+- name: Verify ro_user SELECT privilege on attackers table
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -tAc "SELECT has_table_privilege('ro_user', 'attackers', 'SELECT');"
+  register: ro_select_check
+  changed_when: false
+  failed_when: ro_select_check.stdout | trim != 't'
+  tags: [attacker-db, rbac, verify]
+
+- name: Verify ro_user does NOT have INSERT privilege on attackers table
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -tAc "SELECT has_table_privilege('ro_user', 'attackers', 'INSERT');"
+  register: ro_insert_check
+  changed_when: false
+  failed_when: ro_insert_check.stdout | trim != 'f'
+  tags: [attacker-db, rbac, verify]
+
+- name: Verify rw_user has INSERT privilege on attackers table
+  ansible.builtin.command:
+    cmd: >
+      docker exec {{ attacker_db_container_name }}
+      psql -U {{ attacker_db_superuser }} -d {{ attacker_db_name }}
+      -tAc "SELECT has_table_privilege('rw_user', 'attackers', 'INSERT');"
+  register: rw_insert_check
+  changed_when: false
+  failed_when: rw_insert_check.stdout | trim != 't'
+  tags: [attacker-db, rbac, verify]

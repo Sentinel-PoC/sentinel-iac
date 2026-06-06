@@ -1,0 +1,17 @@
+[Unit]
+Description=OPS-711: gluetun cascade recovery — force-recreate bound containers on gluetun restart
+Documentation=https://plane.208.haist.farm/haists-it-consulting/projects/223c0b66-4255-406e-932f-3b50c0e93543/issues/OPS-711
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10s
+ExecStart=/usr/local/bin/gluetun-watcher.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gluetun-watcher
+
+[Install]
+WantedBy=multi-user.target

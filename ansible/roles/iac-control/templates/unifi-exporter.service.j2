@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+[Unit]
+Description=UniFi Prometheus Metrics Exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory={{ unifi_repo_dir }}
+ExecStart=/usr/bin/python3 {{ unifi_repo_dir }}/exporter.py --port {{ unifi_exporter_port }}
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

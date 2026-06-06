@@ -1,0 +1,101 @@
+{
+  "id": "wf-e-abuseipdb-feedback",
+  "name": "AbuseIPDB-feedback",
+  "description": "G'-prime Workflow E: Scheduled submission of confirmed-malicious attacker reports back to AbuseIPDB. Queries attacker_intel DB for IPs with hit_count >= 100 and no recent report, submits each. Tracking: OPS-573.",
+  "tags": ["g-prime", "abuseipdb", "reporting", "feedback"],
+  "status": "active",
+  "start": "trigger-scheduled-report",
+  "triggers": [
+    {
+      "id": "trigger-scheduled-report",
+      "name": "Scheduled AbuseIPDB Feedback",
+      "app_name": "Schedule",
+      "app_version": "1.0.0",
+      "trigger_type": "schedule",
+      "label": "Daily AbuseIPDB feedback run",
+      "description": "Runs daily to submit confirmed-malicious IPs to AbuseIPDB for community benefit.",
+      "parameters": [
+        {
+          "name": "cron",
+          "value": "0 6 * * *"
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "id": "query-unreported-ips",
+      "name": "Query attacker-intel DB for unreported IPs",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Fetch IPs with hit_count >= 100 not reported in last 7 days",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "SELECT ip, hit_count, last_seen FROM attacker_intel.profiles WHERE hit_count >= 100 AND (last_reported_at IS NULL OR last_reported_at < NOW() - INTERVAL '7 days') LIMIT 100;"
+        }
+      ]
+    },
+    {
+      "id": "loop-report-each",
+      "name": "Report each IP to AbuseIPDB",
+      "app_name": "AbuseIPDB",
+      "app_version": "1.0.0",
+      "label": "Submit confirmed-malicious report",
+      "parameters": [
+        {
+          "name": "ip",
+          "value": "$exec.ip"
+        },
+        {
+          "name": "categories",
+          "value": "14,18,22"
+        },
+        {
+          "name": "comment",
+          "value": "Confirmed malicious: $exec.hit_count hits. Last seen: $exec.last_seen. Automated report from HAIST sentinel SOAR."
+        }
+      ]
+    },
+    {
+      "id": "mark-reported",
+      "name": "Update last_reported_at in attacker-intel DB",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Stamp last_reported_at = NOW() for each reported IP",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "UPDATE attacker_intel.profiles SET last_reported_at = NOW() WHERE ip = '$exec.ip';"
+        }
+      ]
+    },
+    {
+      "id": "telegram-feedback-summary",
+      "name": "Telegram daily summary",
+      "app_name": "Telegram",
+      "app_version": "1.0.0",
+      "label": "Post daily AbuseIPDB feedback summary to operator",
+      "parameters": [
+        {
+          "name": "bot_token",
+          "value": "$ENV_SHUFFLE_TELEGRAM_TOKEN"
+        },
+        {
+          "name": "chat_id",
+          "value": "$ENV_SHUFFLE_TELEGRAM_CHAT_ID"
+        },
+        {
+          "name": "message",
+          "value": "DAILY ABUSEIPDB FEEDBACK COMPLETE\\nIPs reported: $query-unreported-ips.rows_count\\nNext run: tomorrow 06:00 UTC"
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {"source_id": "trigger-scheduled-report", "destination_id": "query-unreported-ips", "has_errors": false, "conditions": []},
+    {"source_id": "query-unreported-ips", "destination_id": "loop-report-each", "has_errors": false, "conditions": []},
+    {"source_id": "loop-report-each", "destination_id": "mark-reported", "has_errors": false, "conditions": []},
+    {"source_id": "mark-reported", "destination_id": "telegram-feedback-summary", "has_errors": false, "conditions": []}
+  ]
+}

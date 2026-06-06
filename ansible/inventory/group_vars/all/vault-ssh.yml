@@ -1,0 +1,31 @@
+---
+# Vault SSH CA public key - deployed to all managed hosts as /etc/ssh/trusted-ca.pem
+# Allows Vault-signed SSH certificates to authenticate (JIT SSH).
+# Source: vault read -field=public_key ssh/config/ca
+# NIST IA-2, IA-3: Vault PKI-backed certificate authentication
+#
+# To rotate: run `vault write ssh/config/ca generate_signing_key=true` (destroys old CA),
+# then update this value and re-run the common role on all hosts.
+# yamllint disable rule:line-length
+vault_ssh_ca_public_key: >-
+  ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDiXxYPcRkHa94gv0hfalWUoNdZllbHs550HFiDqJnj5cHlqIfwHpN2Jy0JF8KpgT2vySkgHsfg2fb0e6oTx7S1ZOKWFmsmtVx1kSCx9bvx5dC6c5uLOzNqviNuahYFvz6KyacNJtM+tyowhe13SxH+W2LxV0DwH8o2AboLcAtsKGd4stUpOexr2ZEO28qhN+Mq09sMQPT99KiWSo/teZ74K/Dne1CGKXAJ4TMoUZK8vYaHJ8Ypj+EmmPQVTEIJFuDJMj7AjMeuUJ+ayyZqQyJ49frh+ThO8T64hkY48cLAl6blBWOcBmB3DDAE42oTD6Um7AbJERZ1s2Ei/Up5GPfDzCmxiZ0fwru+2GANiosMvYUhnntcOxTr+rkkQtqBQabVVH4jHYRvH+qe/nRR07zqnu7iCx18kp99cde7xNaPEHs2HDfQfKyW9jnFHahnsOO60oWX2OCNiTRAP0+CFpeJiHUsZoxEfhKR525TDIKY9gJ4msNjWlzkCyQGEd/SlW2xltecEtSisEguZGcqJhemLUgXTH6NqXPnuFM/AzW/MsoNzu/7Rq47dlQ+L+Iz5NAuwbSGsQLnevOjClL8AQU9h3csdvAT8P1Wt2zZC+AUy0lEGcVCHX74hOo2DcbndBwlMo6YkfthGpLZslJmAiriFMW+nBBfmXqnamOzSeylkQ==
+# yamllint enable rule:line-length
+
+# OPS-125: Break-glass authorized-keys (Vault-independent fallback SSH).
+# These keys are deployed to /etc/ssh/break-glass-authorized-keys/%u by the
+# common role. Used ONLY when Vault is down and JIT cert renewal is impossible.
+#
+# Key: operator YubiKey PIV slot 9a (ECDSA P-256, hardware-backed).
+#   - Private key never leaves the YubiKey device.
+#   - This is the RAW public key (not a Vault-signed cert); auth works
+#     even when vault-server is offline.
+#   - Source: cat ~/.ssh/yubikey-piv.pub on operator workstation (2026-05-29)
+#   - To rotate: generate new PIV keypair on YubiKey, update this entry,
+#     re-run common role on all hosts.
+# yamllint disable rule:line-length
+sshd_break_glass_authorized_keys:
+  ubuntu:
+    - "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBAEG5TPVy7NfNU6dsJGxUkY5t8+z0LcHxPK/QgF4OPMfY9ghpaA5uzqfGBOTOQ4TooHxUr4Zltb4vjRhVWfonJU= koiakoia-yubikey-piv"
+  koiakoia:
+    - "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBAEG5TPVy7NfNU6dsJGxUkY5t8+z0LcHxPK/QgF4OPMfY9ghpaA5uzqfGBOTOQ4TooHxUr4Zltb4vjRhVWfonJU= koiakoia-yubikey-piv"
+# yamllint enable rule:line-length

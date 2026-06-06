@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# Netplan configuration for OKD cluster interface
+network:
+  version: 2
+  ethernets:
+    {{ okd_interface }}:
+      addresses:
+        - {{ okd_dhcp_ip }}/24
+        - {{ okd_gateway_ip }}/24

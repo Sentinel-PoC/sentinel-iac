@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+[minio]
+type = s3
+provider = Minio
+access_key_id = {{ minio_root_user }}
+secret_access_key = {{ minio_root_password }}
+endpoint = http://127.0.0.1:{{ minio_port }}
+
+[b2]
+type = b2
+account = {{ b2_account_id }}
+key = {{ b2_application_key }}
+
+[b2-encrypted]
+type = crypt
+remote = b2:{{ b2_bucket }}
+password = {{ rclone_crypt_password }}
+password2 = {{ rclone_crypt_password2 }}

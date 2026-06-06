@@ -1,0 +1,3 @@
+# {{ ansible_managed }}
+# Daily AIDE integrity check at 5:00 AM UTC
+0 5 * * * root /usr/bin/aide --check --config /etc/aide/aide.conf 2>&1 | /usr/bin/logger -t aide-check

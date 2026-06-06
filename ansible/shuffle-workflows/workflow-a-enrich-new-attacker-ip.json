@@ -1,0 +1,129 @@
+{
+  "id": "wf-a-enrich-new-attacker-ip",
+  "name": "enrich-new-attacker-IP",
+  "description": "G'-prime Workflow A: On new attacker IP, query GreyNoise + AbuseIPDB + Shodan + WHOIS + reverse-DNS, write profile row to attacker-intel DB. Tracking: OPS-573.",
+  "tags": ["g-prime", "enrichment", "threat-intel"],
+  "status": "active",
+  "start": "trigger-wazuh-new-ip",
+  "triggers": [
+    {
+      "id": "trigger-wazuh-new-ip",
+      "name": "Wazuh New Attacker IP",
+      "app_name": "Webhook",
+      "app_version": "1.0.0",
+      "trigger_type": "webhook",
+      "label": "Wazuh alert - new attacker IP",
+      "description": "Receives Wazuh alert webhook when a new attacker IP is first observed",
+      "parameters": [
+        {
+          "name": "info",
+          "value": "Wazuh posts here via integrations.conf. Expected field: data.srcip or rule.description."
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "id": "extract-ip",
+      "name": "Extract attacker IP",
+      "app_name": "Shuffle Tools",
+      "app_version": "1.2.0",
+      "label": "Parse IP from Wazuh alert",
+      "parameters": [
+        {
+          "name": "input",
+          "value": "$exec.body.data.srcip"
+        }
+      ],
+      "next_workflow_id": "",
+      "execution_variable": {
+        "name": "attacker_ip",
+        "value": "$extract-ip.#text"
+      }
+    },
+    {
+      "id": "query-greynoise",
+      "name": "GreyNoise IP Lookup",
+      "app_name": "GreyNoise",
+      "app_version": "1.0.0",
+      "label": "Query GreyNoise for IP context",
+      "parameters": [
+        {
+          "name": "ip",
+          "value": "$attacker_ip"
+        }
+      ]
+    },
+    {
+      "id": "query-abuseipdb",
+      "name": "AbuseIPDB Check",
+      "app_name": "AbuseIPDB",
+      "app_version": "1.0.0",
+      "label": "Query AbuseIPDB confidence score",
+      "parameters": [
+        {
+          "name": "ip",
+          "value": "$attacker_ip"
+        },
+        {
+          "name": "max_age_in_days",
+          "value": "90"
+        }
+      ]
+    },
+    {
+      "id": "query-shodan",
+      "name": "Shodan Host Lookup",
+      "app_name": "Shodan",
+      "app_version": "1.0.0",
+      "label": "Query Shodan for open ports / services",
+      "parameters": [
+        {
+          "name": "ip",
+          "value": "$attacker_ip"
+        }
+      ]
+    },
+    {
+      "id": "reverse-dns",
+      "name": "Reverse DNS Lookup",
+      "app_name": "Shuffle Tools",
+      "app_version": "1.2.0",
+      "label": "PTR record lookup for attacker IP",
+      "parameters": [
+        {
+          "name": "input",
+          "value": "$attacker_ip"
+        },
+        {
+          "name": "action",
+          "value": "ip_to_domain"
+        }
+      ]
+    },
+    {
+      "id": "write-attacker-db",
+      "name": "Write to attacker-intel DB",
+      "app_name": "PostgreSQL",
+      "app_version": "1.0.0",
+      "label": "Insert enrichment row into attacker_intel.profiles",
+      "parameters": [
+        {
+          "name": "query",
+          "value": "INSERT INTO attacker_intel.profiles (ip, first_seen, greynoise_classification, greynoise_name, abuseipdb_confidence, shodan_ports, rdns, source) VALUES ('$attacker_ip', NOW(), '$query-greynoise.classification', '$query-greynoise.name', '$query-abuseipdb.data.abuseConfidenceScore', '$query-shodan.ports', '$reverse-dns.#text', 'wazuh-alert') ON CONFLICT (ip) DO UPDATE SET last_seen=NOW(), abuseipdb_confidence=EXCLUDED.abuseipdb_confidence;"
+        }
+      ]
+    }
+  ],
+  "branches": [
+    {"source_id": "trigger-wazuh-new-ip", "destination_id": "extract-ip", "has_errors": false, "conditions": []},
+    {"source_id": "extract-ip", "destination_id": "query-greynoise", "has_errors": false, "conditions": []},
+    {"source_id": "extract-ip", "destination_id": "query-abuseipdb", "has_errors": false, "conditions": []},
+    {"source_id": "extract-ip", "destination_id": "query-shodan", "has_errors": false, "conditions": []},
+    {"source_id": "extract-ip", "destination_id": "reverse-dns", "has_errors": false, "conditions": []},
+    {"source_id": "query-greynoise", "destination_id": "write-attacker-db", "has_errors": false, "conditions": []},
+    {"source_id": "query-abuseipdb", "destination_id": "write-attacker-db", "has_errors": false, "conditions": []},
+    {"source_id": "query-shodan", "destination_id": "write-attacker-db", "has_errors": false, "conditions": []},
+    {"source_id": "reverse-dns", "destination_id": "write-attacker-db", "has_errors": false, "conditions": []}
+  ]
+}

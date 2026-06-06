@@ -1,0 +1,242 @@
+---
+# minio-server role — vault-agent AppRole provisioning for boot-time credential fetch (OPS-940)
+#
+# Provisions vault-agent on each MinIO LXC so that /run/minio-secrets is populated
+# at boot from Vault's secret/minio/admin without requiring an Ansible re-run.
+#
+# Pattern mirrors ansible/roles/iac-control/tasks/unifi-collector-approle.yml (OPS-169).
+#
+# Security model:
+#   - role_id is semi-public (stable name-like identifier)
+#   - secret_id is the credential (written to disk mode 0600, root:root)
+#   - Per-host secret_ids stored in Vault KV:
+#       minio-bootstrap: secret/minio/approle-credentials-lxc301
+#       minio-replica:   secret/minio/approle-credentials-lxc302
+#   - No long-lived Vault token ever written to disk
+#   - vault-agent renders /run/minio-secrets (tmpfs) — only the rendered file
+#     is accessible; Vault token lives only in vault-agent's process memory
+#
+# Pre-requisites:
+#   - AppRole auth method enabled in Vault (confirmed)
+#   - sentinel-minio-server policy exists (created by OPS-940 Vault bootstrapping)
+#   - sentinel-minio-server AppRole role exists (created by OPS-940 Vault bootstrapping)
+#   - Credentials stored at secret/minio/approle-credentials-lxc301 and -lxc302
+#     (created by OPS-940 Vault bootstrapping — re-run generates fresh secret_ids)
+#
+# USAGE:
+#   ansible-playbook ansible/playbooks/minio-bootstrap.yml --tags minio-approle
+#   ansible-playbook ansible/playbooks/minio-replica.yml --tags minio-approle
+#
+# IDEMPOTENCY: each step checks current state. Safe to re-run.
+#
+# To rotate secret_id:
+#   1. vault kv delete secret/minio/approle-credentials-lxc<N>
+#   2. Generate new secret_id and store it:
+#        vault write -format=json auth/approle/role/sentinel-minio-server/secret-id \
+#          metadata='{"host":"minio-bootstrap-lxc301"}' \
+#        | jq -r .data.secret_id
+#        vault kv put secret/minio/approle-credentials-lxc301 \
+#          role_id=<role_id> secret_id=<new_secret_id> ...
+#   3. Re-run --tags minio-approle to update disk credential files.
+#   vault-agent will re-authenticate on its next cycle.
+
+# ── Shared facts ──────────────────────────────────────────────────────────────
+
+- name: MINIO-APPROLE | Read Vault token from controller environment
+  ansible.builtin.set_fact:
+    _vault_root_token: "{{ lookup('env', 'VAULT_TOKEN') | default(lookup('file', '~/.vault-token') | trim, true) }}"
+  delegate_to: localhost
+  run_once: false
+  no_log: true
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Set Vault API base URL (direct IP, bypasses Pangolin SSO)
+  ansible.builtin.set_fact:
+    _vault_api: "https://192.168.12.206:8200/v1"
+  delegate_to: localhost
+  run_once: false
+  tags: [minio-approle, minio]
+
+# ── Resolve per-host KV path ──────────────────────────────────────────────────
+# LXC 301 (minio-bootstrap) and LXC 302 (minio-replica) have separate secret_ids
+# for independent rotation without affecting the other host.
+
+- name: MINIO-APPROLE | Resolve per-host AppRole credentials KV path
+  ansible.builtin.set_fact:
+    _minio_approle_creds_kv_path: >-
+      {{
+        'secret/data/minio/approle-credentials-lxc301'
+        if inventory_hostname == vault_agent_minio_bootstrap_hostname
+        else 'secret/data/minio/approle-credentials-lxc302'
+      }}
+  tags: [minio-approle, minio]
+
+# ── Fetch credentials from Vault KV ──────────────────────────────────────────
+
+- name: MINIO-APPROLE | Fetch AppRole credentials from Vault KV
+  ansible.builtin.uri:
+    url: "{{ _vault_api }}/{{ _minio_approle_creds_kv_path }}"
+    method: GET
+    headers:
+      X-Vault-Token: "{{ _vault_root_token }}"
+    validate_certs: false
+    status_code: 200
+    return_content: true
+  register: _minio_approle_creds_fetched
+  delegate_to: localhost
+  run_once: false
+  no_log: true
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Set AppRole credential facts for template rendering
+  ansible.builtin.set_fact:
+    _minio_approle_role_id: "{{ _minio_approle_creds_fetched.json.data.data.role_id }}"
+    _minio_approle_secret_id: "{{ _minio_approle_creds_fetched.json.data.data.secret_id }}"
+  no_log: true
+  tags: [minio-approle, minio]
+
+# ── Install vault binary ───────────────────────────────────────────────────────
+# vault binary provides vault-agent. Install from HashiCorp apt repo.
+# Ubuntu 25.04 (plucky) has no apt-key; use modern signed-by= keyring approach.
+
+- name: MINIO-APPROLE | Create apt keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Install prerequisites for HashiCorp repo (gpg, ca-certificates)
+  ansible.builtin.apt:
+    name:
+      - gpg
+      - ca-certificates
+    state: present
+    update_cache: false
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Download HashiCorp GPG key (armored) to /tmp
+  ansible.builtin.get_url:
+    url: https://apt.releases.hashicorp.com/gpg
+    dest: /tmp/hashicorp-gpg.asc
+    mode: "0644"
+    force: true
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Dearmor HashiCorp GPG key to keyrings directory
+  ansible.builtin.shell:
+    cmd: gpg --dearmor -o /etc/apt/keyrings/hashicorp-archive-keyring.gpg /tmp/hashicorp-gpg.asc
+    creates: /etc/apt/keyrings/hashicorp-archive-keyring.gpg
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Set permissions on HashiCorp keyring file
+  ansible.builtin.file:
+    path: /etc/apt/keyrings/hashicorp-archive-keyring.gpg
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Add HashiCorp apt repository (signed-by= format)
+  # HashiCorp does not publish packages for Ubuntu 25.04 (plucky) yet.
+  # noble (24.04) packages are binary-compatible with plucky.
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/hashicorp-archive-keyring.gpg]
+      https://apt.releases.hashicorp.com
+      {{ 'noble' if ansible_distribution_release == 'plucky' else ansible_distribution_release }}
+      main
+    state: present
+    update_cache: true
+    filename: hashicorp
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Install vault package (provides vault-agent binary)
+  ansible.builtin.apt:
+    name: vault
+    state: present
+  tags: [minio-approle, minio]
+
+# ── Deploy vault-agent config and credentials on host ────────────────────────
+
+- name: MINIO-APPROLE | Create vault-agent config directory (mode 0700)
+  ansible.builtin.file:
+    path: "{{ vault_agent_minio_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Deploy vault-agent HCL configuration
+  ansible.builtin.template:
+    src: vault-agent-minio.hcl.j2
+    dest: "{{ vault_agent_minio_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart vault-agent-minio
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Deploy CT template for /run/minio-secrets
+  ansible.builtin.template:
+    src: minio-secrets.ctmpl.j2
+    dest: "{{ vault_agent_minio_ctmpl_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart vault-agent-minio
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Deploy AppRole role-id file (mode 0600)
+  ansible.builtin.copy:
+    content: "{{ _minio_approle_role_id }}"
+    dest: "{{ vault_agent_minio_config_dir }}/role-id"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart vault-agent-minio
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Deploy AppRole secret-id file (mode 0600)
+  ansible.builtin.copy:
+    content: "{{ _minio_approle_secret_id }}"
+    dest: "{{ vault_agent_minio_config_dir }}/secret-id"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart vault-agent-minio
+  tags: [minio-approle, minio]
+
+# ── Deploy and start vault-agent systemd service ─────────────────────────────
+
+- name: MINIO-APPROLE | Deploy vault-agent-minio systemd service
+  ansible.builtin.template:
+    src: vault-agent-minio.service.j2
+    dest: /etc/systemd/system/vault-agent-minio.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Daemon reload
+    - Restart vault-agent-minio
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Enable and start vault-agent-minio
+  ansible.builtin.systemd:
+    name: vault-agent-minio.service
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags: [minio-approle, minio]
+
+- name: MINIO-APPROLE | Wait for vault-agent to render /run/minio-secrets (up to 30s)
+  ansible.builtin.wait_for:
+    path: /run/minio-secrets
+    state: present
+    timeout: 30
+  tags: [minio-approle, minio]

@@ -1,0 +1,188 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# =============================================================================
+# Alertmanager Dead-Man Switch — OPS-915
+# =============================================================================
+# Polls Alertmanager from iac-control (out-of-cluster) via oc port-forward.
+# If the Watchdog heartbeat alert is absent or stale for more than
+# THRESHOLD_SECONDS, fires a direct Telegram API alert.
+#
+# Failure modes detected:
+#   - OKD control plane down (oc port-forward fails → stale state file)
+#   - Alertmanager down (port-forward works but returns no Watchdog alert)
+#   - Prometheus/alerting pipeline broken (Watchdog updatedAt goes stale)
+#
+# NIST Controls: SI-12 (Monitoring), CP-7 (Alternate Processing Site analog)
+# =============================================================================
+set -uo pipefail
+
+# --- Configuration ---
+THRESHOLD_SECONDS="{{ alertmanager_deadman_threshold_seconds }}"
+LOCAL_PORT="{{ alertmanager_deadman_local_port }}"
+STATE_DIR="{{ alertmanager_deadman_state_dir }}"
+STATE_FILE="${STATE_DIR}/last_watchdog.ts"
+LOG_FILE="{{ alertmanager_deadman_log }}"
+OC_BINARY="{{ alertmanager_deadman_oc_binary }}"
+KUBECONFIG="{{ alertmanager_deadman_kubeconfig }}"
+ENV_FILE="/etc/sentinel/alertmanager-deadman.env"
+CURL_TIMEOUT=20
+PF_SETTLE_SECS=3
+PF_PID=""
+
+# --- Load credentials ---
+if [ ! -f "${ENV_FILE}" ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: env file not found: ${ENV_FILE}" >> "${LOG_FILE}"
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
+
+# --- Logging ---
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "${LOG_FILE}"; }
+log_err() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ERROR: $*" >> "${LOG_FILE}" >&2; }
+
+# --- Cleanup port-forward on exit ---
+cleanup_pf() {
+    if [ -n "${PF_PID}" ] && kill -0 "${PF_PID}" 2>/dev/null; then
+        kill "${PF_PID}" 2>/dev/null
+        wait "${PF_PID}" 2>/dev/null || true
+    fi
+}
+trap cleanup_pf EXIT
+
+# --- Send Telegram alert ---
+send_telegram() {
+    local msg="$1"
+    /usr/bin/curl -sk \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        -d "parse_mode=Markdown" \
+        --data-urlencode "text=${msg}" \
+        --max-time 30 \
+        -o /dev/null
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        log "Telegram alert sent"
+    else
+        log_err "Telegram send failed (curl rc=${rc})"
+    fi
+}
+
+# --- Ensure state dir and file exist ---
+mkdir -p "${STATE_DIR}"
+chmod 700 "${STATE_DIR}"
+if [ ! -f "${STATE_FILE}" ]; then
+    # First install: write sentinel 0 = "never seen". No alert until one poll succeeds.
+    echo "0" > "${STATE_FILE}"
+    log "First run: state file initialized. Waiting for baseline heartbeat."
+fi
+
+LAST_TS=$(cat "${STATE_FILE}")
+NOW=$(date +%s)
+
+# --- Attempt to query Alertmanager via port-forward ---
+QUERY_SUCCESS=false
+WATCHDOG_FOUND=false
+
+# Check if oc binary exists
+if [ ! -x "${OC_BINARY}" ]; then
+    log_err "oc binary not found or not executable: ${OC_BINARY}"
+else
+    # Start port-forward in background; redirect stdout/stderr to suppress noise
+    KUBECONFIG="${KUBECONFIG}" "${OC_BINARY}" port-forward \
+        -n openshift-monitoring svc/alertmanager-operated \
+        "${LOCAL_PORT}:9093" \
+        > /dev/null 2>&1 &
+    PF_PID=$!
+
+    # Give port-forward time to establish
+    sleep "${PF_SETTLE_SECS}"
+
+    if kill -0 "${PF_PID}" 2>/dev/null; then
+        # Port-forward is alive; query the API
+        ALERTS_JSON=$(/usr/bin/curl -sk \
+            "http://localhost:${LOCAL_PORT}/api/v2/alerts" \
+            --max-time "${CURL_TIMEOUT}" 2>/dev/null)
+        CURL_RC=$?
+
+        if [ ${CURL_RC} -eq 0 ] && [ -n "${ALERTS_JSON}" ]; then
+            QUERY_SUCCESS=true
+
+            # Parse Watchdog alert and extract updatedAt timestamp
+            WATCHDOG_UPDATE=$(/usr/bin/python3 -c "
+import sys, json, datetime
+try:
+    alerts = json.loads(sys.stdin.read())
+    for a in alerts:
+        if (a.get('labels', {}).get('alertname') == 'Watchdog'
+                and a.get('status', {}).get('state') == 'active'):
+            print(a.get('updatedAt', ''))
+            break
+except Exception as e:
+    pass
+" <<< "${ALERTS_JSON}" 2>/dev/null)
+
+            if [ -n "${WATCHDOG_UPDATE}" ]; then
+                # Convert ISO8601 to unix timestamp
+                WATCHDOG_TS=$(/usr/bin/date -d "${WATCHDOG_UPDATE}" +%s 2>/dev/null || echo "")
+                if [ -n "${WATCHDOG_TS}" ] && [ "${WATCHDOG_TS}" -gt 0 ] 2>/dev/null; then
+                    echo "${WATCHDOG_TS}" > "${STATE_FILE}"
+                    LAST_TS="${WATCHDOG_TS}"
+                    WATCHDOG_FOUND=true
+                    log "Watchdog heartbeat confirmed: updatedAt=${WATCHDOG_UPDATE}"
+                fi
+            else
+                ALERTS_LEN=$(printf "%s" "${ALERTS_JSON}" | wc -c)
+                log "AM reachable but no active Watchdog alert found (${ALERTS_LEN} bytes)"
+            fi
+        else
+            ALERTS_LEN=$(printf "%s" "${ALERTS_JSON}" | wc -c)
+            log "AM query failed: curl_rc=${CURL_RC}, response_len=${ALERTS_LEN}"
+        fi
+    else
+        log "oc port-forward failed to establish (pid=${PF_PID})"
+    fi
+
+    cleanup_pf
+    PF_PID=""
+fi
+
+# --- Decision: alert or not ---
+if [ "${LAST_TS}" -eq 0 ]; then
+    # Never seen a heartbeat yet — don't page on first install
+    log "No baseline heartbeat yet (ts=0) — waiting for first successful poll"
+    exit 0
+fi
+
+AGE_SECONDS=$(( NOW - LAST_TS ))
+AGE_HOURS=$(( AGE_SECONDS / 3600 ))
+AGE_MINS=$(( (AGE_SECONDS % 3600) / 60 ))
+
+if [ "${AGE_SECONDS}" -gt "${THRESHOLD_SECONDS}" ]; then
+    THRESHOLD_HOURS=$(( THRESHOLD_SECONDS / 3600 ))
+
+    if ${QUERY_SUCCESS} && ! ${WATCHDOG_FOUND}; then
+        # AM is reachable but Watchdog is not firing
+        MSG="⚠️ *WATCHDOG ALERT MISSING*
+Alertmanager is reachable but has NO active Watchdog alert.
+Age of last heartbeat: ${AGE_HOURS}h ${AGE_MINS}m (threshold: ${THRESHOLD_HOURS}h)
+This may indicate Prometheus or alerting rules are broken.
+Host: $(hostname)
+Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        log "ALERT fired: AM reachable, Watchdog absent for ${AGE_HOURS}h ${AGE_MINS}m"
+    else
+        # AM unreachable OR port-forward failed — cluster may be down
+        MSG="🚨 *CLUSTER/MONITORING UNREACHABLE*
+Dead-man switch: cannot confirm Watchdog heartbeat from iac-control.
+Age of last heartbeat: ${AGE_HOURS}h ${AGE_MINS}m (threshold: ${THRESHOLD_HOURS}h)
+AM reachable: ${QUERY_SUCCESS}
+Possible causes: OKD control plane down, Alertmanager down, network failure.
+Host: $(hostname)
+Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        log "ALERT fired: AM unreachable, last heartbeat ${AGE_HOURS}h ${AGE_MINS}m ago"
+    fi
+
+    send_telegram "${MSG}"
+else
+    log "OK: Watchdog heartbeat age=${AGE_SECONDS}s (${AGE_HOURS}h ${AGE_MINS}m) — within threshold"
+fi

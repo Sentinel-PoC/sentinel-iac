@@ -1,0 +1,78 @@
+# {{ ansible_managed }}
+# Squid transparent proxy configuration for OKD egress filtering
+# NIST SC-7: Boundary Protection - domain allowlisting
+
+# ACL definitions for local networks
+acl localnet src 0.0.0.1-0.255.255.255
+acl localnet src 10.0.0.0/8
+acl localnet src 100.64.0.0/10
+acl localnet src 169.254.0.0/16
+acl localnet src 172.16.0.0/12
+acl localnet src 192.168.0.0/16
+acl localnet src fc00::/7
+acl localnet src fe80::/10
+
+# Port ACLs
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 443
+acl Safe_ports port 587        # SMTP submission (Mailjet)
+acl Safe_ports port 8080       # HTTP alt (container registries)
+acl Safe_ports port 8443       # HTTPS alt (container registries)
+acl Safe_ports port 9443       # Webhook receivers
+
+# Deny requests to unknown ports
+http_access deny !Safe_ports
+
+# Deny CONNECT to non-SSL ports
+http_access deny CONNECT !SSL_ports
+
+# Allow localhost manager access
+http_access allow localhost manager
+http_access deny manager
+
+# Allow localhost
+http_access allow localhost
+
+# Deny to localhost and link-local
+http_access deny to_localhost
+http_access deny to_linklocal
+
+# Include additional configuration files
+include /etc/squid/conf.d/*.conf
+
+# OKD network egress filtering
+acl okd_network src {{ okd_network }}
+acl allowed_domains dstdomain "/etc/squid/okd-egress-allowlist.txt"
+
+# Allow OKD network to access allowed domains only
+http_access allow okd_network allowed_domains
+
+# Deny all other access
+http_access deny all
+
+# Transparent proxy on port {{ squid_port }}
+http_port {{ squid_port }} intercept
+# Forward-proxy port required by Squid 6.x (localhost only, not exposed)
+http_port 127.0.0.1:3129
+
+# Disable caching
+cache deny all
+
+# Coredump directory
+coredump_dir /var/spool/squid
+
+# Refresh patterns
+refresh_pattern ^ftp:		1440	20%	10080
+refresh_pattern -i (/cgi-bin/|\?) 0	0%	0
+refresh_pattern \/(Packages|Sources)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+refresh_pattern \/Release(|\.gpg)$ 0 0% 0 refresh-ims
+refresh_pattern \/InRelease$ 0 0% 0 refresh-ims
+refresh_pattern \/(Translation-.*)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+refresh_pattern .		0	20%	4320
+
+# --- Logging ---
+# Minimize cache.log verbosity (default is too noisy)
+debug_options ALL,1
+# Log access to syslog instead of access.log (Wazuh picks it up)
+access_log syslog:local3 squid

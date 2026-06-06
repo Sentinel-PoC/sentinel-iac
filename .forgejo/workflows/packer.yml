@@ -1,0 +1,62 @@
+---
+name: Packer
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packer/**'
+  pull_request:
+    paths:
+      - 'packer/**'
+  workflow_dispatch:
+    inputs:
+      template:
+        description: 'Packer template to build (e.g. iac-control, vault-server, forgejo-server, seedbox-vm, minio-bootstrap, fedora-coreos)'
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  packer-validate:
+    runs-on: iac
+    env:
+      CHECKPOINT_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate all Packer templates
+        run: |
+          echo "Validating all Packer templates..."
+          cd packer
+          FAILED=0
+          for template in *.pkr.hcl; do
+            echo "--- Validating $template ---"
+            if ! packer init "$template"; then
+              echo "INIT FAILED: $template"
+              FAILED=1
+              continue
+            fi
+            if ! packer validate -syntax-only "$template"; then
+              echo "VALIDATE FAILED: $template"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+  packer-build:
+    runs-on: iac
+    needs: packer-validate
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      PKR_VAR_proxmox_token_secret: ${{ secrets.PROXMOX_TOKEN_SECRET }}
+      PKR_VAR_ssh_password: ${{ secrets.PACKER_SSH_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build golden image
+        run: |
+          TEMPLATE="${{ github.event.inputs.template }}"
+          echo "Building golden image: ${TEMPLATE}.pkr.hcl"
+          cd packer
+          packer init "${TEMPLATE}.pkr.hcl"
+          packer build -force "${TEMPLATE}.pkr.hcl"

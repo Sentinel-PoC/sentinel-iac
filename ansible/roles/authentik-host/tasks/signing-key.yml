@@ -1,0 +1,101 @@
+---
+# signing-key.yml — OPS-869
+# Ensures all Authentik OAuth2 providers that require RS256 token signing
+# have a signing_key set. When signing_key is null, Authentik defaults to
+# HS256 (HMAC, using the client_secret) and returns an empty JWKS endpoint.
+#
+# Root cause (OPS-869): overwatch-console auth.py validates JWT using JWKS
+# public-key lookup. If JWKS is empty (signing_key=null, HS256 default),
+# _get_signing_key() raises HTTP 401. jwt.decode() also hardcodes RS256.
+#
+# Fix: set signing_key to the Authentik self-signed RSA certificate on any
+# OAuth2 provider where signing_key is currently null. This causes Authentik
+# to sign tokens with the RSA private key, expose the public key in JWKS,
+# and include a kid in the token header — allowing JWKS-based JWT verification.
+#
+# Idempotency:
+# - GET /crypto/certificatekeypairs/?has_key=true fetches available RSA keys
+# - GET /providers/oauth2/?page_size=200 returns current state
+# - PATCH only issued when provider.signing_key is null
+# - Already-correct providers (signing_key set) are silently skipped
+#
+# Scope: All OAuth2 providers on this Authentik instance. Platform policy
+# (OPS-869) requires RS256 for all machine-to-machine client_credentials flows.
+# Providers used for interactive browser auth (with redirect_uri) also benefit
+# from RS256 (standard OIDC), but the fix is operationally critical only for
+# server-to-server flows where the consumer validates via JWKS.
+#
+# Vault: authentik_admin_token set by vault-secrets.yml (included in main.yml).
+# If running standalone with --tags signing-key, vault-secrets.yml must
+# already have run (or vault_token must be injected via -e vault_token=...).
+
+- name: "Signing-key | Get available RSA certificate keypairs (OPS-869)"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/crypto/certificatekeypairs/?has_key=true"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_signing_keypairs
+  tags: [authentik, signing-key]
+
+- name: "Signing-key | Assert at least one RSA keypair is available"
+  ansible.builtin.assert:
+    that:
+      - authentik_signing_keypairs.json.results | length > 0
+    fail_msg: >-
+      No RSA certificate keypairs found in Authentik. Authentik automatically
+      creates a self-signed certificate at first boot. If this assertion fails,
+      the Authentik service may not have completed initial setup.
+  tags: [authentik, signing-key]
+
+- name: "Signing-key | Select RSA signing certificate (prefer Self-signed Certificate)"
+  ansible.builtin.set_fact:
+    # Select the self-signed cert by name if it exists; otherwise use the first available.
+    # The self-signed cert is auto-created by Authentik at first boot (name pattern:
+    # "authentik Self-signed Certificate"). Falls back to first keypair if name differs.
+    authentik_rsa_signing_key_pk: >-
+      {{ (authentik_signing_keypairs.json.results
+          | selectattr('name', 'match', '.*[Ss]elf.signed.*')
+          | map(attribute='pk')
+          | list
+          | first)
+         | default(authentik_signing_keypairs.json.results[0].pk) }}
+  tags: [authentik, signing-key]
+
+- name: "Signing-key | Debug — selected signing certificate pk"
+  ansible.builtin.debug:
+    msg: "Using RSA signing key pk={{ authentik_rsa_signing_key_pk }}"
+  tags: [authentik, signing-key]
+
+- name: "Signing-key | Get all OAuth2 providers (OPS-869)"
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/providers/oauth2/?page_size=200"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+    return_content: true
+    status_code: 200
+  register: authentik_signing_key_providers
+  tags: [authentik, signing-key]
+
+- name: "Signing-key | Set signing_key to RSA cert on providers where it is null"
+  # signing_key == None in Python/Jinja2 is tested with `is none`.
+  # Providers already using an RSA key (signing_key != null) are silently skipped.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/api/v3/providers/oauth2/{{ item.pk }}/"
+    method: PATCH
+    headers:
+      Authorization: "Bearer {{ authentik_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      signing_key: "{{ authentik_rsa_signing_key_pk }}"
+    status_code: 200
+  loop: "{{ authentik_signing_key_providers.json.results }}"
+  loop_control:
+    label: "{{ item.name }} (pk={{ item.pk }})"
+  when: item.signing_key is none
+  changed_when: true
+  tags: [authentik, signing-key]

@@ -1,0 +1,26 @@
+---
+# wazuh-sigma-deploy role defaults — OPS-574
+#
+# Deploy SIGMA-compiled Wazuh XML rules from sentinel-sigma-rules CI pipeline.
+# Compiled rules are in the 200000-209999 rule ID namespace.
+
+# Path on the Wazuh manager where SIGMA rules are deployed
+wazuh_rules_dir: /var/ossec/etc/rules
+
+# Filename for the SIGMA-compiled ruleset
+wazuh_sigma_rules_filename: local_sigma_rules.xml
+
+# Full path for the deployed rules file
+wazuh_sigma_rules_dest: "{{ wazuh_rules_dir }}/{{ wazuh_sigma_rules_filename }}"
+
+# Source path for the compiled XML rules (override on command line or in playbook)
+# Default: look for compiled/sigma_rules.xml relative to repo root
+sigma_compiled_src: "{{ playbook_dir }}/../../../sigma-rules/compiled/sigma_rules.xml"
+
+# Wazuh manager service name
+wazuh_manager_service: wazuh-manager
+
+# File ownership on Wazuh manager
+wazuh_rules_owner: wazuh
+wazuh_rules_group: wazuh
+wazuh_rules_mode: "0660"

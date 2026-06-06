@@ -1,0 +1,213 @@
+---
+- name: Install auditd packages
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - audispd-plugins
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Remove invalid backlog_limit from auditd.conf (set via rules instead)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^backlog_limit'
+    state: absent
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Restart auditd
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Configure auditd max_log_file_action
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^max_log_file_action'
+    line: "max_log_file_action = {{ auditd_max_log_file_action }}"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Restart auditd
+  tags:
+    - common
+    - auditd
+    - hardening
+
+# OPS-778: set per-file size and rotation count to bound total audit log disk usage
+- name: Configure auditd max_log_file (MB per file)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^max_log_file\b'
+    line: "max_log_file = {{ auditd_max_log_file }}"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Restart auditd
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Configure auditd num_logs (rotation count)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^num_logs'
+    line: "num_logs = {{ auditd_num_logs }}"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Restart auditd
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Configure auditd space_left_action
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^space_left_action'
+    line: "space_left_action = email"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Load audit rules
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Configure auditd admin_space_left_action (CIS 5.2.2.2)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^admin_space_left_action'
+    line: "admin_space_left_action = halt"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Load audit rules
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Configure auditd disk_full_action (CIS 5.2.2.3)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^disk_full_action'
+    line: "disk_full_action = HALT"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Load audit rules
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Configure auditd disk_error_action (CIS 5.2.2.4)
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^disk_error_action'
+    line: "disk_error_action = HALT"
+    state: present
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Load audit rules
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Set audit tool permissions (CIS 5.2.3.21)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "0750"
+  loop:
+    - /sbin/auditctl
+    - /sbin/aureport
+    - /sbin/ausearch
+    - /sbin/autrace
+    - /sbin/auditd
+    - /sbin/augenrules
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  failed_when: false
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Deploy audit rules
+  ansible.builtin.template:
+    src: audit.rules.j2
+    dest: /etc/audit/rules.d/sentinel.rules
+    owner: root
+    group: root
+    mode: "0640"
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  notify: Load audit rules
+  tags:
+    - common
+    - auditd
+    - hardening
+
+- name: Enable and start auditd
+  ansible.builtin.service:
+    name: auditd
+    enabled: true
+    state: started
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  tags:
+    - common
+    - auditd
+    - hardening
+
+# OPS-995: prune accumulated audit log rotations to enforce the num_logs cap.
+# Scenario: host had max_log_file_action=keep_logs (never deletes) before the
+# OPS-778 rotate policy was deployed. This leaves N>num_logs numbered files on
+# disk even after switching to rotate, because auditd only enforces num_logs on
+# new rotations, not retroactively on existing files.
+# This task sorts by mtime (newest first) and deletes any file past position
+# {{ auditd_num_logs }}. It is idempotent — no-op when files are already pruned.
+- name: Prune excess auditd log rotations to enforce num_logs cap (OPS-995)
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      excess=$(ls -t /var/log/audit/audit.log.* 2>/dev/null | tail -n +{{ auditd_num_logs | int + 1 }})
+      if [ -n "$excess" ]; then
+        echo "$excess" | xargs rm -f
+        echo "pruned"
+      else
+        echo "clean"
+      fi
+    executable: /bin/bash
+  register: audit_prune_result
+  changed_when: "'pruned' in audit_prune_result.stdout"
+  when:
+    - auditd_enabled
+    - ansible_virtualization_type != 'lxc'
+  tags:
+    - common
+    - auditd

@@ -1,0 +1,132 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# Proxmox host firewall — NIST SC-7(5) Deny by Default
+# Applied to: {{ inventory_hostname }} ({{ ansible_host }})
+
+flush ruleset
+
+table inet filter {
+
+    set management_net {
+        type ipv4_addr
+        flags interval
+        elements = {
+{% for net in pve_management_networks %}
+            {{ net }}{{ "," if not loop.last else "" }}
+{% endfor %}
+        }
+    }
+
+{% if pve_cluster_nodes | length > 0 %}
+    set cluster_nodes {
+        type ipv4_addr
+        elements = {
+{% for node in pve_cluster_nodes %}
+            {{ node }}{{ "," if not loop.last else "" }}
+{% endfor %}
+        }
+    }
+
+{% endif %}
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # --- Stateful tracking ---
+        ct state established,related accept
+        ct state invalid drop
+
+        # --- Loopback ---
+        iif "lo" accept
+
+        # --- ICMP (ping) from management network ---
+        ip saddr @management_net icmp type echo-request accept
+        ip6 nexthdr ipv6-icmp accept
+
+        # --- SSH from management network ---
+        ip saddr @management_net tcp dport {{ pve_ssh_port }} accept
+
+        # --- PVE API from management network ---
+        ip saddr @management_net tcp dport {{ pve_api_port }} accept
+
+        # --- SPICE proxy from management network ---
+        ip saddr @management_net tcp dport {{ pve_spice_port }} accept
+
+        # --- VNC websocket from management network ---
+        ip saddr @management_net tcp dport {{ pve_vnc_port_start }}-{{ pve_vnc_port_end }} accept
+
+{% if pve_cluster_nodes | length > 0 %}
+        # --- Corosync cluster communication (UDP) ---
+        ip saddr @cluster_nodes udp dport {{ pve_corosync_port }} accept
+
+        # --- Live migration between cluster nodes (TCP) ---
+        ip saddr @cluster_nodes tcp dport {{ pve_migration_port_start }}-{{ pve_migration_port_end }} accept
+
+        # --- VXLAN overlay (OKD OVN-Kubernetes — OKD decommed 2026-05, keeping for cluster hygiene) ---
+        ip saddr @cluster_nodes udp dport 4789 accept
+
+        # --- Geneve overlay (OKD OVN-Kubernetes — OKD decommed 2026-05, keeping for cluster hygiene) ---
+        ip saddr @cluster_nodes udp dport 6081 accept
+
+{% endif %}
+        # --- rpcbind localhost only (drop external) ---
+        tcp dport 111 drop
+        udp dport 111 drop
+
+{% if pve_nftables_log_drops %}
+        # --- Log dropped packets ---
+        limit rate {{ pve_nftables_log_rate }} log prefix "nftables-drop: " level warn
+{% endif %}
+
+        # --- Default drop (policy) ---
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Proxmox hosts should not route traffic
+        # VM traffic uses bridged networking (not forwarded through host netfilter)
+    }
+
+    chain output {
+        type filter hook output priority 0; policy drop;
+
+        # --- Stateful tracking (covers most return traffic) ---
+        ct state established,related accept
+        ct state invalid drop
+
+        # --- Loopback ---
+        oif "lo" accept
+
+        # --- DNS (UDP + TCP) ---
+        udp dport 53 accept
+        tcp dport 53 accept
+
+        # --- NTP ---
+        udp dport 123 accept
+
+        # --- Wazuh agent to manager ---
+        ip daddr {{ pve_wazuh_manager }} tcp dport {{ pve_wazuh_agent_port }} accept
+
+        # --- HTTP/HTTPS for apt package updates and PVE daily update ---
+        tcp dport 80 accept
+        tcp dport 443 accept
+
+{% if pve_cluster_nodes | length > 0 %}
+        # --- Corosync cluster communication (UDP) to cluster peers ---
+        ip daddr @cluster_nodes udp dport {{ pve_corosync_port }} accept
+
+        # --- Live migration outbound to cluster peers ---
+        ip daddr @cluster_nodes tcp dport {{ pve_migration_port_start }}-{{ pve_migration_port_end }} accept
+
+{% endif %}
+        # --- SSH outbound (management, Ansible control) ---
+        tcp dport {{ pve_ssh_port }} accept
+
+{% if pve_nftables_log_drops %}
+        # --- Log dropped outbound packets ---
+        limit rate {{ pve_nftables_log_rate }} log prefix "nftables-out-drop: " level warn
+{% endif %}
+
+        # --- Default drop (policy) ---
+    }
+}

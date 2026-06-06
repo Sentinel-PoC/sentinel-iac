@@ -1,0 +1,157 @@
+---
+name: Lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  yamllint:
+    runs-on: iac
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run yamllint
+        run: |
+          echo "Running yamllint on all YAML files..."
+          yamllint -c .yamllint.yml -f parsable . | tee yamllint-report.txt
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: yamllint-report
+          path: yamllint-report.txt
+
+  ansible-lint:
+    runs-on: iac
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ansible-lint
+        run: |
+          echo "Running ansible-lint on playbooks..."
+          cd infrastructure
+          ansible-lint -f sarif --nocolor . > ../ansible-lint-report.json 2>../ansible-lint-stderr.txt
+          LINT_RC=$?
+          cd ..
+          if [ -s ansible-lint-stderr.txt ]; then cat ansible-lint-stderr.txt; fi
+          exit $LINT_RC
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: ansible-lint-report
+          path: ansible-lint-report.json
+      - name: Upload to DefectDojo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('ansible-lint-report.json') != ''
+        env:
+          DEFECTDOJO_URL: ${{ secrets.DEFECTDOJO_URL }}
+          DEFECTDOJO_API_KEY: ${{ secrets.DEFECTDOJO_API_KEY }}
+        run: |
+          echo "Uploading Ansible-lint scan to DefectDojo..."
+          RESPONSE=$(curl -sk -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DEFECTDOJO_API_KEY}" \
+            -F "scan_type=SARIF" \
+            -F "product_name=Sentinel IaC" \
+            -F "engagement_name=Main Branch CI/CD — IaC" \
+            -F "test_title=Ansible Lint" \
+            -F "auto_create_context=true" \
+            -F "file=@ansible-lint-report.json" \
+            -F "active=true" -F "verified=false" -F "close_old_findings=true" \
+            -F "minimum_severity=Info" -F "scan_date=$(date +%Y-%m-%d)" \
+            -F "tags=ansible,lint,iac" \
+            -w "\n%{http_code}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          echo "HTTP Status: $HTTP_CODE"
+          [ "$HTTP_CODE" -lt 400 ] || exit 1
+
+  tflint:
+    runs-on: iac
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tflint
+        run: |
+          echo "Running tflint on Terraform configs..."
+          for dir in infrastructure/bootstrap infrastructure/managed; do
+            if [ -d "$dir" ]; then
+              echo "Linting $dir..."
+              cd "$dir"
+              tflint --init 2>/dev/null
+              tflint --format json > "../../tflint-$(basename $dir)-report.json" 2>&1
+              cd ../..
+            fi
+          done
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: tflint-reports
+          path: tflint-*-report.json
+
+  # OPS-340: Bandit SAST gate — HIGH+MEDIUM severity (-ll).
+  # Targets: scripts/ and infrastructure/grafana-alert-receiver/ (all Python in repo).
+  # NIST SA-11(1) — Developer Security Testing: static analysis on Python scripts.
+  # Known false positives annotated # nosec in source with OPS-342 reference.
+  # OPS-803: Skip bandit on PRs that touch no .py files (YAML/Jinja2/XML-only PRs).
+  # OPS-844: Skip bandit on push events with no .py changes (mirrors PR-side guard).
+  bandit:
+    runs-on: iac
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for Python file changes
+        id: py-check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null
+            if git diff --name-only FETCH_HEAD...HEAD | grep -q '\.py$'; then
+              echo "has_python=true" >> $GITHUB_OUTPUT
+              echo "Python files changed — bandit will run"
+            else
+              echo "has_python=false" >> $GITHUB_OUTPUT
+              echo "No Python files changed — skipping bandit"
+            fi
+          else
+            BEFORE="${{ github.event.before }}"
+            HAS_PY="true"
+            REASON="Push to main — bandit runs (fallback)"
+            if [ "${BEFORE}" != "0000000000000000000000000000000000000000" ]; then
+              if git fetch origin "${BEFORE}" --depth=1 2>/dev/null; then
+                if git diff --name-only "${BEFORE}..HEAD" 2>/dev/null | grep -q '\.py$'; then
+                  HAS_PY="true"
+                  REASON="Python files changed in push — bandit will run"
+                else
+                  HAS_PY="false"
+                  REASON="No Python files changed in push — skipping bandit"
+                fi
+              else
+                REASON="Could not fetch before SHA — bandit runs as fallback"
+              fi
+            else
+              REASON="Initial push (no before SHA) — bandit always runs"
+            fi
+            echo "has_python=${HAS_PY}" >> $GITHUB_OUTPUT
+            echo "${REASON}"
+          fi
+      - name: Bandit SAST (HIGH+MEDIUM gate)
+        if: steps.py-check.outputs.has_python == 'true'
+        run: |
+          python3 -m pip install --user --quiet --break-system-packages bandit
+          ~/.local/bin/bandit -r scripts infrastructure/grafana-alert-receiver -ll
+
+  # OPS-232: Backstage catalog validation — schema-lint + API registration check.
+  # L1 pre-merge soft gate per OPS-227 child D.
+  # Step 1: ajv validate catalog-info.yaml against tooling/catalog-schema/schema.json (OPS-230).
+  # Step 2: Backstage catalog API check (soft-fail: 404 = warning, not error).
+  # Depends on BACKSTAGE_API_TOKEN Forgejo secret for Step 2; skips gracefully if absent.
+  # Flip soft-fail to false in OPS-227 child F to enable hard-fail mode.
+  backstage-validate:
+    runs-on: iac
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backstage catalog validate (schema + API)
+        uses: ./.forgejo/actions/backstage-validate
+        with:
+          catalog-file: catalog-info.yaml
+          schema-file: tooling/catalog-schema/schema.json
+          backstage-url: https://backstage.208.haist.farm
+          backstage-token: ${{ secrets.BACKSTAGE_API_TOKEN }}
+          soft-fail: "true"

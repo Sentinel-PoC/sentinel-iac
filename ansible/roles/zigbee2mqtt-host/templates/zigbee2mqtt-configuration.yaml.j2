@@ -1,0 +1,41 @@
+# Ansible managed — OPS-585 zigbee2mqtt-host role
+# zigbee2mqtt configuration.yaml
+# Note: force=false in the deploy task — operator UI changes are preserved.
+# This template only applies on FIRST install (file doesn't exist yet).
+#
+# Reference: https://www.zigbee2mqtt.io/guide/configuration/
+
+# ── Home Assistant integration ────────────────────────────────────────────────
+homeassistant:
+  # HA auto-discovery: zigbee2mqtt publishes MQTT discovery messages
+  # that HA MQTT integration picks up automatically.
+  enabled: true
+  discovery_topic: homeassistant
+  status_topic: homeassistant/status
+
+# ── MQTT broker ───────────────────────────────────────────────────────────────
+# Connecting to local mosquitto (127.0.0.1) — same host.
+# Credentials fetched from EnvironmentFile (Vault-sourced).
+mqtt:
+  base_topic: zigbee2mqtt
+  server: "mqtt://127.0.0.1:{{ mqtt_port }}"
+  user: "{% raw %}${MQTT_USER}{% endraw %}"
+  password: "{% raw %}${MQTT_PASSWORD}{% endraw %}"
+
+# ── Serial port ───────────────────────────────────────────────────────────────
+# STABLE by-id path (not /dev/ttyACM* which changes on replug).
+serial:
+  port: "{{ zigbee2mqtt_serial_port }}"
+  adapter: ezsp
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend:
+  enabled: true
+  port: {{ zigbee2mqtt_frontend_port }}
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+advanced:
+  log_level: info
+  # Use journalctl only (no duplicate file logs for non-SD-card systems).
+  log_output:
+    - console

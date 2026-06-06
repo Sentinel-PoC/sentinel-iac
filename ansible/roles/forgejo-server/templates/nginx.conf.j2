@@ -1,0 +1,45 @@
+# OPS-779: nginx TLS sidecar for {{ forgejo_domain }}
+# Terminates HTTPS on :443 using the *.208.haist.farm wildcard cert extracted
+# from Pangolin's Traefik acme.json.  Proxies to forgejo:3000 on the same
+# Docker network (forgejo_default).
+#
+# Why this is needed:
+#   Forgejo hands runners ACTIONS_RUNTIME_URL = ROOT_URL = https://{{ forgejo_domain }}/
+#   Runners resolve {{ forgejo_domain }} to this host via /etc/hosts (OPS-773 split).
+#   Without a :443 listener here the artifact-upload PUT goes to Pangolin (the
+#   public DNS target) which does NOT forward :3000 → 500.  With nginx on :443
+#   the upload path is: runner → .70:443 → nginx → forgejo:3000 → ✓
+#
+# client_max_body_size 0 + proxy_request_buffering off are REQUIRED for large
+# artifact streaming — nginx must not buffer the request body to a temp file.
+
+server {
+    listen 443 ssl;
+    server_name {{ forgejo_domain }};
+
+    ssl_certificate     /etc/nginx/tls/forgejo.crt;
+    ssl_certificate_key /etc/nginx/tls/forgejo.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+
+    # Unlimited body size so large artifact uploads are not truncated
+    client_max_body_size 0;
+
+    location / {
+        proxy_pass http://forgejo:{{ forgejo_http_port }};
+
+        # Do not buffer request body to a temp file — stream directly
+        proxy_request_buffering off;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # Extended timeouts for large artifact uploads
+        proxy_read_timeout    {{ forgejo_nginx_proxy_read_timeout }};
+        proxy_send_timeout    {{ forgejo_nginx_proxy_send_timeout }};
+        proxy_connect_timeout {{ forgejo_nginx_proxy_connect_timeout }};
+    }
+}

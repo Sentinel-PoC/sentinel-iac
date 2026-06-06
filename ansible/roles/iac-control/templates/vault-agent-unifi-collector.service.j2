@@ -1,0 +1,34 @@
+# {{ ansible_managed }}
+# [OPS-169] Vault Agent sidecar service for unifi-collector AppRole auto-auth.
+#
+# This service authenticates to Vault using AppRole and writes a short-lived,
+# automatically-renewed service token to {{ vault_agent_unifi_token_path }}.
+#
+# The directory /run/sentinel-unifi lives on the /run tmpfs and does NOT
+# persist across reboots.  ExecStartPre creates it at each service start
+# before vault-agent writes its token sink file.
+
+[Unit]
+Description=Vault Agent - unifi-collector AppRole auto-auth (OPS-169)
+Documentation=https://developer.hashicorp.com/vault/docs/agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+# Create the /run/sentinel-unifi tmpfs directory at each start.
+# The '+' prefix runs these ExecStartPre commands with elevated privileges
+# even though the main process runs as ubuntu.
+ExecStartPre=+/bin/mkdir -p /run/sentinel-unifi
+ExecStartPre=+/bin/chmod 0750 /run/sentinel-unifi
+ExecStartPre=+/bin/chown ubuntu:ubuntu /run/sentinel-unifi
+ExecStart=/usr/local/bin/vault agent -config={{ vault_agent_unifi_config_file }}
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

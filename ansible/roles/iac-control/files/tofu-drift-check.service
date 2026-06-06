@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenTofu infrastructure drift detection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/sentinel-repo/scripts/tofu-drift-check.sh
+Environment=HOME=/home/ubuntu
+WorkingDirectory=/home/ubuntu/sentinel-repo/infrastructure/managed
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tofu-drift
+TimeoutStartSec=300

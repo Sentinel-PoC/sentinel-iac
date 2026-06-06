@@ -1,0 +1,116 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# Automated Proxmox VM snapshots with retention pruning
+# Runs daily via systemd timer
+# OPS-213: added curl timeouts, removed 2>/dev/null suppression, added failure exit code
+
+set -uo pipefail
+
+PROXMOX_API="{{ proxmox_snapshot_api_url }}"
+TOKEN_ID="{{ proxmox_snapshot_token_id }}"
+TOKEN_SECRET="{{ proxmox_snapshot_token_secret }}"
+AUTH_HEADER="PVEAPIToken=${TOKEN_ID}=${TOKEN_SECRET}"
+LOG_FILE="/var/log/proxmox-snapshot.log"
+CURL_OPTS="-sk -m 30 --connect-timeout 10"
+
+log() { echo "[$(date -Iseconds)] $1" | tee -a "$LOG_FILE"; }
+
+failure_count=0
+
+# Wait for a Proxmox task to complete (poll UPID)
+# $1=node $2=upid $3=timeout_seconds (default 300)
+wait_for_task() {
+  local node="$1" upid="$2" timeout="${3:-300}" elapsed=0
+  local encoded_upid status
+  encoded_upid=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$upid', safe=''))")
+
+  while [ $elapsed -lt $timeout ]; do
+    status=$(curl ${CURL_OPTS} "${PROXMOX_API}/nodes/${node}/tasks/${encoded_upid}/status" \
+      -H "Authorization: ${AUTH_HEADER}" 2>&1)
+    if echo "$status" | grep -q '"status":"stopped"'; then
+      if echo "$status" | grep -q '"exitstatus":"OK"'; then
+        return 0
+      else
+        log "WARNING: Task finished with non-OK status: $status"
+        return 1
+      fi
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  log "WARNING: Task timed out after ${timeout}s: $upid"
+  return 1
+}
+
+# VMs to snapshot: vmid:node:retention
+SNAPSHOTS=(
+{% for vm in proxmox_snapshot_vms %}
+  "{{ vm.vmid }}:{{ vm.node }}:{{ vm.retention }}"
+{% endfor %}
+)
+
+for entry in "${SNAPSHOTS[@]}"; do
+  IFS=':' read -r vmid node retention <<< "$entry"
+  snap_name="auto-$(date +%Y%m%d-%H%M)"
+
+  log "Creating snapshot $snap_name for VM $vmid on $node"
+
+  response=$(curl ${CURL_OPTS} -X POST "${PROXMOX_API}/nodes/${node}/qemu/${vmid}/snapshot" \
+    -H "Authorization: ${AUTH_HEADER}" \
+    -d "snapname=${snap_name}" \
+    -d "description=Automated daily snapshot" \
+    -d "vmstate=0" 2>&1)
+
+  if echo "$response" | grep -q '"data"'; then
+    upid=$(echo "$response" | grep -oP '"data":"[^"]*"' | cut -d'"' -f4)
+    log "Snapshot task started for VM $vmid (UPID: $upid)"
+    if ! wait_for_task "$node" "$upid"; then
+      log "ERROR: Snapshot task did not complete successfully for VM $vmid"
+      failure_count=$((failure_count + 1))
+    fi
+  else
+    log "ERROR: Failed to create snapshot for VM $vmid: $response"
+    failure_count=$((failure_count + 1))
+    continue
+  fi
+
+  # Prune old auto-snapshots beyond retention count
+  log "Pruning old snapshots for VM $vmid (keep ${retention})"
+
+  snaps=$(curl ${CURL_OPTS} "${PROXMOX_API}/nodes/${node}/qemu/${vmid}/snapshot" \
+    -H "Authorization: ${AUTH_HEADER}" 2>&1 \
+    | grep -oP '"name":"auto-[^"]*"' | cut -d'"' -f4 | sort -r)
+
+  count=0
+  for snap in $snaps; do
+    count=$((count + 1))
+    if [ "$count" -gt "$retention" ]; then
+      log "Deleting old snapshot: $snap from VM $vmid"
+      del_response=$(curl ${CURL_OPTS} -X DELETE \
+        "${PROXMOX_API}/nodes/${node}/qemu/${vmid}/snapshot/${snap}" \
+        -H "Authorization: ${AUTH_HEADER}" 2>&1)
+
+      del_upid=$(echo "$del_response" | grep -oP '"data":"[^"]*"' | cut -d'"' -f4)
+      if [ -n "$del_upid" ]; then
+        # OPS-732: delete timeout is 600s (2× create) — storage pressure extends CoW/LMDB GC.
+        # If this times out, the VM may be left with a stale lock. Recovery:
+        #   ssh root@${node} "qm unlock ${vmid}"
+        # There is no PVE REST API equivalent for qm unlock.
+        if ! wait_for_task "$node" "$del_upid" 600; then
+          log "ERROR: Delete of $snap timed out or failed for VM $vmid"
+          log "RECOVERY: ssh root@${node} 'qm unlock ${vmid}' to clear any stale lock (OPS-732)"
+          failure_count=$((failure_count + 1))
+        fi
+      else
+        log "WARNING: No task ID returned for delete of $snap: $del_response"
+      fi
+    fi
+  done
+done
+
+if [ "$failure_count" -gt 0 ]; then
+  log "FATAL: $failure_count snapshot(s) failed — check errors above"
+  exit 1
+fi
+
+log "Snapshot automation complete — all snapshots successful"

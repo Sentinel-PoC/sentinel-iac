@@ -1,0 +1,102 @@
+---
+# OPS-688: Idempotent sentinel-worker collaborator provisioning
+# Ensures sentinel-worker has write (push) access on all repos in forgejo_worker_repos.
+# Root cause: the forgejo-server role had no mechanism to assert collaborator state;
+# sentinel-admin/sentinel-unifi was missing sentinel-worker entirely (API returned 404).
+#
+# Approach: uses docker exec to generate a temporary admin token (no separate Vault path
+# required), makes idempotent PUT API calls, then revokes the temp token via API.
+# Pattern mirrors auth-source.yml (uses docker exec -u git forgejo forgejo admin ...).
+#
+# Requirements: Forgejo 10+ with "forgejo admin user generate-access-token" CLI support.
+
+- name: Remove stale ansible-collab-setup token if exists (OPS-688)
+  # Idempotency guard: delete the named temp token before (re-)generating it.
+  # Ignore failure — if the token doesn't exist yet, delete is a no-op.
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -u
+      - git
+      - forgejo
+      - forgejo
+      - admin
+      - user
+      - delete-access-token
+      - --username
+      - koiakoia
+      - --token-name
+      - ansible-collab-setup
+  register: forgejo_collab_delete_pre
+  changed_when: false
+  failed_when: false
+  tags: [forgejo, collaborators]
+
+- name: Generate temporary admin token for collaborator provisioning (OPS-688)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -u
+      - git
+      - forgejo
+      - forgejo
+      - admin
+      - user
+      - generate-access-token
+      - --username
+      - koiakoia
+      - --token-name
+      - ansible-collab-setup
+      - --raw
+  register: forgejo_collab_token
+  changed_when: true
+  no_log: true
+  tags: [forgejo, collaborators]
+
+- name: Set collaborator setup token fact (no_log)
+  ansible.builtin.set_fact:
+    _forgejo_collab_api_token: "{{ forgejo_collab_token.stdout | trim }}"
+  no_log: true
+  tags: [forgejo, collaborators]
+
+- name: Ensure sentinel-worker has write access on required repos (OPS-688)
+  # PUT /repos/{owner}/{repo}/collaborators/{collaborator} is idempotent:
+  # returns HTTP 204 whether the collaborator already exists or is being added.
+  # Running this on every role invocation is safe.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/v1/repos/{{ item }}/collaborators/sentinel-worker"
+    method: PUT
+    headers:
+      Authorization: "token {{ _forgejo_collab_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      permission: "write"
+    status_code: [204]
+  loop: "{{ forgejo_worker_repos }}"
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+  no_log: true
+  tags: [forgejo, collaborators]
+
+- name: Revoke temporary admin token via API (OPS-688)
+  # Self-revoke: the temp token deletes itself. Status 204 (deleted) or 404 (already gone)
+  # both indicate success. Uses localhost URL — same host, no network dependency.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/v1/users/koiakoia/tokens/ansible-collab-setup"
+    method: DELETE
+    headers:
+      Authorization: "token {{ _forgejo_collab_api_token }}"
+    status_code: [204, 404]
+  changed_when: false
+  no_log: true
+  tags: [forgejo, collaborators]
+
+- name: Clear collaborator setup token from facts (no_log)
+  ansible.builtin.set_fact:
+    _forgejo_collab_api_token: ""
+  no_log: true
+  tags: [forgejo, collaborators]

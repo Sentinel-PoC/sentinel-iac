@@ -1,0 +1,25 @@
+---
+# OPS-247: vault-server host-level Ansible variables
+# Vault server (192.168.12.206) — VMID 205 on 208-pve2
+#
+# This host_vars file documents expected configuration state for vault-server
+# and ensures the common role applies consistently.
+#
+# Root cause of OPS-247: ubuntu user was not in the sudo group on this host,
+# blocking JIT SSH cert logins (AllowGroups sudo rejects ubuntu).
+# The common role OPS-232 task (Ensure ubuntu admin user exists) reconciles this.
+
+# SSH access control — match common role default (sudo only, not sudo+root)
+# Previous state on disk was "sudo root" — drift from an earlier manual deploy.
+sshd_allow_groups: "sudo"
+
+# Firewall — SSH plus Vault API port 8200, Vault cluster port 8201,
+# transit-unseal listener 8201 (loopback), and Prometheus metrics 8429
+firewall_enabled: true
+firewall_allowed_ports:
+  - 22
+  - 8200
+  - 8201
+
+# AIDE enabled on this host
+aide_enabled: true

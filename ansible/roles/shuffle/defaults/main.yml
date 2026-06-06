@@ -1,0 +1,67 @@
+---
+# Shuffle role defaults — OPS-573
+# Tracking: https://plane.208.haist.farm OPS-573
+# Image/service names sourced from: https://github.com/frikky/Shuffle
+#
+# Sensitive values (admin password, API token, OIDC secret, Telegram token)
+# are supplied at runtime from Vault — never set here.
+
+# ── Paths ──────────────────────────────────────────────────────────────────
+shuffle_dir: "/opt/shuffle"
+shuffle_db_dir: "/opt/shuffle/db"         # OpenSearch data
+shuffle_data_dir: "/opt/shuffle/data"     # Shuffle app data
+shuffle_apps_dir: "/opt/shuffle/apps"     # Shuffle apps / integrations
+
+# ── Images ─────────────────────────────────────────────────────────────────
+# Upstream: https://github.com/frikky/Shuffle
+# shuffle-backend: ghcr.io/shuffle/shuffle/shuffle-backend
+# shuffle-frontend: ghcr.io/shuffle/shuffle/shuffle-frontend
+# shuffle-orborus: ghcr.io/shuffle/shuffle/shuffle-orborus
+# opensearch: opensearchproject/opensearch:2.14.0
+shuffle_backend_image: "ghcr.io/shuffle/shuffle/shuffle-backend:latest"
+shuffle_frontend_image: "ghcr.io/shuffle/shuffle/shuffle-frontend:latest"
+shuffle_orborus_image: "ghcr.io/shuffle/shuffle/shuffle-orborus:latest"
+shuffle_opensearch_image: "opensearchproject/opensearch:2.14.0"
+
+# ── Networking ─────────────────────────────────────────────────────────────
+# Pangolin reverse proxy terminates TLS; HTTP-only inside the host.
+shuffle_backend_port: 5001
+shuffle_frontend_port: 3001
+shuffle_opensearch_port: 9200
+shuffle_base_url: "https://shuffle.208.haist.farm"
+
+# ── OpenSearch ─────────────────────────────────────────────────────────────
+shuffle_opensearch_java_opts: "-Xms1g -Xmx1g"
+shuffle_opensearch_cluster_name: "shuffle-cluster"
+
+# ── Admin credentials ──────────────────────────────────────────────────────
+shuffle_admin_username: "admin@shuffle.haist.farm"
+shuffle_admin_password: ""          # Vault: secret/shuffle.admin_password
+shuffle_api_token: ""               # Vault: secret/shuffle.api_token
+
+# ── Keycloak OIDC ──────────────────────────────────────────────────────────
+# Operator must create "shuffle" client in Keycloak sentinel realm before
+# running deploy:
+#   - standardFlowEnabled: true
+#   - redirectUris: ["https://shuffle.208.haist.farm/*"]
+#   - webOrigins: ["https://shuffle.208.haist.farm"]
+shuffle_oidc_enabled: true
+shuffle_oidc_provider_url: "https://auth.208.haist.farm/realms/sentinel"
+shuffle_oidc_client_id: "shuffle"
+shuffle_oidc_client_secret: ""      # Vault: secret/shuffle.oidc_client_secret
+shuffle_oidc_admin_claim: "shuffle-admin"
+
+# ── Telegram confirm gate ──────────────────────────────────────────────────
+# Uses standing bot/channel from Vault secret/telegram/bot
+# Workflow B (repeat-offender-escalate) sends confirm messages before block.
+shuffle_telegram_bot_token: ""      # Vault: secret/telegram/bot.token
+shuffle_telegram_chat_id: ""        # Vault: secret/telegram/bot.chat_id
+
+# ── Wazuh integration ──────────────────────────────────────────────────────
+# Shuffle can receive Wazuh alerts via webhook (Wazuh integrations.conf)
+shuffle_wazuh_webhook_enabled: true
+shuffle_wazuh_webhook_port: 9001
+
+# ── Feature flags ──────────────────────────────────────────────────────────
+shuffle_import_workflows: true
+shuffle_workflows_dir: "{{ playbook_dir }}/../shuffle-workflows"

@@ -1,0 +1,314 @@
+---
+# OPS-492: pve4-alienware standalone Proxmox host (192.168.12.60)
+# Proxmox 9.1.1, kernel 6.17.2-1-pve, AMD 5900x / 64GB / NVIDIA RTX 3060 LHR
+# NOT a member of the existing 3-node PVE cluster
+
+# --- SSH access ---
+# Root login required for Proxmox direct management (cert-only, no password)
+sshd_permit_root_login: "prohibit-password"
+# Allow root group so Proxmox's own sshd access control doesn't block root
+sshd_allow_groups: "sudo root"
+
+# --- Firewall ---
+# proxmox-host role handles nftables firewall; do NOT also run UFW via common
+# (they conflict — UFW manages nf_tables chains differently than direct nftables)
+firewall_enabled: false
+
+# --- nftables (proxmox-host role) ---
+# Standalone node: no cluster peers, empty cluster_nodes set
+pve_cluster_nodes: []
+
+# --- Wazuh ---
+wazuh_manager_ip: "192.168.12.100"
+
+# --- AIDE ---
+aide_enabled: true
+
+# --- Auditd ---
+# Proxmox runs on bare metal — auditd is supported (not an LXC restriction)
+auditd_enabled: true
+
+# --- NTP ---
+# Uses iac-control (192.168.12.210) as primary NTP server per platform standard
+ntp_servers:
+  - "192.168.12.210"
+  - "192.168.12.206"
+
+# --- GPU Passthrough (OPS-492 Phase 4) ---
+# pve4-alienware is the dedicated Jellyfin GPU passthrough host.
+# GPU: NVIDIA GA106 GeForce RTX 3060 LHR (PCI 0a:00.0)
+# Audio: NVIDIA GA106 HD Audio (PCI 0a:00.1)
+# PCI IDs confirmed via lspci -nn on 2026-05-10.
+# OPERATOR PIVOT (2026-05-10): gpu_passthrough_enabled flipped to false.
+# Alienware Aurora Ryzen Edition consumer BIOS does not expose AMD IOMMU
+# (no IVRS ACPI table; BIOS 2.10.0 is current with no toggle exposed).
+# GPU passthrough is not feasible on this hardware. Role is shelved for
+# future GPU host use; Jellyfin transcoding will use the 5900x CPU instead.
+# Phase 5 reshapes to: create OKD worker VM on pve4 + Jellyfin nodeSelector.
+gpu_passthrough_enabled: false
+gpu_passthrough_pci_ids:
+  - "10de:2504"  # GA106 GeForce RTX 3060 LHR
+  - "10de:228e"  # GA106 HD Audio Controller
+cpu_iommu_arch: "amd"  # AMD 5900x — amd_iommu=on iommu=pt
+gpu_passthrough_reboot_on_change: true
+
+# --- GPU LXC cgroup-passthrough (OPS-564) ---
+# Plan G' Tier-1 inference substrate: NVIDIA RTX 3060 via LXC device passthrough.
+# IOMMU/VFIO passthrough is NOT available (consumer BIOS, no AMD IOMMU IVRS table;
+# gpu_passthrough_enabled remains false above).
+#
+# LXC cgroup-passthrough approach:
+#   - NVIDIA driver IS installed on host (opposite of VFIO which blacklists it)
+#   - ai-tier1 LXC gets /dev/nvidia* via cgroup2 device allow + bind mounts
+#   - Ollama runs native inside LXC; GPU visible via host kernel driver
+#
+# CONFLICT NOTE: proxmox-gpu-passthrough role must stay at gpu_passthrough_enabled=false
+# on this host. If VFIO were ever enabled here, it would blacklist nvidia drivers
+# and break the LXC passthrough. The two approaches are mutually exclusive.
+#
+# IP 192.168.12.80 reserved for ai-tier1 in the management subnet.
+nvidia_lxc_enabled: true
+
+ai_tier1_lxc_id: 200
+ai_tier1_lxc_name: "ai-tier1"
+ai_tier1_lxc_ip: "192.168.12.80"
+ai_tier1_lxc_cidr: "24"
+ai_tier1_lxc_gateway: "192.168.12.1"
+ai_tier1_lxc_bridge: "vmbr0"
+ai_tier1_lxc_cores: 8
+ai_tier1_lxc_memory: 16384     # 16 GB (MiB)
+ai_tier1_lxc_swap: 4096        # 4 GB (MiB)
+ai_tier1_lxc_rootfs: "local-lvm:64"
+ai_tier1_lxc_nameserver: "192.168.12.210"  # iac-control dnsmasq
+ai_tier1_lxc_searchdomain: "208.haist.farm"
+ai_tier1_lxc_unprivileged: 0   # Privileged required for device passthrough
+
+# Ollama — NVIDIA RTX 3060 has 12GB GDDR6 VRAM
+# OLLAMA_GPU_OVERHEAD=1GiB leaves ~11GB for models
+# llama3.2:3b  ≈ 2.0 GB quantized; nomic-embed-text ≈ 274 MB
+ollama_gpu_overhead: "1GiB"
+ollama_context_length: 8192
+ollama_models:
+  - llama3.2:3b
+  - nomic-embed-text
+
+# ── Home Assistant LXC (OPS-585) ─────────────────────────────────────────────
+# VMID 201 — home-assistant LXC (Ubuntu 24.04, 192.168.12.81, privileged).
+# Privileged required for Docker-in-LXC (Docker CE + HA Container image).
+# Distinct from ai-tier1 (VMID 200, 192.168.12.80) which is for Ollama inference.
+#
+# CONFLICT NOTE: ai_tier1_lxc_unprivileged=0 (already privileged) for GPU passthrough.
+# ha_lxc_id=201 is a separate container; no resource conflict with ai-tier1.
+ha_lxc_id: 201
+ha_lxc_name: "home-assistant"
+ha_lxc_ip: "192.168.12.81"
+ha_lxc_cidr: "24"
+ha_lxc_gateway: "192.168.12.1"
+ha_lxc_bridge: "vmbr0"
+ha_lxc_cores: 4
+ha_lxc_memory: 4096     # 4 GB (MiB)
+ha_lxc_swap: 1024       # 1 GB (MiB)
+ha_lxc_template_storage: "local"
+ha_lxc_rootfs_storage: "local-lvm"
+ha_lxc_rootfs_size: "32"
+ha_lxc_ostemplate: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+ha_lxc_nameserver: "192.168.12.210"  # iac-control dnsmasq
+ha_lxc_searchdomain: "208.haist.farm"
+ha_lxc_unprivileged: 0  # Privileged required for Docker-in-LXC
+ha_image: "ghcr.io/home-assistant/home-assistant:stable"
+ha_config_dir: "/config"
+ha_timezone: "America/Indiana/Indianapolis"
+
+# ── Forgejo CI Runner Pool (OPS-582/OPS-762/OPS-913) ─────────────────────────
+# 6 runner LXCs provisioned by forgejo-runner-pool role.
+# OPS-582: Initial 3 runners (VMIDs 210/211/212, IPs .82/.85/.84).
+# OPS-762: Expand to 6 runners (VMIDs 213/214/215, IPs .86/.87/.88).
+# OPS-913: Add buildah:host label + install buildah on all 6 LXCs so
+#           build-and-push jobs can distribute across all 7 runners (1 iac + 6 pve4)
+#           instead of pinning exclusively to iac-control.
+# pct list on 2026-05-21: VMIDs 213/214/215 confirmed free. IPs .86/.87/.88 confirmed free.
+# Per-host overrides (see role defaults/main.yml for full variable reference):
+forgejo_runner_pool_enabled: true
+
+forgejo_runner_pool_instances:
+  - name: "runner-pve4-1"
+    vmid: 210
+    ip: "192.168.12.82"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-1:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"  # OPS-913: buildah installed; eligible for build-and-push jobs
+    vault_token_path: "secret/forgejo-runner/pve4-1"
+
+  - name: "runner-pve4-2"
+    vmid: 211
+    ip: "192.168.12.85"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-2:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"  # OPS-913
+    vault_token_path: "secret/forgejo-runner/pve4-2"
+
+  - name: "runner-pve4-3"
+    vmid: 212
+    ip: "192.168.12.84"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-3:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"  # OPS-913
+    vault_token_path: "secret/forgejo-runner/pve4-3"
+
+  # OPS-762: expand pool from 3 to 6 runners
+  - name: "runner-pve4-4"
+    vmid: 213
+    ip: "192.168.12.86"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-4:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"  # OPS-913
+    vault_token_path: "secret/forgejo-runner/pve4-4"
+
+  - name: "runner-pve4-5"
+    vmid: 214
+    ip: "192.168.12.87"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-5:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"  # OPS-913
+    vault_token_path: "secret/forgejo-runner/pve4-5"
+
+  - name: "runner-pve4-6"
+    vmid: 215
+    ip: "192.168.12.88"
+    labels:
+      - "iac:host"
+      - "self-hosted:host"
+      - "ubuntu-latest:host"
+      - "linux:host"
+      - "cpu-heavy:host"
+      - "runner-pve4-6:host"
+      - "docker:docker://ghcr.io/catthehacker/ubuntu:act-22.04"
+      - "buildah:host"  # OPS-913
+    vault_token_path: "secret/forgejo-runner/pve4-6"
+
+# ── Frigate NVR LXC (OPS-840 / OPS-956 / OPS-958) ────────────────────────────
+# VMID 203 — Frigate NVR LXC (Ubuntu 24.04, 192.168.12.91, unprivileged).
+# OPS-840: Initial Frigate LXC deployment (2026-05-22)
+# OPS-956: Camera config (3x Reolink via Hub) + iSCSI recordings storage (2026-05-26)
+# OPS-958: Stream stability fixes (2026-05-27):
+#   - reolink_01 URL: Preview_01 → h264Preview_01 (TrackMix Hub firmware requirement)
+#   - reolink_01 preset: preset-rtsp-restream → preset-rtsp-generic (TrackMix HEVC)
+#   - All streams: #input=rtsp/tcp appended (prevent RTP sequence errors on UDP)
+#
+# Storage: 300GiB iSCSI LUN from TrueNAS (192.168.12.205)
+#   IQN: iqn.2026-03.farm.haist:frigate-recordings
+#   Mounted on pve4 host at /mnt/pve/frigate-recordings
+#   Bind-mounted into LXC 203 at /opt/frigate/storage → /media/frigate in container
+#
+# Cameras (Reolink Home Hub at 192.168.100.150, camera VLAN):
+#   reolink_01: Hub ch00, h264Preview_01 (Reolink TrackMix — Side door, battery/solar)
+#   reolink_02: Hub ch01, Preview_02 (Reolink Atlas 1 — Back yard, battery)
+#   reolink_03: Hub ch02, Preview_03 (Reolink Atlas 2 — Front, battery)
+#
+# All cameras are battery-powered: stream ~3-5 min then sleep.
+# Frigate watchdog reconnects automatically when cameras wake on motion.
+# OPS-958: Atlas cameras will still cycle on battery sleep (Hub-side fix required:
+#   enable continuous recording via Reolink Hub Web UI — operator action item).
+frigate_lxc_id: 203
+frigate_lxc_name: "frigate"
+frigate_lxc_ip: "192.168.12.91"
+
+frigate_cameras:
+  - name: reolink_01
+    comment: "Hub channel 0, h264Preview_01 (Reolink TrackMix — Side door, battery/solar)"
+    main_stream: "h264Preview_01_main"
+    sub_stream: "h264Preview_01_sub"
+    ffmpeg_input_args: "preset-rtsp-generic"
+    enabled: true
+  - name: reolink_02
+    comment: "Hub channel 1, Preview_02 (Reolink Atlas 1 — Back yard, battery)"
+    main_stream: "Preview_02_main"
+    sub_stream: "Preview_02_sub"
+    enabled: true
+  - name: reolink_03
+    comment: "Hub channel 2, Preview_03 (Reolink Atlas 2 — Front, battery)"
+    main_stream: "Preview_03_main"
+    sub_stream: "Preview_03_sub"
+    enabled: true
+
+# ── TrueNAS iSCSI SSD Storage Pool (OPS-972 / child of OPS-961 Decision B.2) ─
+# Expose 200 GiB thin zvol from TrueNAS SSD pool to pve4 via raw iSCSI.
+# Storage type: pvesm iscsi (no LVM-thin layer, no QEMU snapshots).
+#
+# TrueNAS portal: 192.168.12.205:3260 (id=1)
+# Named initiator group (pve4 IQN only — not open [] group):
+#   iqn.1993-08.org.debian:01:fa92d8ebe1d7 (confirmed live 2026-05-26)
+#
+# TrueNAS side prerequisites (manual, documented in OPS-972):
+#   1. Dataset:   SSD/iscsi-pve4
+#   2. Zvol:      SSD/iscsi-pve4/pve4-ssd (200 GiB, sparse=true, LZ4, STANDARD)
+#   3. Extent:    pve4-ssd -> zvol/SSD/iscsi-pve4/pve4-ssd (type DISK, rpm=SSD, blocksize=512)
+#   4. Initiator: named group with iqn.1993-08.org.debian:01:fa92d8ebe1d7
+#   5. Target:    iqn.2026-03.farm.haist:pve4-ssd (portal id=1, named initiator group id)
+#   6. Targetextent: target <-> extent, LUN 0
+pve4_iscsi_storage_enabled: true
+pve4_iscsi_portal: "192.168.12.205"
+pve4_iscsi_port: 3260
+pve4_iscsi_target_iqn: "iqn.2026-03.farm.haist:pve4-ssd"
+pve4_iscsi_storage_name: "pve4-ssd"
+pve4_iscsi_storage_content: "images"
+
+# ── LVM-thin layer over iSCSI SSD block device (OPS-979) ─────────────────────
+# Optional LVM-thin pool on top of the raw iSCSI LUN (pve4_iscsi_storage_name).
+# Enables per-VM disk allocation within the 200 GiB SSD-backed LUN.
+#
+# Background: raw pvesm iscsi can't allocate sub-images. LVM-thin on top
+# (pvcreate /dev/sdc → vgcreate → lvcreate --thinpool → pvesm add lvmthin)
+# is required for qmrestore and qm disk allocation to work.
+#
+# Verified on pve4 (2026-05-26) during OPS-976 wazuh VM migration.
+# Pool live: pve4-ssd-vg/pve4-ssd-pool (~199 GiB, SSD-backed TrueNAS zvol)
+pve4_iscsi_lvmthin_enabled: true
+pve4_iscsi_lvmthin_device: "/dev/sdc"         # iSCSI block device after login
+pve4_iscsi_lvmthin_vg: "pve4-ssd-vg"
+pve4_iscsi_lvmthin_pool: "pve4-ssd-pool"
+pve4_iscsi_lvmthin_storage_name: "pve4-ssd-thin"
+
+# ── Authentik OIDC realm (OPS-981) ────────────────────────────────────────────
+# Enable pveum realm add for Authentik SSO on this standalone PVE node.
+# pve4-alienware is NOT a cluster member so it can't inherit the cluster realm.
+# Realm applied 2026-05-27 via OPS-981 (live) and codified here.
+# Operator: after first SSO login, run:
+#   pveum aclmod / --user <email>@authentik --role PVEAdmin
+pve4_authentik_realm_enabled: true
+pve4_authentik_issuer_url: "https://auth-next.208.haist.farm/application/o/proxmox/"
+pve4_authentik_username_claim: "email"
+pve4_authentik_groups_claim: "groups"
+# client_id and client_secret sourced at runtime from Vault:
+#   secret/authentik/clients/pve (client_id, client_secret)
+#   Created by OPS-634; issuer pk=20 on Authentik LXC 300 (192.168.12.83)

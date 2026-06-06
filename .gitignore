@@ -1,0 +1,51 @@
+# Terraform/OpenTofu
+.terraform/
+*.tfvars
+!terraform.tfvars.example
+
+# Local state files (except bootstrap which is intentionally committed)
+infrastructure/terraform.tfstate
+infrastructure/terraform.tfstate.*
+infrastructure/managed/terraform.tfstate
+infrastructure/managed/terraform.tfstate.*
+
+# Bootstrap state IS committed for DR (do not add to gitignore)
+# infrastructure/bootstrap/terraform.tfstate
+# But backup files are not needed in git
+infrastructure/bootstrap/terraform.tfstate.*.backup
+infrastructure/bootstrap/terraform.tfstate.backup
+
+# Lock files can be committed
+!.terraform.lock.hcl
+
+# Crash logs
+crash.log
+crash.*.log
+
+# Override files (local dev)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Secrets (should be in Vault)
+*.pem
+*.key
+!*.pub
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ansible local cache (collections/modules downloaded by ansible-galaxy/ansible-lint)
+.ansible/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+__pycache__/
+*.pyc
+AGENT-STATE.md

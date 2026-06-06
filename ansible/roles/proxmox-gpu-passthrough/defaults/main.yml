@@ -1,0 +1,37 @@
+---
+# proxmox-gpu-passthrough role defaults
+# OPS-492 Phase 4: IOMMU + VFIO GPU passthrough for PVE hosts
+#
+# Set gpu_passthrough_enabled: true in host_vars to activate.
+# All GPU-specific tasks are gated on this flag — role is safe to include
+# in any PVE playbook without side effects on hosts where it is false.
+
+# Master toggle: enable IOMMU + VFIO configuration on this host
+gpu_passthrough_enabled: false
+
+# PCI vendor:device IDs to bind to vfio-pci
+# Provide both the GPU function and HDMI audio function if present.
+# Example (RTX 3060 LHR on pve4-alienware):
+#   gpu_passthrough_pci_ids:
+#     - "10de:2504"   # GA106 GeForce RTX 3060 LHR
+#     - "10de:228e"   # GA106 HD Audio
+gpu_passthrough_pci_ids: []
+
+# CPU IOMMU architecture: "amd" or "intel"
+# amd   → adds: iommu=pt
+#          (AMD IOMMU auto-detected via ACPI IVRS in kernel 6.x — amd_iommu=on
+#           is invalid in modern kernels and generates "Unknown option" warning)
+# intel → adds: intel_iommu=on iommu=pt
+#          (Intel IOMMU requires explicit enablement even when BIOS supports it)
+#
+# PREREQUISITE for AMD: IOMMU must be enabled in BIOS.
+#   Alienware/AMD: Advanced → AMD CBS → NBIO Common Options → IOMMU: Enabled
+#   Without BIOS enablement, no ACPI IVRS table → no IOMMU groups → vfio fails.
+#
+# Default: amd (5900x / Ryzen / EPYC hosts)
+cpu_iommu_arch: "amd"
+
+# Trigger a host reboot when GRUB/initramfs changes are made.
+# Set false only for dry-run / staged-change workflows where the operator
+# wants to reboot manually. Default true so Phase 4 fully converges in one run.
+gpu_passthrough_reboot_on_change: true

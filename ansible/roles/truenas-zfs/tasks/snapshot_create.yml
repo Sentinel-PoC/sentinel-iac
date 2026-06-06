@@ -1,0 +1,46 @@
+---
+# truenas-zfs | snapshot_create — create a ZFS snapshot (OPS-947)
+#
+# Always safe to run (non-destructive). Creates a point-in-time snapshot of
+# the specified dataset. Snapshot name is auto-generated from prefix+timestamp
+# if truenas_zfs_snapshot_name is not set.
+
+- name: truenas-zfs/snapshot_create | validate dataset is set
+  ansible.builtin.assert:
+    that:
+      - truenas_zfs_snapshot_dataset | length > 0
+    fail_msg: "truenas_zfs_snapshot_dataset must be set (e.g. 'SSD/iscsi-okd/keycloak-pg')"
+
+- name: truenas-zfs/snapshot_create | generate snapshot timestamp
+  ansible.builtin.set_fact:
+    truenas_zfs_snapshot_timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+  when: truenas_zfs_snapshot_name | length == 0
+
+- name: truenas-zfs/snapshot_create | set snapshot name
+  ansible.builtin.set_fact:
+    truenas_zfs_snapshot_effective_name: >-
+      {{ truenas_zfs_snapshot_name if truenas_zfs_snapshot_name | length > 0
+         else truenas_zfs_snapshot_prefix + '-' + truenas_zfs_snapshot_timestamp }}
+
+- name: truenas-zfs/snapshot_create | create ZFS snapshot
+  ansible.builtin.uri:
+    url: "{{ truenas_url }}/api/v2.0/zfs/snapshot"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ truenas_api_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      dataset: "{{ truenas_zfs_snapshot_dataset }}"
+      name: "{{ truenas_zfs_snapshot_effective_name }}"
+      recursive: "{{ truenas_zfs_snapshot_recursive }}"
+    validate_certs: "{{ truenas_validate_certs }}"
+    status_code: 200
+  register: truenas_zfs_snapshot_result
+
+- name: truenas-zfs/snapshot_create | log snapshot creation
+  ansible.builtin.debug:
+    msg: >-
+      Created snapshot:
+      {{ truenas_zfs_snapshot_dataset }}@{{ truenas_zfs_snapshot_effective_name }}
+  changed_when: false

@@ -1,0 +1,128 @@
+---
+# OPS-576: Atomic Red Team weekly detection-validation run.
+#
+# Fires every Monday at 06:00 UTC. Executes configured atoms against the
+# isolated atomic-target VM, checks Wazuh for detections, auto-files
+# Plane gap issues on FAIL, updates the MITRE coverage matrix, and sends
+# a Telegram summary.
+#
+# Hard limits enforced in atom-runner.py:
+#   - No reverse-shell payloads
+#   - No C2 callbacks to external infrastructure
+#   - No hack-back (CFAA)
+#
+# Prerequisites (see atomic-red-team-runner/README.md):
+#   - atomic-target VM provisioned, Wazuh agent registered
+#   - Forgejo secrets configured (see README.md secrets table)
+#   - atomic-target subnet in wazuh_ar_whitelist (separate issue)
+
+name: Atomic Red Team Weekly Run
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # OPS-576: Monday 06:00 UTC weekly
+  workflow_dispatch:        # Break-glass: manual trigger for out-of-band runs
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  atom-run:
+    runs-on: iac
+    timeout-minutes: 120    # 5 atoms × detection window (5 min each) + overhead
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # -------------------------------------------------------------------
+      # 1. Check out compliance-vault alongside sentinel-iac so
+      #    atom-runner.py can update the coverage matrix in the same job.
+      # -------------------------------------------------------------------
+      - name: Checkout compliance-vault
+        uses: actions/checkout@v4
+        with:
+          repository: sentinel-admin/compliance-vault
+          token: ${{ secrets.FORGEJO_WORKER_TOKEN }}
+          path: compliance-vault-checkout
+
+      # -------------------------------------------------------------------
+      # 2. Install Python deps
+      # -------------------------------------------------------------------
+      - name: Install Python dependencies
+        run: |
+          pip3 install --quiet -r atomic-red-team-runner/requirements.txt
+
+      # -------------------------------------------------------------------
+      # 3. Write SSH key for atomic-target
+      # -------------------------------------------------------------------
+      - name: Write atomic-target SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.ATOMIC_TARGET_SSH_KEY }}" > /tmp/atomic_target_key
+          chmod 600 /tmp/atomic_target_key
+
+      # -------------------------------------------------------------------
+      # 4. Run atoms
+      # -------------------------------------------------------------------
+      - name: Run atomic tests
+        id: atom_run
+        env:
+          ATOMIC_TARGET_HOST: ${{ secrets.ATOMIC_TARGET_HOST }}
+          ATOMIC_TARGET_USER: ubuntu
+          ATOMIC_TARGET_SSH_KEY: /tmp/atomic_target_key
+          OPENSEARCH_URL: ${{ secrets.OPENSEARCH_URL }}
+          OPENSEARCH_USER: ${{ secrets.OPENSEARCH_USER }}
+          OPENSEARCH_PASSWORD: ${{ secrets.OPENSEARCH_PASSWORD }}
+          PLANE_API_KEY: ${{ secrets.PLANE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OPS_CHAT_ID: ${{ secrets.TELEGRAM_OPS_CHAT_ID }}
+          COMPLIANCE_VAULT_PATH: "${{ github.workspace }}/compliance-vault-checkout"
+        run: |
+          set -euo pipefail
+          cd "${{ github.workspace }}"
+          python3 atomic-red-team-runner/atom-runner.py \
+            --config atomic-red-team-runner/atoms.yml \
+            | tee /tmp/atom-run-results.json
+          echo "atom_run_exit=$?" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------------------
+      # 5. Shred SSH key from runner filesystem
+      # -------------------------------------------------------------------
+      - name: Shred SSH key
+        if: always()
+        run: |
+          shred -u /tmp/atomic_target_key 2>/dev/null || rm -f /tmp/atomic_target_key
+
+      # -------------------------------------------------------------------
+      # 6. Upload run results as artifact (90-day retention)
+      # -------------------------------------------------------------------
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: atom-run-results-${{ github.run_id }}
+          path: /tmp/atom-run-results.json
+          retention-days: 90
+
+      # -------------------------------------------------------------------
+      # 7. Commit coverage matrix update back to compliance-vault
+      # -------------------------------------------------------------------
+      - name: Commit coverage matrix update
+        if: success()
+        run: |
+          set -euo pipefail
+          cd "${{ github.workspace }}/compliance-vault-checkout"
+
+          git config user.email "sentinel-worker@forgejo.208.haist.farm"
+          git config user.name "sentinel-worker"
+
+          if git diff --quiet atomic-red-team-coverage.md 2>/dev/null || \
+             [ ! -f atomic-red-team-coverage.md ]; then
+            echo "Coverage matrix unchanged or not present — skipping commit"
+            exit 0
+          fi
+
+          git add atomic-red-team-coverage.md
+          git commit -m "[OPS-576] Update MITRE ATT&CK coverage matrix — $(date -u +%Y-%m-%d)"
+          git push
+          echo "Coverage matrix committed to compliance-vault"

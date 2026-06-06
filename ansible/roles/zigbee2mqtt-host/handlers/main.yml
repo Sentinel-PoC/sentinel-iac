@@ -1,0 +1,16 @@
+---
+# handlers/main.yml — zigbee2mqtt-host role (OPS-585)
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart mosquitto
+  ansible.builtin.systemd:
+    name: mosquitto
+    state: restarted
+
+- name: Restart zigbee2mqtt
+  ansible.builtin.systemd:
+    name: zigbee2mqtt
+    state: restarted

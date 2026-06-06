@@ -1,0 +1,74 @@
+services:
+  traefik:
+    image: "traefik:v2.11"
+    container_name: "traefik"
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # OPS-731: OKD API port 6443 TCP passthrough — kubeconfig uses :6443 not :443
+      - "--entrypoints.okdapi.address=:6443"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge=true"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.cloudflare.acme.dnschallenge.resolvers=1.1.1.1:53,1.0.0.1:53"
+      - "--certificatesresolvers.cloudflare.acme.email=admin@haist.farm"
+      - "--certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json"
+      - "--accesslog=true"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--accesslog.format=json"
+      - "--accesslog.bufferingsize=100"
+    env_file:
+      - .env
+    environment:
+      - DOCKER_API_VERSION=1.44
+    ports:
+      - "80:80"
+      - "443:443"
+      - "6443:6443"  # OPS-731: OKD API TCP passthrough
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+      - "./dynamic:/etc/traefik/dynamic:ro"
+      - "/var/log/traefik:/var/log/traefik"
+    restart: unless-stopped
+
+  oauth2-proxy:
+    image: "quay.io/oauth2-proxy/oauth2-proxy:v7.7.1"
+    container_name: "oauth2-proxy"
+    command:
+      - "--http-address=0.0.0.0:4180"
+      - "--reverse-proxy=true"
+      - "--provider=keycloak-oidc"
+      - "--client-id=oauth2-proxy"
+      - "--redirect-url=https://oauth2.haist.farm/oauth2/callback"
+      - "--oidc-issuer-url=https://auth.haist.farm/realms/sentinel"
+      - "--email-domain=*"
+      - "--cookie-domain=.haist.farm"
+      - "--cookie-secure=true"
+      - "--cookie-httponly=true"
+      - "--cookie-samesite=lax"
+      - "--cookie-name=_oauth2_proxy"
+      - "--cookie-expire=10h"
+      - "--cookie-refresh=30m"
+      - "--set-xauthrequest=true"
+      - "--skip-provider-button=true"
+      - "--upstream=static://202"
+      - "--scope=openid email profile"
+      - "--allowed-group=admin,operator,viewer"
+      - "--oidc-groups-claim=groups"
+      - "--whitelist-domain=.haist.farm"
+      - "--silence-ping-logging=true"
+      - "--ssl-insecure-skip-verify=true"
+    extra_hosts:
+      - "auth.208.haist.farm:192.168.12.168"
+      - "auth.haist.farm:192.168.12.168"
+    env_file:
+      - .env.oauth2-proxy
+    expose:
+      - "4180"
+    restart: unless-stopped

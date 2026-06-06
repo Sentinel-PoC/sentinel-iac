@@ -1,0 +1,11 @@
+[Unit]
+Description=Run vault-token-watchdog hourly (OPS-142)
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+Persistent=true
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

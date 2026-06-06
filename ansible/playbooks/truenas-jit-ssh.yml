@@ -1,0 +1,32 @@
+---
+# OPS-759: TrueNAS SCALE JIT SSH CA persistence playbook.
+#
+# Deploys the Vault SSH CA trust configuration to TrueNAS .205 so that
+# TrustedUserCAKeys survives middleware-triggered sshd_config regeneration.
+#
+# Problem: TrueNAS SCALE middleware (truenas-middleware) regenerates
+# /etc/ssh/sshd_config from its internal database on every SSH service restart,
+# stripping any manually added directives. Standard Ansible lineinfile (used by
+# roles/jit-ssh-trust for Debian hosts) does not survive this cycle.
+#
+# Fix: script in /etc/ (middleware does not touch this path) triggered by both
+# a systemd ExecStartPost drop-in (service restarts) and a TrueNAS POSTINIT
+# entry (boot coverage).
+#
+# Prerequisites:
+#   - SSH access to TrueNAS as root (JIT cert or persistent key)
+#   - infrastructure/vault-dr/ssh-ca-public-key.pub present on Ansible controller
+#
+# One-shot manual run:
+#   ansible-playbook playbooks/truenas-jit-ssh.yml
+#
+# Verification after run:
+#   ssh root@192.168.12.205 'sshd -T | grep trustedusercakeys'
+#   → trustedusercakeys /data/vault-ssh-ca.pem
+
+- name: TrueNAS JIT SSH CA persistence
+  hosts: truenas
+  gather_facts: false
+
+  roles:
+    - role: truenas-jit-ssh

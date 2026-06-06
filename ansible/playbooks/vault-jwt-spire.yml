@@ -1,0 +1,56 @@
+---
+# Enable and configure Vault JWT auth backend trusting the SPIRE trust
+# domain (spiffe://agents.haist.farm/...) via the spire-oidc-discovery-
+# provider deployed in OPS-537 (Phase 4.4a).
+#
+# Creates per-agent JWT roles bound to SPIFFE IDs; reuses the per-agent
+# Vault policies authored by OPS-345 (no policy files created or modified).
+#
+# Runs locally (no SSH dependency) — all work is API calls against Vault.
+#
+# Required vars (pass via -e or environment):
+#   vault_token  — Vault token with sys/auth + auth/jwt-spire/* +
+#                  pki_int/cert/ca_chain read/write scope (operator-root
+#                  for bootstrap; worker scope is insufficient by design)
+#
+# Recommended override at apply time:
+#   vault_addr   — set to the direct-IP URL https://192.168.12.206:8200
+#                  for token-bearing API calls; the FQDN
+#                  https://vault.208.haist.farm routes through Pangolin
+#                  SSO and returns 403 on token auth.
+#
+# Example run (operator or Judge in verify cycle, on iac-control):
+#   ansible-playbook ansible/playbooks/vault-jwt-spire.yml \
+#     -e vault_token="$(sudo cat /root/.vault-token)" \
+#     -e vault_addr=https://192.168.12.206:8200
+#
+# Idempotent: safe to re-run.
+#   - First run: enables jwt-spire/ mount, configures oidc_discovery_url
+#     + CA + bound_issuer (empty), writes 4 SPIFFE-bound JWT roles
+#   - Second run: auth enable skipped (gate); config/role writes may
+#     report changed=true due to vault_write response-echo quirk (Vault
+#     upsert, no drift)
+#
+# Phase boundary: BACKEND ONLY. Agent migration to JWT-SVID-issued
+# tokens (Phase 4.5) is a separate Plane issue filed after this PR
+# merges and Judge confirms the mount is operational.
+#
+# Layer-bug risk for Judge-apply time tracked in OPS-541:
+#   spire-oidc.208.haist.farm currently resolves to the Pangolin VIP
+#   (192.168.12.168) via the local DNS wildcard catch. If Vault's OIDC
+#   discovery fetch fails ("error checking oidc discovery URL"), the
+#   fix lives in OPS-541 (resolver priority on Vault host), NOT in
+#   this playbook or the vault-jwt-spire role.
+#
+# Tracking: OPS-536 / OPS-351 Phase 4.4b
+
+- name: Configure Vault JWT auth backend for SPIRE trust domain
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # hvac (required by community.hashi_vault) — pin python3 for consistent
+    # site-packages resolution (mirrors OPS-345 / vault-jwt-agents pattern)
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - vault-jwt-spire

@@ -1,0 +1,287 @@
+---
+# OPS-670: powerdns-auth tasks
+#
+# Flow:
+#   1. Fetch API key from Vault (gracefully degrade if secret not yet provisioned)
+#   2. Build pdns_config dict from our vars
+#   3. Call PowerDNS.pdns Galaxy role via include_role with computed vars
+#   4. Post-install: TSIG key setup if key material available in Vault
+
+# ---------------------------------------------------------------------------
+# 1. Vault: fetch API key (graceful degradation for Phase 1 --check runs)
+#    Phase 4 provisions secret/infrastructure/powerdns-api-key before deploy.
+# ---------------------------------------------------------------------------
+- name: Try to fetch PowerDNS API key from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ lookup('env', 'VAULT_ADDR') | default('https://192.168.12.206:8200') }}"
+    auth_method: token
+    token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    path: "infrastructure/powerdns-api-key"
+    validate_certs: false
+  delegate_to: localhost
+  register: _vault_pdns_api_result
+  ignore_errors: true
+  no_log: true
+  when: pdns_auth_api_key == ""
+  tags: [powerdns-auth, pdns-auth, zone, pdns-zone]
+
+- name: Set API key from Vault secret
+  ansible.builtin.set_fact:
+    _pdns_auth_api_key: "{{ _vault_pdns_api_result.secret.api_key }}"
+  when:
+    - pdns_auth_api_key == ""
+    - _vault_pdns_api_result is defined
+    - not (_vault_pdns_api_result.failed | default(true))
+    - _vault_pdns_api_result.secret.api_key is defined
+  no_log: true
+  tags: [powerdns-auth, pdns-auth, zone, pdns-zone]
+
+- name: Set API key from variable or placeholder (Vault not yet provisioned)
+  ansible.builtin.set_fact:
+    _pdns_auth_api_key: >-
+      {{ pdns_auth_api_key if pdns_auth_api_key != ''
+         else 'VAULT-SECRET-NOT-YET-PROVISIONED-SEE-PHASE-4' }}
+  when: >-
+    _pdns_auth_api_key is not defined
+  no_log: false
+  tags: [powerdns-auth, pdns-auth, zone, pdns-zone]
+
+# ---------------------------------------------------------------------------
+# 2. Compute pdns_config dict for Galaxy role
+# ---------------------------------------------------------------------------
+- name: Build pdns_config — common settings
+  ansible.builtin.set_fact:
+    _pdns_auth_base_config:
+      local-address: "{{ pdns_auth_listen_address }}"
+      local-port: "{{ pdns_auth_listen_port }}"
+      api: "yes"
+      api-key: "{{ _pdns_auth_api_key }}"
+      webserver: "yes"
+      webserver-address: "127.0.0.1"
+      webserver-port: "{{ pdns_auth_webserver_port }}"
+  no_log: true
+  tags: [powerdns-auth, pdns-auth]
+
+- name: Build pdns_config — primary mode additions
+  ansible.builtin.set_fact:
+    _pdns_auth_mode_config:
+      primary: "yes"
+      allow-axfr-ips: "{{ pdns_auth_allow_axfr_from }}"
+      also-notify: "{{ pdns_auth_also_notify }}"
+  when: pdns_auth_ns_mode == "primary"
+  tags: [powerdns-auth, pdns-auth]
+
+- name: Build pdns_config — secondary mode additions
+  ansible.builtin.set_fact:
+    _pdns_auth_mode_config:
+      secondary: "yes"
+      autosecondary: "yes"
+  when: pdns_auth_ns_mode == "secondary"
+  tags: [powerdns-auth, pdns-auth]
+
+- name: Merge final pdns_config
+  ansible.builtin.set_fact:
+    _pdns_auth_config: >-
+      {{ _pdns_auth_base_config | combine(_pdns_auth_mode_config | default({})) }}
+  no_log: true
+  tags: [powerdns-auth, pdns-auth]
+
+# ---------------------------------------------------------------------------
+# 3. Invoke Galaxy role — PowerDNS.pdns
+#    Passes our computed config. The Galaxy role installs the package,
+#    writes /etc/powerdns/pdns.conf, and manages the systemd service.
+# ---------------------------------------------------------------------------
+- name: Apply PowerDNS.pdns (Galaxy) role — install + configure
+  ansible.builtin.include_role:
+    name: PowerDNS.pdns
+  vars:
+    pdns_install_repo: "{{ pdns_auth_install_repo }}"
+    pdns_config: "{{ _pdns_auth_config }}"
+    pdns_backends:
+      lmdb:
+        filename: "{{ pdns_auth_lmdb_path }}"
+    pdns_backends_packages_state: present
+    pdns_lmdb_databases_locations:
+      - "{{ pdns_auth_lmdb_path | dirname }}"
+  no_log: false
+  tags: [powerdns-auth, pdns-auth]
+
+# ---------------------------------------------------------------------------
+# 4. TSIG key setup (skipped in Phase 1 — key material not yet in Vault)
+#    Runs only if pdns_auth_tsig_key_name is set AND Vault has the key.
+#    Phase 4/6 will provision the key at pdns_auth_tsig_key_vault_path.
+# ---------------------------------------------------------------------------
+- name: Try to fetch TSIG key from Vault
+  community.hashi_vault.vault_kv2_get:
+    url: "{{ lookup('env', 'VAULT_ADDR') | default('https://192.168.12.206:8200') }}"
+    auth_method: token
+    token: "{{ lookup('env', 'VAULT_TOKEN') }}"
+    path: "infrastructure/powerdns-tsig-key"
+    validate_certs: false
+  delegate_to: localhost
+  register: _vault_tsig_result
+  ignore_errors: true
+  no_log: true
+  when: pdns_auth_tsig_key_name != ""
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+- name: Register TSIG key with pdnsutil (runs only when key material available)
+  ansible.builtin.command:
+    cmd: >
+      pdnsutil import-tsig-key
+      {{ pdns_auth_tsig_key_name }}
+      hmac-sha256
+      {{ _vault_tsig_result.secret.key }}
+  when:
+    - pdns_auth_tsig_key_name != ""
+    - _vault_tsig_result is defined
+    - not (_vault_tsig_result.failed | default(true))
+    - _vault_tsig_result.secret.key is defined
+  changed_when: true
+  no_log: true
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+# ---------------------------------------------------------------------------
+# 4b. Zone metadata for TSIG-protected AXFR (OPS-678 Phase 6)
+#
+# PRIMARY (ns1):
+#   Set TSIG-ALLOW-AXFR zone metadata so AXFR is ONLY permitted with the
+#   named TSIG key. Any AXFR request without a valid TSIG signature is
+#   refused at the primary. This is a hard security requirement.
+#
+# SECONDARY (ns2):
+#   Create the secondary zone entry pointing at ns1 as master.
+#   Set AXFR-MASTER-TSIG so ns2 presents the TSIG key when fetching from ns1.
+#   Trigger initial retrieve to pull zone without waiting for NOTIFY.
+#
+# All tasks are idempotent:
+#   - get-meta before set-meta (skip if already set)
+#   - list-zones before create-secondary-zone (skip if already exists)
+#   - retrieve only fires when the zone was just created (first run)
+# ---------------------------------------------------------------------------
+
+# --- PRIMARY: require TSIG for all AXFR requests ---
+- name: "Zone-meta | Get current TSIG-ALLOW-AXFR metadata (primary)"
+  ansible.builtin.command:
+    cmd: pdnsutil get-meta haist.farm TSIG-ALLOW-AXFR
+  register: _pdns_tsig_allow_axfr_meta
+  changed_when: false
+  failed_when: false
+  when:
+    - pdns_auth_ns_mode == "primary"
+    - pdns_auth_tsig_key_name != ""
+    - _vault_tsig_result is defined
+    - not (_vault_tsig_result.failed | default(true))
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+- name: "Zone-meta | Require TSIG for AXFR of haist.farm (primary only)"
+  ansible.builtin.command:
+    cmd: "pdnsutil set-meta haist.farm TSIG-ALLOW-AXFR {{ pdns_auth_tsig_key_name }}"
+  when:
+    - pdns_auth_ns_mode == "primary"
+    - pdns_auth_tsig_key_name != ""
+    - _vault_tsig_result is defined
+    - not (_vault_tsig_result.failed | default(true))
+    - pdns_auth_tsig_key_name not in (_pdns_tsig_allow_axfr_meta.stdout | default(''))
+  changed_when: true
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+# --- SECONDARY: register zone + authenticate AXFR with TSIG ---
+- name: "Zone-meta | List all zones on ns2 (idempotency pre-check)"
+  ansible.builtin.command:
+    # pdnsutil list-zones does not exist in 4.8.x; list-all-zones is correct.
+    cmd: pdnsutil list-all-zones
+  register: _pdns_secondary_zones
+  changed_when: false
+  failed_when: false
+  when: pdns_auth_ns_mode == "secondary"
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+- name: "Zone-meta | Create secondary zone haist.farm on ns2 (if absent)"
+  ansible.builtin.command:
+    # Use pdns_auth_peer_auth_port (default 5300) so ns2 fetches from ns1's AUTH
+    # port, not ns1's recursor (port 53). The auth is loopback-only by default;
+    # the host_var override makes it reachable on the LXC IP at port 5300.
+    cmd: "pdnsutil create-secondary-zone haist.farm {{ pdns_auth_peer_ns_ip }}:{{ pdns_auth_peer_auth_port }}"
+  register: _pdns_zone_created
+  when:
+    - pdns_auth_ns_mode == "secondary"
+    - _pdns_secondary_zones is defined
+    - "'haist.farm' not in (_pdns_secondary_zones.stdout | default(''))"
+  # Treat "exists already" as idempotent success (not a failure).
+  failed_when:
+    - _pdns_zone_created.rc != 0
+    - "'exists already' not in (_pdns_zone_created.stderr | default(''))"
+  changed_when: _pdns_zone_created.rc == 0
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+- name: "Zone-meta | Get current AXFR-MASTER-TSIG metadata (secondary)"
+  ansible.builtin.command:
+    cmd: pdnsutil get-meta haist.farm AXFR-MASTER-TSIG
+  register: _pdns_axfr_master_tsig_meta
+  changed_when: false
+  failed_when: false
+  when:
+    - pdns_auth_ns_mode == "secondary"
+    - pdns_auth_tsig_key_name != ""
+    - _vault_tsig_result is defined
+    - not (_vault_tsig_result.failed | default(true))
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+- name: "Zone-meta | Set AXFR-MASTER-TSIG key on ns2 (secondary only)"
+  ansible.builtin.command:
+    cmd: "pdnsutil set-meta haist.farm AXFR-MASTER-TSIG {{ pdns_auth_tsig_key_name }}"
+  when:
+    - pdns_auth_ns_mode == "secondary"
+    - pdns_auth_tsig_key_name != ""
+    - _vault_tsig_result is defined
+    - not (_vault_tsig_result.failed | default(true))
+    - pdns_auth_tsig_key_name not in (_pdns_axfr_master_tsig_meta.stdout | default(''))
+  changed_when: true
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+- name: "Zone-meta | Trigger initial AXFR retrieve on ns2 (newly created zone only)"
+  ansible.builtin.command:
+    # pdnsutil retrieve does not exist in 4.8.x.
+    # pdns_control retrieve sends the request to the running daemon.
+    # failed_when: false because daemon may not be ready; auto-retrieve fires on restart.
+    cmd: pdns_control retrieve haist.farm
+  when:
+    - pdns_auth_ns_mode == "secondary"
+    - _pdns_zone_created is defined
+    - _pdns_zone_created.changed | default(false)
+  changed_when: true
+  failed_when: false
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+# ---------------------------------------------------------------------------
+# 4c. Ensure LMDB ownership is correct after pdnsutil operations.
+#
+# pdnsutil runs via sudo (root). LMDB creates sub-files (pdns.lmdb-1,
+# pdns.lmdb-1-lock) as the calling user (root) when the DB grows. The
+# pdns service runs as the pdns user and cannot open root-owned LMDB files,
+# causing immediate crash on next start.
+#
+# Fix: chown all LMDB files to pdns:pdns after any pdnsutil write op.
+# This is idempotent (no-op if already owned correctly).
+# ---------------------------------------------------------------------------
+- name: "Zone-meta | Ensure LMDB files owned by pdns (post-pdnsutil)"
+  ansible.builtin.file:
+    path: "{{ pdns_auth_lmdb_path | dirname }}"
+    owner: pdns
+    group: pdns
+    recurse: true
+  tags: [powerdns-auth, pdns-auth, tsig]
+
+# ---------------------------------------------------------------------------
+# 5. Zone apply (OPS-675 Phase 3) — primary only; loads haist.farm zone via API
+#    Runs when --tags zone or --tags pdns-zone is used.
+#    Depends on _pdns_auth_api_key set above (tags include zone to ensure it runs).
+# ---------------------------------------------------------------------------
+- name: Apply haist.farm zone records (primary only)
+  ansible.builtin.include_tasks:
+    file: zone_apply.yml
+    apply:
+      tags: [zone, pdns-zone]
+  when: pdns_auth_ns_mode == "primary"
+  tags: [zone, pdns-zone]

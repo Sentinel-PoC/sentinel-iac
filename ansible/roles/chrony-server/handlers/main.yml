@@ -1,0 +1,7 @@
+---
+# chrony-server role handlers — OPS-288
+
+- name: Restart chronyd
+  ansible.builtin.service:
+    name: chrony
+    state: restarted

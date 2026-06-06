@@ -1,0 +1,8 @@
+# node.cfg — deployed by ansible/roles/zeek-nids (OPS-568)
+# Standalone single-host Zeek configuration.
+# For clustered deployments, extend this to add manager/worker/proxy nodes.
+
+[zeek]
+type=standalone
+host=localhost
+interface={{ zeek_capture_interface }}

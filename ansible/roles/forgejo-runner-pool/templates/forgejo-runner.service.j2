@@ -1,0 +1,22 @@
+# Ansible managed — OPS-582 forgejo-runner-pool
+# Runner: {{ item.name }} (VMID {{ item.vmid }})
+# Deployed inside LXC at: /etc/systemd/system/forgejo-runner.service
+[Unit]
+Description=Forgejo Actions Runner ({{ item.name }})
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User={{ forgejo_runner_user }}
+WorkingDirectory={{ forgejo_runner_workdir }}
+ExecStart=/usr/local/bin/forgejo-runner daemon --config {{ forgejo_runner_workdir }}/config.yaml
+Restart=on-failure
+RestartSec=10
+
+# Security hardening: limit resource damage if runner is compromised
+LimitNOFILE=65536
+# Runner runs as non-root inside the LXC; no further privilege drops needed.
+
+[Install]
+WantedBy=multi-user.target

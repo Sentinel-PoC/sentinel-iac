@@ -1,0 +1,25 @@
+---
+# tasks/main.yml — wazuh-ha-bridge role (OPS-586 Section C)
+#
+# Orchestrates three task sets, each gated by a flag:
+#
+#   wazuh_ha_configure_wazuh     — run on wazuh-manager host
+#   wazuh_ha_configure_mosquitto — run on 208-pi-001 (mosquitto broker)
+#   wazuh_ha_configure_ha        — run on pve4-alienware (HA LXC host)
+#
+# See defaults/main.yml for usage pattern.
+
+- name: Include Wazuh manager integration tasks
+  ansible.builtin.import_tasks: wazuh_integrator.yml
+  when: wazuh_ha_configure_wazuh | default(true) | bool
+  tags: [wazuh-ha-bridge, wazuh]
+
+- name: Include mosquitto user provisioning tasks
+  ansible.builtin.import_tasks: mosquitto_user.yml
+  when: wazuh_ha_configure_mosquitto | default(true) | bool
+  tags: [wazuh-ha-bridge, mosquitto]
+
+- name: Include HA configuration tasks
+  ansible.builtin.import_tasks: ha_config.yml
+  when: wazuh_ha_configure_ha | default(true) | bool
+  tags: [wazuh-ha-bridge, ha, homeassistant]

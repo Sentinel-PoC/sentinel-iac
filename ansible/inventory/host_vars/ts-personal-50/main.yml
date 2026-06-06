@@ -1,0 +1,32 @@
+---
+# host_vars/ts-personal-50/main.yml — CT320 Tailscale subnet router (OPS-504)
+#
+# CT320: LXC 320 on 208-pve2 (192.168.12.56).
+# Personal VLAN IP: 192.168.50.130.
+# Tailscale node name: ts-personal-50.
+# Also hosts derper.service (self-hosted DERP region 900, OPS-499).
+#
+# Role: tailscale-subnet-router (home-automation.yml Play 4, or ct320-tailscale.yml)
+#
+# IMPORTANT — tailscale_accept_routes must remain false (OPS-504 / OPS-499):
+# CT320 advertises 192.168.12.0/24 (homelab) into the tailnet for Personal VLAN
+# clients (Google TVs, Pixel). If it also accepts advertised routes from other
+# peers (e.g. 208-pi-001 advertising 192.168.12.0/24), asymmetric routing breaks
+# the Pi's keepalive path to the DERP server on CT320 itself (haist-home region 900).
+# Symptom: Pi cannot reach derp.haist.farm:8443 → DERP region goes offline.
+# Fix: accept-routes=false prevents CT320 from routing traffic back through the
+# tailnet when it already has a direct LAN path (192.168.12.0/24 is locally reachable
+# via UCG inter-VLAN routing).
+
+# ── Tailscale subnet router settings ──────────────────────────────────────────
+tailscale_advertise_routes: "192.168.12.0/24"
+tailscale_hostname: "ts-personal-50"
+tailscale_accept_dns: false
+
+# OPS-504: Persist accept-routes=false explicitly.
+# Prevents asymmetric routing (see comment block above).
+tailscale_accept_routes: false
+
+# ── Vault path for auth key (used only if tailscaled needs re-auth) ───────────
+tailscale_auth_key_vault_path: "secret/tailscale"
+tailscale_auth_key_vault_field: "auth_key"

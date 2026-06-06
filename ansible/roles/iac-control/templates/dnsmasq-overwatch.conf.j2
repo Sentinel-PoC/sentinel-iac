@@ -1,0 +1,61 @@
+# {{ ansible_managed }}
+# OpenShift SCOS PXE & DNS Configuration
+# Network: {{ okd_network }}
+# Domain: overwatch.haist.farm
+
+# --- Interface Binding ---
+listen-address={{ okd_gateway_ip }}
+listen-address={{ okd_dhcp_ip }}
+listen-address={{ sentinel_dns_listen_ip }}
+listen-address=127.0.0.1
+bind-dynamic
+except-interface=fan-*
+
+# --- DHCP Configuration ---
+# Range for unknown clients (if any)
+dhcp-range=10.0.0.50,10.0.0.100,12h
+
+# Gateway (this node)
+dhcp-option=3,{{ okd_gateway_ip }}
+# DNS Server (this node)
+dhcp-option=6,{{ okd_gateway_ip }}
+
+# --- DNS Configuration ---
+domain=overwatch.haist.farm
+# Answer queries for this domain from /etc/hosts or DHCP
+local=/overwatch.haist.farm/
+expand-hosts
+
+# --- Static DNS Records (Load Balancer) ---
+address=/api.overwatch.haist.farm/{{ okd_gateway_ip }}
+address=/api-int.overwatch.haist.farm/{{ okd_gateway_ip }}
+address=/.apps.overwatch.haist.farm/{{ okd_gateway_ip }}
+
+# --- PXE / iPXE Booting ---
+# Enable iPXE tagging
+dhcp-match=set:ipxe,175
+
+# --- Static Leases & Node Definitions ---
+# Bootstrap Node
+dhcp-host={{ okd_bootstrap_node.mac }},{{ okd_bootstrap_node.ip }},set:bootstrap
+# Master Nodes
+{% for master in okd_master_nodes %}
+dhcp-host={{ master.mac }},{{ master.name }},{{ master.ip }},set:master
+{% endfor %}
+
+# --- Boot Logic ---
+# iPXE scripts served by nginx on iac-control (port {{ nginx_pxe_port }})
+dhcp-boot=tag:bootstrap,tag:ipxe,http://{{ okd_gateway_ip }}:{{ nginx_pxe_port }}/ignition/bootstrap.ipxe
+dhcp-boot=tag:master,tag:ipxe,http://{{ okd_gateway_ip }}:{{ nginx_pxe_port }}/ignition/master.ipxe
+
+# --- DNSSEC Validation (SC-20/SC-21/SC-22) ---
+# Validate DNSSEC signatures on responses from upstream resolvers
+dnssec
+# Root zone trust anchor (KSK tag 20326, algorithm 8, SHA-256)
+trust-anchor=.,20326,8,2,E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+# Do NOT enable dnssec-check-unsigned — would break resolution for unsigned domains
+
+# --- Upstream Forwarding ---
+{% for server in dns_upstream_servers %}
+server={{ server }}
+{% endfor %}

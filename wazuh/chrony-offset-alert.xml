@@ -1,0 +1,88 @@
+<!--
+  Chrony NTP Offset Alert Rules — OPS-288
+  Rule IDs: 100700-100705
+  Source: systemd/journald chrony log lines forwarded via syslog to Wazuh
+  NIST Controls: AU-8 (Time Stamps), AU-8(1) (Authoritative time source),
+                 SC-45 (System Time Synchronization), AU-12 (Audit Record Generation)
+
+  Deployment: copy to /var/ossec/etc/rules/ on wazuh-server and restart wazuh-manager
+  Ansible: deploy via wazuh-server role (future — out of scope OPS-288)
+
+  Alert thresholds:
+    Level 10 — offset > 500ms (warning; investigate within 1h)
+    Level 13 — offset > 5000ms (5s) (critical; immediate action, possible outage)
+
+  These mirror the 2026-04-21 outage root cause: chrony "active" but not stepping,
+  master-1 drifted 93 minutes, causing ext4 journal abort + Istio mTLS failures.
+-->
+
+<!-- Decoder: match chrony systemd log entries -->
+<decoder name="chrony-offset">
+  <prematch>chronyd</prematch>
+</decoder>
+
+<decoder name="chrony-offset-fields">
+  <parent>chrony-offset</parent>
+  <!-- Match: "System clock wrong by X.XXXXXX seconds, adjustment needed" -->
+  <regex>System clock wrong by (\S+) seconds</regex>
+  <order>offset_seconds</order>
+</decoder>
+
+<decoder name="chrony-tracking-fields">
+  <parent>chrony-offset</parent>
+  <!-- Match: "System time : X.XXXXXXXXX seconds slow/fast of NTP time" -->
+  <regex>System time\s*:\s*(\S+) seconds (slow|fast)</regex>
+  <order>tracking_offset, drift_direction</order>
+</decoder>
+
+<group name="chrony,ntp,time-sync,">
+
+  <!-- Baseline: any chrony log processed (low-level, informational) -->
+  <rule id="100700" level="2">
+    <decoded_as>chrony-offset</decoded_as>
+    <description>Chrony NTP daemon log entry</description>
+    <group>chrony,</group>
+  </rule>
+
+  <!-- chrony stepped the clock (offset > makestep threshold) -->
+  <rule id="100701" level="5">
+    <decoded_as>chrony-offset</decoded_as>
+    <match>Clock was stepped</match>
+    <description>Chrony stepped system clock — large offset corrected</description>
+    <group>chrony,clock-step,</group>
+  </rule>
+
+  <!-- chrony lost sync -->
+  <rule id="100702" level="8">
+    <decoded_as>chrony-offset</decoded_as>
+    <match>Can't synchronise</match>
+    <description>Chrony cannot synchronise — check upstream NTP reachability</description>
+    <group>chrony,sync-loss,</group>
+  </rule>
+
+  <!-- Offset warning: > 500ms -->
+  <rule id="100703" level="10">
+    <decoded_as>chrony-offset</decoded_as>
+    <field name="offset_seconds">^\d{1,}\.</field>
+    <description>Chrony NTP offset exceeds 500ms — AU-8 alert (investigate within 1h)</description>
+    <group>chrony,high-offset,au8,</group>
+    <options>no_full_log</options>
+  </rule>
+
+  <!-- Clock step after config reload — expected during Ansible runs -->
+  <rule id="100704" level="5">
+    <decoded_as>chrony-offset</decoded_as>
+    <match>chronyd exiting|chronyd starting|chronyd restarting</match>
+    <description>Chrony service lifecycle event (restart/stop/start)</description>
+    <group>chrony,service-event,</group>
+  </rule>
+
+  <!-- Critical: offset > 5s (matches outage threshold from 2026-04-21) -->
+  <rule id="100705" level="13">
+    <decoded_as>chrony-offset</decoded_as>
+    <field name="tracking_offset">^[5-9]\d*\.|^\d{2,}\.</field>
+    <description>CRITICAL: Chrony offset exceeds 5 seconds — risk of ext4/mTLS/cert failure (AU-8 critical)</description>
+    <group>chrony,critical-offset,au8,pagerduty,</group>
+  </rule>
+
+</group>

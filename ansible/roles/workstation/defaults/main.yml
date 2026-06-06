@@ -1,0 +1,78 @@
+---
+# Default variables for the `workstation` role (OPS-533 / OPS-351 Phase 4.2b).
+# Override in inventory, host_vars/, or via --extra-vars when needed.
+
+# ── SPIRE Agent (OPS-533 / Phase 4.2b) ──────────────────────────────────────
+# Bare-host install via upstream GitHub release tarball.
+# Match agent major.minor to SPIRE Server (1.14.6 on iac-control); re-pin
+# together on Server bumps. See sentinel-iac roles/iac-control/defaults/main.yml
+# for the Server's `spire_server_image_version`.
+spire_agent_version: "1.14.6"
+
+# Upstream release artifact.
+# Note: SPIRE v1.14.6 publishes only a musl-built linux-amd64 tarball — no
+# glibc variant exists upstream for this release. The musl binary is statically
+# linked (Go build), which is why it runs cleanly on glibc Arch/CachyOS hosts.
+# Verified empirically:
+#   $ file spire-agent → "statically linked"
+#   $ ./spire-agent --version → 1.14.6
+# Sha256 sourced from the upstream's own spire-1.14.6-linux-amd64-musl_sha256sum.txt.
+spire_agent_release_arch: "linux-amd64-musl"
+spire_agent_release_url: "https://github.com/spiffe/spire/releases/download/v{{ spire_agent_version }}/spire-{{ spire_agent_version }}-{{ spire_agent_release_arch }}.tar.gz"
+spire_agent_release_sha256: "ddfcb70cd160869a9af2bc533e911f721a7ec4f76ab5b1573ad3658e1607f7dd"
+
+# Install paths on workstation (host filesystem — no container).
+spire_agent_bin_path: "/usr/local/bin/spire-agent"
+spire_agent_startup_path: "/usr/local/bin/spire-agent-startup.sh"
+spire_agent_config_dir: "/etc/spire-agent"
+spire_agent_config_path: "{{ spire_agent_config_dir }}/agent.conf"
+spire_agent_trust_bundle_path: "{{ spire_agent_config_dir }}/trust_bundle.pem"
+spire_agent_bootstrap_token_path: "{{ spire_agent_config_dir }}/.bootstrap_token"
+spire_agent_data_dir: "/var/lib/spire-agent"
+spire_agent_socket_dir: "/run/spire-agent"
+spire_agent_socket_path: "{{ spire_agent_socket_dir }}/agent.sock"
+
+# Trust domain — must match the Server's value (agents.haist.farm).
+spire_trust_domain: "agents.haist.farm"
+
+# SPIRE Server reach — workstation hits iac-control over LAN.
+# Server gRPC port 8444 (remapped from default 8081 due to Istio collision —
+# see roles/iac-control/defaults/main.yml comment). UFW on iac-control already
+# allows .55 → .210:8444 per `spire_agent_hosts` entry.
+spire_server_lan_ip: "192.168.12.210"
+spire_server_host_port: "8444"
+
+# Server-side admin socket path inside the spire-server container — used by
+# delegate_to tasks that exec into the Server to mint join tokens / fetch
+# the trust bundle. Mirrors the iac-control role's `spire_server_admin_socket_container`.
+spire_server_admin_socket_container: "/tmp/spire-server/private/api.sock"
+
+# Health + telemetry (loopback-only on workstation; not externally scraped today).
+spire_agent_log_level: "INFO"
+spire_agent_health_port: 8446
+spire_agent_telemetry_port: 9989
+
+# Run identity. Matches iac-control posture (root) for first deploy to keep
+# 4.2b scope tight. Hardening to a dedicated `spire-agent` system user is
+# folded into OPS-358 (tech-debt, covers Server + Agent together).
+spire_agent_user: "root"
+spire_agent_group: "root"
+
+# Directory modes — socket-dir 0755 lets non-root workloads connect to the UDS
+# in Phase 4.3+. 0700 on the config dir.
+spire_agent_config_dir_mode: "0700"
+spire_agent_data_dir_mode: "0700"
+spire_agent_socket_dir_mode: "0755"
+
+# ── x509pop node identity cert paths (OPS-553) ──────────────────────────────
+# Provisioned by tasks/spire-agent.yml --tags spire-node-certs.
+# The key + cert pair is the long-lived node credential used for re-attestation.
+# SPIFFE ID derived from cert: spiffe://agents.haist.farm/spire/agent/x509pop/<fingerprint>
+spire_agent_node_cert_dir: "{{ spire_agent_config_dir }}"
+spire_agent_node_cert_key: "{{ spire_agent_config_dir }}/node-key.pem"
+spire_agent_node_cert_file: "{{ spire_agent_config_dir }}/node-cert.pem"
+# Vault PKI role for issuing node certs (same role as iac-control agent)
+spire_node_vault_pki_role: "spire-node"
+spire_node_vault_pki_mount: "spire-pki"
+# Common name for this node's cert (used in CN field; fingerprint is key-derived)
+spire_agent_node_cert_cn: "workstation.agents.haist.farm"

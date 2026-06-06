@@ -1,0 +1,75 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# OKD etcd backup script - runs daily via systemd timer
+# Backs up etcd snapshot from master node to MinIO
+# OPS-285: uses least-privilege scoped MinIO user (etcd-backup-prod) via
+# env vars injected by systemd EnvironmentFile=/etc/sentinel/etcd-backup.env
+
+set -euo pipefail
+
+MASTER_NODE="{{ etcd_backup_master }}"
+MASTER_USER="{{ etcd_backup_user }}"
+SSH_KEY="{{ etcd_backup_ssh_key }}"
+MINIO_BUCKET="{{ etcd_backup_minio_bucket }}"
+RETENTION_DAYS={{ etcd_backup_retention_days }}
+
+# Env vars injected by systemd EnvironmentFile (from /etc/sentinel/etcd-backup.env):
+#   MINIO_URL  — MinIO endpoint (http://192.168.12.58:9000)
+#   MINIO_AK   — access key for scoped user etcd-backup-prod
+#   MINIO_SK   — secret key for scoped user etcd-backup-prod
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP_NAME="etcd-snapshot-${TIMESTAMP}.db"
+LOCAL_DIR="/tmp/etcd-backups"
+
+mkdir -p "${LOCAL_DIR}"
+
+# mc needs a writable config dir; use a temp dir isolated per run so we do not
+# depend on any pre-configured alias (e.g., the legacy admin 'minio' alias).
+export MC_CONFIG_DIR
+MC_CONFIG_DIR=$(mktemp -d /tmp/.mc-etcd-backup-XXXXXX)
+
+# Always clean up local temp file, remote backup dir, and mc config on exit.
+# OPS-936: without this trap, set -euo pipefail exits on mc cp failure before rm -f,
+# leaving orphaned files in LOCAL_DIR that accumulate on disk indefinitely.
+cleanup() {
+    rm -rf "${MC_CONFIG_DIR}" 2>/dev/null || true
+    rm -f "${LOCAL_DIR}/${BACKUP_NAME}" 2>/dev/null || true
+    ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        "${MASTER_USER}@${MASTER_NODE}" \
+        "sudo rm -rf /tmp/etcd-backup-${TIMESTAMP}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Configure scoped mc alias for this run (OPS-285: replaces static admin 'minio' alias)
+mc alias set etcd-prod "${MINIO_URL}" "${MINIO_AK}" "${MINIO_SK}" --api s3v4 >/dev/null 2>&1 \
+    || { echo "[$(date)] FATAL: Cannot configure MinIO alias at ${MINIO_URL}"; exit 1; }
+
+echo "[$(date)] Starting etcd backup from ${MASTER_NODE}..."
+
+# Take etcd snapshot on master node
+ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${MASTER_USER}@${MASTER_NODE}" \
+    "sudo /usr/local/bin/cluster-backup.sh /tmp/etcd-backup-${TIMESTAMP}" < /dev/null 2>&1
+
+# Fix permissions so core user can SCP the snapshot
+ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no "${MASTER_USER}@${MASTER_NODE}" \
+    "sudo chmod 644 /tmp/etcd-backup-${TIMESTAMP}/snapshot_*.db" < /dev/null 2>&1
+
+# Copy snapshot to local
+scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no \
+    "${MASTER_USER}@${MASTER_NODE}:/tmp/etcd-backup-${TIMESTAMP}/snapshot_*.db" \
+    "${LOCAL_DIR}/${BACKUP_NAME}" 2>&1
+
+# Upload to MinIO using scoped alias
+mc cp "${LOCAL_DIR}/${BACKUP_NAME}" "etcd-prod/${MINIO_BUCKET}/${BACKUP_NAME}"
+
+echo "[$(date)] Uploaded ${BACKUP_NAME} to MinIO ${MINIO_BUCKET}"
+
+# Prune old backups in MinIO (retention policy)
+mc find "etcd-prod/${MINIO_BUCKET}" --older-than "${RETENTION_DAYS}d" --exec "mc rm {}" 2>/dev/null || true
+
+# Prune stale local backups: clean up orphaned files from prior upload failures.
+# OPS-936: files stranded by prior mc cp failures are removed after RETENTION_DAYS.
+find "${LOCAL_DIR}" -name "etcd-snapshot-*.db" -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null || true
+
+echo "[$(date)] etcd backup completed successfully"

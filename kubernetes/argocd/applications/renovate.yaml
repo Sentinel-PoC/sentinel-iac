@@ -1,0 +1,32 @@
+# PLANNING ONLY — do not apply until OPS-866 runbook is operator-approved.
+# This file is a planning skeleton in sentinel-iac for review purposes only.
+# The deployable ArgoCD Application belongs in:
+#   overwatch-gitops/clusters/overwatch/apps/renovate-app.yaml
+# A child execution issue will create that file after operator approval of OPS-866.
+#
+# See: docs/runbooks/30-renovate-deployment.md §6 for full deployment notes.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: renovate
+  namespace: openshift-gitops
+  annotations:
+    # OPS-866: planning skeleton — sync disabled until operator approval
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+  source:
+    repoURL: https://forgejo.208.haist.farm/sentinel-admin/overwatch-gitops.git
+    targetRevision: main
+    path: apps/renovate
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: renovate
+  # MANUAL SYNC ONLY — syncPolicy intentionally empty.
+  # Do NOT add automated/selfHeal until smoke test passes (§6 checklist).
+  # See runbook §6 for first-sync checklist before enabling automation.
+  syncPolicy: {}
+  syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true

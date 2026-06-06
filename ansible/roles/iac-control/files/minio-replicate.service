@@ -1,0 +1,12 @@
+[Unit]
+Description=MinIO bucket replication (primary -> replica)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sentinel/minio-replicate.env
+ExecStart=/opt/sentinel-ops/minio-replicate.sh
+User=sentinel-agent
+Group=sentinel-agent
+TimeoutStartSec=1800

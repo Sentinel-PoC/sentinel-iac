@@ -1,0 +1,88 @@
+---
+# truenas-zfs role defaults (OPS-947)
+#
+# This role wraps the TrueNAS SCALE REST API for repeatable ZFS configuration:
+# dataset property enforcement, dataset/zvol creation, snapshot management,
+# and iSCSI portal binding.
+#
+# Required variables (no defaults — must be provided by playbook/inventory):
+#   truenas_api_token  — TrueNAS API key; pull from Vault:
+#                        lookup('community.hashi_vault.hashi_vault', 'secret/truenas:api_token')
+#
+# Task selection: set truenas_zfs_tasks to a list of task files to include.
+# Default runs only the safe read-only list task.
+
+# --- Connection ---
+truenas_url: "https://data.haist.farm"
+# Override with IP if DNS not available: e.g. truenas_url: "https://192.168.12.205"
+#
+# truenas_validate_certs: false is intentional (OPS-1012 probe 2026-05-29).
+# TrueNAS at 192.168.12.205 serves a self-signed iXsystems cert (CN=localhost, no
+# data.haist.farm SAN). data.haist.farm has no DNS record (public or internal).
+# Flip this to true once OPS-1067 (provision valid cert for data.haist.farm) resolves.
+truenas_validate_certs: false
+
+# --- Task selection ---
+# Which task groups to run. Available values:
+#   list               — read-only: enumerate datasets and portal state
+#   dataset_properties — idempotent: enforce compression/atime on datasets
+#   dataset_create     — idempotent: create a filesystem dataset if absent
+#   zvol_create        — idempotent: create a zvol if absent
+#   snapshot_create    — create a ZFS snapshot (always safe)
+#   snapshot_prune     — delete old snapshots (REQUIRES confirm_destroy: true)
+#   iscsi_portal       — idempotent: ensure iSCSI portal bound to expected IP:port
+truenas_zfs_tasks:
+  - list
+
+# --- Safety gate ---
+# Destroy-class operations (snapshot prune) require this to be explicitly true.
+# Default is false — operations skip with a warning unless operator sets this.
+confirm_destroy: false
+
+# --- Dataset property enforcement ---
+# List of datasets to enforce properties on.
+# Each entry: { name: "POOL/dataset", compression: "LZ4", atime: "OFF" }
+# compression values: LZ4, GZIP, ZSTD, OFF
+# atime values: ON, OFF
+truenas_zfs_dataset_properties: []
+# Example:
+# truenas_zfs_dataset_properties:
+#   - name: "DATA/data"
+#     compression: "LZ4"
+#     atime: "OFF"
+#   - name: "SSD/iscsi-okd"
+#     compression: "LZ4"
+#     atime: "OFF"
+
+# --- Dataset creation ---
+truenas_zfs_dataset_name: ""           # e.g. "DATA/new-dataset"
+truenas_zfs_dataset_type: "FILESYSTEM" # FILESYSTEM only (use zvol_create for VOLUMEs)
+truenas_zfs_dataset_compression: "LZ4"
+truenas_zfs_dataset_atime: "OFF"
+truenas_zfs_dataset_comments: ""       # optional comment / OPS issue reference
+
+# --- zvol creation ---
+truenas_zfs_zvol_name: ""        # e.g. "SSD/iscsi-okd/new-lun"
+truenas_zfs_zvol_volsize: "10G"  # e.g. "20G", "500M"
+truenas_zfs_zvol_blocksize: 512
+truenas_zfs_zvol_sparse: false   # true for thin-provisioned (space-efficient) zvols
+truenas_zfs_zvol_compression: "LZ4"
+truenas_zfs_zvol_comments: ""
+
+# --- Snapshot create ---
+truenas_zfs_snapshot_dataset: ""         # e.g. "SSD/iscsi-okd/keycloak-pg"
+truenas_zfs_snapshot_name: ""            # if empty, auto-generated from prefix+timestamp
+truenas_zfs_snapshot_prefix: "ops-snap"  # prefix for auto-generated snapshot names
+truenas_zfs_snapshot_recursive: false
+
+# --- Snapshot prune ---
+# Dataset to prune snapshots for (uses truenas_zfs_snapshot_dataset above)
+truenas_zfs_snapshot_retention_count: 14  # keep this many; delete oldest beyond limit
+# Prune only snapshots whose name starts with this prefix (avoid deleting unrelated snaps)
+truenas_zfs_snapshot_prune_prefix: "ops-snap"
+
+# --- iSCSI portal ---
+truenas_zfs_iscsi_portal_listen_ip: "0.0.0.0"  # IP to bind; "0.0.0.0" = all interfaces
+truenas_zfs_iscsi_portal_port: 3260
+truenas_zfs_iscsi_portal_tag: 1    # TrueNAS portal tag (default portal is tag=1)
+truenas_zfs_iscsi_portal_comment: "OKD iSCSI portal"

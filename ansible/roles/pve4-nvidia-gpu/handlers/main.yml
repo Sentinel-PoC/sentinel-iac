@@ -1,0 +1,21 @@
+---
+# pve4-nvidia-gpu role handlers
+# OPS-564: NVIDIA host driver + LXC cgroup-passthrough for Tier-1 inference
+
+- name: Load nvidia kernel modules
+  ansible.builtin.command:
+    cmd: "modprobe {{ item }}"
+  loop: "{{ nvidia_kernel_modules }}"
+  changed_when: false
+  listen: "Load nvidia modules"
+
+- name: Restart ollama service in LXC
+  ansible.builtin.command:
+    cmd: "pct exec {{ ai_tier1_lxc_id }} -- systemctl restart ollama"
+  changed_when: true
+  listen: "Restart ollama"
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: "Reload systemd daemon"

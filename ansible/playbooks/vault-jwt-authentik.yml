@@ -1,0 +1,46 @@
+---
+# Enable and configure Vault JWT auth backend trusting Authentik
+# (auth-next.208.haist.farm) as the JWT issuer.
+# Creates 4 per-agent JWT roles bound to Authentik-issued JWTs; reuses the
+# per-agent Vault policies authored by OPS-345 (no policy files created or
+# modified).
+#
+# This mount (jwt-authentik/) runs in parallel with jwt/ (Keycloak) during
+# the Authentik migration phase (OPS-605 Phase 4 / OPS-630 follow-up). Agent
+# migration from jwt/ to jwt-authentik/ is a separate Plane issue.
+#
+# Runs locally (no SSH dependency) — all work is API calls against Vault.
+#
+# Required vars (pass via -e or environment):
+#   vault_token  — Vault token with sys/auth + auth/jwt-authentik/* write scope
+#                  (operator-root for bootstrap; worker scope is insufficient
+#                  by design)
+#
+# Recommended override at apply time (use direct-IP to bypass Pangolin SSO):
+#   vault_addr   — https://192.168.12.206:8200
+#                  The FQDN https://vault.208.haist.farm routes through Pangolin
+#                  SSO and returns 403 on token auth.
+#
+# Example run (operator or Judge in verify cycle, on iac-control):
+#   ansible-playbook ansible/playbooks/vault-jwt-authentik.yml \
+#     -e vault_token="$(sudo cat /root/.vault-token)" \
+#     -e vault_addr=https://192.168.12.206:8200
+#
+# Idempotent: safe to re-run.
+#   - First run: enables jwt-authentik/ mount, configures jwks_url + default_role,
+#     writes 4 Authentik-bound JWT roles
+#   - Second run: auth enable skipped (gate); config/role writes may report
+#     changed=true due to vault_write response-echo quirk (Vault upsert, no drift)
+#
+# Tracking: OPS-656 (IaC codification of OPS-630 manual mount creation)
+
+- name: Configure Vault JWT auth backend for Authentik (jwt-authentik/)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # hvac (required by community.hashi_vault) — pin python3 for consistent
+    # site-packages resolution (mirrors vault-jwt-agents / vault-jwt-spire pattern)
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - vault-jwt-authentik

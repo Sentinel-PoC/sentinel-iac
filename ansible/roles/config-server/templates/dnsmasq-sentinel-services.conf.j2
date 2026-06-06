@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Sentinel Service DNS - HA mirror of iac-control - NIST SC-7(16), CP-7
+# Resolves *.208.haist.farm locally to prevent public DNS topology leak
+address=/.{{ sentinel_dns_domain }}/{{ sentinel_dns_target }}
+# Resolve external-facing *.haist.farm domains internally to avoid Cloudflare round-trip
+address=/auth.haist.farm/{{ sentinel_dns_target }}
+address=/matrix.haist.farm/{{ sentinel_dns_target }}
+# OPS-1067: TrueNAS SCALE at 192.168.12.205 exposed via Pangolin reverse proxy.
+# data.haist.farm resolves to Pangolin VIP; Traefik presents wildcard ACME cert
+# so ansible truenas-zfs/truenas-iscsi roles can enable truenas_validate_certs: true.
+address=/data.haist.farm/{{ sentinel_dns_target }}

@@ -1,0 +1,10 @@
+<!-- Wazuh localfile stanza for Canarytokens alert log -->
+<!-- Managed by Ansible — OPS-572 -->
+<!-- Included in /var/ossec/etc/ossec.conf.d/ -->
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>{{ canarytokens_alert_log }}</location>
+    <label key="source">canarytokens</label>
+  </localfile>
+</ossec_config>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync Proxmox VM state to NetBox IPAM
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/netbox-sync-proxmox.sh
+EnvironmentFile=/etc/sentinel/netbox-sync.env
+StandardOutput=journal
+StandardError=journal

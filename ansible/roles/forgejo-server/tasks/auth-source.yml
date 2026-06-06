@@ -1,0 +1,68 @@
+---
+# Idempotent provisioning of the Forgejo OIDC auth source.
+# Uses the Forgejo CLI via docker exec to list, add, or update the auth source.
+# The Name field is set to forgejo_oidc_provider (lowercase "keycloak") — this
+# drives the callback path /user/oauth2/keycloak/callback and canonicalises away
+# from any capital-K UI typos.
+# Tracking: OPS-188
+
+- name: List current Forgejo auth sources
+  ansible.builtin.command:
+    cmd: docker exec -u git forgejo forgejo admin auth list --vertical-bars
+  register: forgejo_auth_list
+  changed_when: false
+  failed_when: forgejo_auth_list.rc != 0
+  when:
+    - forgejo_oidc_enabled | default(true)
+    - forgejo_oidc_client_secret | length > 0
+  tags: [forgejo, oidc, auth-source]
+
+- name: Add Forgejo OIDC auth source if not present
+  ansible.builtin.command:
+    cmd: >-
+      docker exec -u git forgejo forgejo admin auth add-oauth
+      --name "{{ forgejo_oidc_provider }}"
+      --provider openidConnect
+      --key "{{ forgejo_oidc_client_id }}"
+      --secret "{{ forgejo_oidc_client_secret }}"
+      --auto-discover-url "{{ forgejo_oidc_discovery_url }}"
+      --scopes "{{ forgejo_oidc_scopes }}"
+  register: forgejo_auth_add
+  changed_when: "'Authentication source added' in forgejo_auth_add.stdout or forgejo_auth_add.rc == 0"
+  failed_when: forgejo_auth_add.rc != 0
+  when:
+    - forgejo_oidc_enabled | default(true)
+    - forgejo_oidc_client_secret | length > 0
+    - forgejo_oidc_provider not in forgejo_auth_list.stdout
+  tags: [forgejo, oidc, auth-source]
+
+- name: Update Forgejo OIDC auth source if present
+  when:
+    - forgejo_oidc_enabled | default(true)
+    - forgejo_oidc_client_secret | length > 0
+    - forgejo_oidc_provider in forgejo_auth_list.stdout
+  tags: [forgejo, oidc, auth-source]
+  block:
+    - name: Extract auth source ID for {{ forgejo_oidc_provider }}
+      ansible.builtin.set_fact:
+        forgejo_auth_source_id: >-
+          {{ forgejo_auth_list.stdout_lines
+             | select('search', '\\|' ~ forgejo_oidc_provider ~ '\\|')
+             | first
+             | regex_search('^\\s*(\\d+)\\s*\\|', '\\1')
+             | first }}
+
+    - name: Update OIDC auth source {{ forgejo_oidc_provider }}
+      ansible.builtin.command:
+        cmd: >-
+          docker exec -u git forgejo forgejo admin auth update-oauth
+          --id "{{ forgejo_auth_source_id }}"
+          --name "{{ forgejo_oidc_provider }}"
+          --provider openidConnect
+          --key "{{ forgejo_oidc_client_id }}"
+          --secret "{{ forgejo_oidc_client_secret }}"
+          --auto-discover-url "{{ forgejo_oidc_discovery_url }}"
+          --scopes "{{ forgejo_oidc_scopes }}"
+      register: forgejo_auth_update
+      changed_when: "'Authentication source updated' in forgejo_auth_update.stdout"
+      failed_when: forgejo_auth_update.rc != 0

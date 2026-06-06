@@ -1,0 +1,214 @@
+---
+# spire-workload-entries — register sentinel-{worker,judge,planner,scribe}
+# workload entries on the SPIRE Server. Runs on iac-control.
+#
+# OPS-535 / OPS-351 Phase 4.3
+# OPS-552 — dynamic workstation parent-SPIFFE-ID lookup (parameterize role)
+# OPS-553 — x509pop migration: filter for x509pop-attested agents only
+#
+# Idempotency strategy:
+#   - For each (role, parent) tuple, call
+#       spire-server entry show -spiffeID X -parentID Y
+#     and inspect stdout. SPIRE 1.14.6 pretty-prints "Found N entries" via
+#     Pluralizer (cmd/spire-server/cli/entry/show.go line 211); "Found 0 entries"
+#     is the canonical empty-result marker.
+#   - Create only when "Found 0 entries" appears in the check output.
+#   - The check command is changed_when:false (read-only); the create is
+#     changed_when:true (always reports change when it runs at all).
+#   - Expected idempotency on a clean SPIRE Server: 8 changes on run 1, 0 on
+#     runs 2 and 3.
+#
+# Pre-conditions:
+#   - SPIRE Server container `{{ spire_workload_container }}` is running on
+#     this host (deployed by iac-control role's docker-services.yml).
+#   - The SPIRE Agents on iac-control and workstation have attested via x509pop
+#     (OPS-553). This role ONLY creates entries for x509pop-attested agents.
+#
+# Out-of-scope side effects (intentional — Phase 4.5 territory):
+#   - This role does NOT create the sentinel-{worker,judge,planner,scribe}
+#     Linux users that the entries' `unix:user:` selectors reference.
+#   - This role does NOT create the `sentinel-agents` Linux group referenced
+#     by the secondary AND-selector.
+#   - Until Phase 4.5 provisions both, the 8 entries are *authored* but the
+#     selectors bind to host properties that don't yet exist — no workload
+#     will successfully attest under these SPIFFE IDs. This is the intended
+#     phase boundary per OPS-351 description ("4.3 = authored; 4.5 = migrated").
+#
+# Dynamic parent-lookup (OPS-552 + OPS-553):
+#   - Tasks below query `spire-server agent list` to discover ALL live x509pop-
+#     attested agent SPIFFE IDs. The list is filtered to include ONLY agents
+#     with Attestation type = x509pop (spire_workload_attestation_type).
+#   - ALL resolved x509pop agent IDs are used as parents (cross-product with roles).
+#     This handles both iac-control and workstation in one loop without needing
+#     to distinguish between them (both get 4 entries each).
+#   - Fallback: if agent list returns no x509pop agents (e.g., agents not yet
+#     re-attested after x509pop migration), the static default list is used.
+#     The static defaults contain PLACEHOLDER values — entries created from
+#     placeholders will have non-matching parent IDs and must be deleted + re-run.
+#     This fallback is a safety net; normal usage requires live x509pop agents.
+
+- name: Assert SPIRE Server container is reachable via docker exec
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ spire_workload_container }}"
+      - "{{ spire_workload_binary }}"
+      - --version
+  register: spire_workload_version_probe
+  changed_when: false
+  check_mode: false
+  tags:
+    - spire-workload-entries
+
+- name: Show SPIRE Server version (read-only confirmation)
+  ansible.builtin.debug:
+    msg: >-
+      SPIRE Server binary stderr={{ spire_workload_version_probe.stderr | default('') }}
+      stdout={{ spire_workload_version_probe.stdout | default('') }}
+  tags:
+    - spire-workload-entries
+
+# ── OPS-552 + OPS-553: Dynamic x509pop parent-SPIFFE-ID lookup ───────────────
+# Queries the live agent list from SPIRE Server and resolves ALL current
+# x509pop-attested agent SPIFFE IDs. OPS-553 replaces join_token with x509pop;
+# the filter now selects only x509pop-type agents (not join_token).
+#
+# Algorithm:
+#   1. Run `spire-server agent list` inside the container.
+#   2. Parse the output in agent-entry blocks:
+#        SPIFFE ID         : spiffe://agents.haist.farm/spire/agent/x509pop/FINGERPRINT
+#        Attestation type  : x509pop
+#        ...
+#   3. Collect SPIFFE IDs where the IMMEDIATELY following "Attestation type" line
+#      contains spire_workload_attestation_type (x509pop). All such agents get entries.
+#   4. Fallback: if no x509pop agents are found (e.g., migration not yet applied),
+#      use the static spire_workload_agent_parents list. Note: the static defaults
+#      contain PLACEHOLDER values — entries from placeholders will have non-matching
+#      parents. Operator must re-run after agents attest via x509pop.
+
+- name: Query live attested agent list from SPIRE Server (OPS-552 + OPS-553 dynamic lookup)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ spire_workload_container }}"
+      - "{{ spire_workload_binary }}"
+      - agent
+      - list
+  register: spire_agent_list_raw
+  changed_when: false
+  check_mode: false
+  tags:
+    - spire-workload-entries
+
+- name: Parse agent list and resolve x509pop parent SPIFFE IDs (OPS-553)
+  # Extract SPIFFE IDs from agent list output, filtering to x509pop attestation type.
+  # `spire-server agent list` outputs blocks where each agent has consecutive lines:
+  #   SPIFFE ID         : spiffe://...
+  #   Attestation type  : x509pop
+  #
+  # Strategy: iterate over line pairs. For each line starting with "SPIFFE ID",
+  # check if the next "Attestation type" line (within the same block) contains
+  # spire_workload_attestation_type. Use a Python-style index approach via
+  # Jinja2 loop with index.
+  #
+  # Implementation: use `spire_agent_list_raw.stdout` split on blank lines to
+  # get per-agent blocks, then filter blocks containing the attestation type.
+  ansible.builtin.set_fact:
+    spire_workload_x509pop_agents: >-
+      {{
+        spire_agent_list_raw.stdout.split('\n\n')
+        | map('trim')
+        | select('search', 'Attestation type\s*:\s*' + spire_workload_attestation_type)
+        | map('regex_findall', 'SPIFFE ID\s*:\s*(\S+)')
+        | flatten
+        | list
+      }}
+  tags:
+    - spire-workload-entries
+
+- name: Set resolved parent SPIFFE IDs (x509pop agents or static fallback)
+  ansible.builtin.set_fact:
+    spire_workload_resolved_parents: >-
+      {{
+        spire_workload_x509pop_agents
+        if spire_workload_x509pop_agents | length > 0
+        else spire_workload_agent_parents
+      }}
+  tags:
+    - spire-workload-entries
+
+- name: Report resolved parent SPIFFE IDs (OPS-552 + OPS-553 audit)
+  ansible.builtin.debug:
+    msg: >-
+      OPS-553 resolved x509pop parents ({{ spire_workload_resolved_parents | length }} total):
+      {{ spire_workload_resolved_parents | join(', ') }}
+      {% if spire_workload_x509pop_agents | length == 0 %}
+      WARNING: No live x509pop agents found — using static PLACEHOLDER defaults.
+      Re-run this role after agents attest via x509pop.
+      {% endif %}
+  tags:
+    - spire-workload-entries
+
+# Check existence per (role, parent) tuple — cross-product loop.
+# `product()` jinja filter yields [[role, parent], ...] tuples; access as item[0]/item[1].
+- name: Check SPIRE workload entry existence (role × attested-agent parent)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ spire_workload_container }}"
+      - "{{ spire_workload_binary }}"
+      - entry
+      - show
+      - -spiffeID
+      - "spiffe://{{ spire_workload_trust_domain }}/sentinel/{{ item.0 }}"
+      - -parentID
+      - "{{ item.1 }}"
+  register: spire_workload_entry_show
+  changed_when: false
+  check_mode: false
+  loop: "{{ spire_workload_roles | product(spire_workload_resolved_parents) | list }}"
+  loop_control:
+    label: "role=sentinel-{{ item.0 }} parent={{ item.1 | regex_replace('^.*/spire/agent/', '') | truncate(32, true, '...') }}"
+  tags:
+    - spire-workload-entries
+
+# Create entries whose existence-check returned "Found 0 entries".
+# Each entry binds two selectors:
+#   - unix:user:sentinel-<role> (primary identity binding; UID of the per-role
+#     system user that Phase 4.5 will provision)
+#   - unix:supplementary_group:sentinel-agents (defense-in-depth shared group;
+#     a process must satisfy BOTH to attest under this entry — selectors are
+#     AND-ed within a registration entry per SPIRE semantics)
+- name: Create SPIRE workload entry if missing (x509pop parent — OPS-553)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ spire_workload_container }}"
+      - "{{ spire_workload_binary }}"
+      - entry
+      - create
+      - -spiffeID
+      - "spiffe://{{ spire_workload_trust_domain }}/sentinel/{{ item.item.0 }}"
+      - -parentID
+      - "{{ item.item.1 }}"
+      - -selector
+      - "unix:user:sentinel-{{ item.item.0 }}"
+      - -selector
+      - "unix:supplementary_group:{{ spire_workload_shared_group }}"
+      - -x509SVIDTTL
+      - "{{ spire_workload_x509_svid_ttl | string }}"
+      - -jwtSVIDTTL
+      - "{{ spire_workload_jwt_svid_ttl | string }}"
+  loop: "{{ spire_workload_entry_show.results }}"
+  when:
+    - item.stdout is defined
+    - "'Found 0 entries' in item.stdout"
+  changed_when: true
+  loop_control:
+    label: "create role=sentinel-{{ item.item.0 }} parent={{ item.item.1 | regex_replace('^.*/spire/agent/', '') | truncate(32, true, '...') }}"
+  tags:
+    - spire-workload-entries

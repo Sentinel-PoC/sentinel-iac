@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: sentinel-worker
+  description: >
+    TrueNAS SCALE REST API wrapper for repeatable ZFS configuration management.
+    Covers dataset property enforcement, dataset/zvol creation, snapshot management,
+    and iSCSI portal binding. OPS-947.
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: any
+  galaxy_tags:
+    - truenas
+    - zfs
+    - storage
+    - iscsi
+
+dependencies: []

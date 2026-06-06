@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync Proxmox VMs to NetBox every {{ netbox_sync_schedule }}
+
+[Timer]
+OnCalendar={{ netbox_sync_schedule }}
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

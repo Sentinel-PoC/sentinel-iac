@@ -1,0 +1,43 @@
+---
+- name: Configure iac-control baseline (NIST CM-2)
+  hosts: infrastructure_control
+  become: true
+
+  vars:
+    docker_users:
+      - ubuntu
+      - forgejo-runner
+
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker-host
+      tags: [docker]
+    - role: iac-control
+      tags: [iac-control, nist-cm-2]
+    # OPS-535 / OPS-351 Phase 4.3 — must run AFTER iac-control role
+    # (which deploys the spire-server container that this role docker-exec's into).
+    - role: spire-workload-entries
+      tags: [spire-workload-entries, spire-server]
+    # OPS-537 / OPS-351 Phase 4.4a — must run AFTER iac-control role (which
+    # deploys spire-server with the shared API socket bind-mount). Provider
+    # reads the socket via the same bind-mount.
+    - role: spire-oidc-discovery-provider
+      tags: [spire-oidc-discovery-provider, spire-oidc, spire-server]
+    # OPS-545 / OPS-351 Phase 4.5 — workload-side provisioning for SPIRE-
+    # attested agent identities. Creates sentinel-<role> users + sentinel-
+    # agents group, installs the spire-agent CLI host binary, configures
+    # sudoers entry letting `ansible_user` re-exec agent-vault-auth.sh as
+    # the role user. Order: must run AFTER iac-control role (which deploys
+    # the SPIRE Agent container that exposes /run/spire-agent/agent.sock)
+    # and AFTER spire-workload-entries (workload entries must exist before
+    # any user attempts to mint an SVID against them).
+    - role: sentinel-agent-workload
+      tags: [sentinel-agent-workload, spire-workload]
+    # OPS-652: Vault SSH CA trust — deploys TrustedUserCAKeys + AuthorizedPrincipalsFile
+    # so JIT SSH certs are accepted. Tag-gated; --tags jit-ssh-trust runs only this.
+    - role: jit-ssh-trust
+      tags:
+        - jit-ssh-trust
+        - ssh
+        - vault-ssh

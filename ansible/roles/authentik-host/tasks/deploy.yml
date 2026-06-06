@@ -1,0 +1,93 @@
+---
+# deploy.yml — OPS-605
+# Creates directories, writes Docker Compose + env file, starts Authentik stack.
+# Service names match upstream compose.yml: "postgresql", "server", "worker".
+# Upstream reference: https://docs.goauthentik.io/compose.yml (v2026.2.3)
+
+- name: Create Authentik base directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ authentik_compose_dir }}"
+    - "{{ authentik_compose_dir }}/data"
+    - "{{ authentik_compose_dir }}/certs"
+    - "{{ authentik_compose_dir }}/custom-templates"
+  tags: [authentik, deploy]
+
+- name: Deploy Authentik docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ authentik_compose_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: restart authentik-full
+  tags: [authentik, deploy]
+
+- name: Deploy Authentik environment file
+  ansible.builtin.template:
+    src: authentik.env.j2
+    dest: "{{ authentik_compose_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart authentik-full
+  no_log: true
+  tags: [authentik, deploy]
+
+- name: Pull Authentik images
+  ansible.builtin.command:
+    cmd: docker compose pull
+    chdir: "{{ authentik_compose_dir }}"
+  register: authentik_docker_pull_result
+  changed_when: >-
+    'Pull complete' in authentik_docker_pull_result.stdout or
+    'Downloaded newer image' in authentik_docker_pull_result.stdout
+  tags: [authentik, deploy]
+
+- name: Start Authentik stack
+  ansible.builtin.command:
+    cmd: docker compose up -d
+    chdir: "{{ authentik_compose_dir }}"
+  register: authentik_compose_up_result
+  changed_when: >-
+    'Started' in authentik_compose_up_result.stderr or
+    'Creating' in authentik_compose_up_result.stderr or
+    'Recreating' in authentik_compose_up_result.stderr
+  tags: [authentik, deploy]
+
+- name: Wait for PostgreSQL to be healthy
+  # Waits until pg_isready succeeds inside the postgresql container.
+  # Service name "postgresql" matches upstream compose service name.
+  ansible.builtin.command:
+    cmd: >-
+      docker compose exec -T postgresql
+      pg_isready -d {{ authentik_db_name }} -U {{ authentik_db_user }}
+    chdir: "{{ authentik_compose_dir }}"
+  register: authentik_pg_ready
+  retries: 18
+  delay: 5
+  until: authentik_pg_ready.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+  tags: [authentik, deploy]
+
+- name: Wait for Authentik server to be ready
+  # Authentik's readiness endpoint returns 200 when fully initialized.
+  # Endpoint: /-/health/ready/ (upstream: https://docs.goauthentik.io)
+  # First-run migrations can take 60-90 seconds.
+  ansible.builtin.uri:
+    url: "http://localhost:{{ authentik_http_port }}/-/health/ready/"
+    method: GET
+    status_code: 200
+    validate_certs: false
+  register: authentik_health
+  retries: 36
+  delay: 10
+  until: authentik_health.status == 200
+  when: not ansible_check_mode
+  tags: [authentik, deploy, verify]

@@ -1,0 +1,67 @@
+# oc-mirror v2 ImageSetConfiguration
+#
+# Run on a workstation with public-internet egress and `oc-mirror v2`
+# (bundled with `oc` 4.19+). Produces:
+#   - a tarball of mirrored content for the air-gapped side, OR
+#   - a direct push to mirror.208.haist.farm if both ends are reachable
+#   - idms-oc-mirror.yaml (cross-check against ../idms.yaml)
+#   - itms-oc-mirror.yaml (for tag-pinned references — apply alongside IDMS)
+#
+# Two-step flow:
+#   # workstation with internet:
+#   oc-mirror --v2 --config imageset-config.yaml file:///tmp/mirror-out
+#   # transfer /tmp/mirror-out to mirror VM, then on the mirror VM:
+#   oc-mirror --v2 --from /tmp/mirror-out docker://mirror.208.haist.farm
+#
+# Sources:
+#   https://docs.okd.io/4.19/disconnected/mirroring/about-installing-oc-mirror-v2.html
+#   https://developers.redhat.com/articles/2025/10/14/simplify-openshift-installation-air-gapped-environments
+#
+kind: ImageSetConfiguration
+apiVersion: mirror.openshift.io/v2alpha1
+mirror:
+  platform:
+    architectures:
+      - amd64
+    channels:
+      - name: stable-4.19
+        type: okd
+        minVersion: 4.19.0
+        maxVersion: 4.19.99
+    graph: true
+  operators:
+    # Operator catalog mirroring — narrow to operators we actually use to keep
+    # the bundle small (~50 GB instead of ~358 GB for full RH catalog).
+    - catalog: registry.redhat.io/redhat/community-operator-index:v4.19
+      packages:
+        - name: kyverno
+        - name: argocd-operator
+        - name: cert-manager
+        - name: keycloak-operator
+  additionalImages:
+    # Platform images we depend on but that aren't part of any operator catalog.
+    - name: ghcr.io/kyverno/kyverno:latest
+    - name: ghcr.io/kyverno/kyverno-cli:latest
+    - name: ghcr.io/kyverno/background-controller:latest
+    - name: ghcr.io/kyverno/cleanup-controller:latest
+    - name: ghcr.io/kyverno/reports-controller:latest
+    - name: quay.io/jetstack/cert-manager-controller:v1.17.4
+    - name: quay.io/jetstack/cert-manager-webhook:v1.17.4
+    - name: quay.io/jetstack/cert-manager-cainjector:v1.17.4
+    # bitnami/postgresql 15.x-debian-12 tags were removed from docker.io (Broadcom now only
+    # publishes :latest/Photon-OS). Using official postgres:15.18-bookworm (Debian 12 = bookworm).
+    - name: docker.io/postgres:15.18-bookworm
+    # bitnami/redis 7.x-debian-12 tags were removed from docker.io for the same reason.
+    # Using official redis:7.4.9-bookworm (Debian 12 = bookworm).
+    - name: docker.io/redis:7.4.9-bookworm
+    # Harbor's own images (so Harbor recovery never depends on Harbor itself):
+    - name: docker.io/goharbor/harbor-core:v2.11.0
+    - name: docker.io/goharbor/harbor-db:v2.11.0
+    - name: docker.io/goharbor/harbor-jobservice:v2.11.0
+    - name: docker.io/goharbor/harbor-portal:v2.11.0
+    - name: docker.io/goharbor/harbor-registryctl:v2.11.0
+    - name: docker.io/goharbor/registry-photon:v2.11.0
+    - name: docker.io/goharbor/redis-photon:v2.11.0
+    - name: docker.io/goharbor/nginx-photon:v2.11.0
+    - name: docker.io/goharbor/trivy-adapter-photon:v2.11.0
+    - name: docker.io/goharbor/harbor-exporter:v2.11.0

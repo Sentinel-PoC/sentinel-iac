@@ -1,0 +1,61 @@
+# PLANNING ONLY — do not apply until OPS-866 runbook is operator-approved.
+# This is a STUB showing the expected ConfigMap shape.
+# Real config values (token, autodiscoverFilter, packageRules, etc.) are set
+# in the execution child issue after operator approval.
+#
+# Key decisions to make before filling in real values:
+#   1. Which repos to autodiscover (suggest starting with sentinel-admin/* scope)
+#   2. OPS-288 sandbox gate: choose Option A/B/C from runbook §12
+#   3. Confirm dryRun: "full" for first week (recommended in runbook §6)
+#   4. Telegram/ntfy topic name (suggest: renovate-alerts)
+#
+# See: docs/runbooks/30-renovate-deployment.md §7 (auto-merge ruleset)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: renovate-config
+  namespace: renovate
+  annotations:
+    # OPS-866 — stub; replace with real config in execution child issue
+    ops-issue: "OPS-866"
+    ops-status: "planning-only"
+data:
+  config.js: |
+    // PLANNING ONLY — stub config; real values in execution child issue
+    //
+    // Key config options to set:
+    //   platform:             "forgejo"
+    //   endpoint:             "https://forgejo.208.haist.farm"
+    //   token:                process.env.RENOVATE_TOKEN   (from ExternalSecret)
+    //   autodiscover:         true
+    //   autodiscoverFilter:   ["sentinel-admin/*"]         (phase 1 scope)
+    //   onboarding:           true                         (per-repo opt-in)
+    //   requireConfig:        "optional"
+    //   dryRun:               "full"                       (first week: observe only)
+    //
+    // Auto-merge ruleset (see runbook §7 for full packageRules JSON):
+    //   OS package patch  → automerge: true  if CI green
+    //   Container patch   → automerge: true  if CI green
+    //   Helm patch        → automerge: true  if CI green
+    //   Minor/major       → automerge: false; reviewers: ["koiakoia"]
+    //
+    // Schedule:
+    //   Weekly sweep:           before 4am on Monday
+    //   Nightly security only:  0 3 * * * (matchCategories: ["security"])
+    //
+    // Notifications (ntfy — see runbook §8):
+    //   onError webhook → https://ntfy.208.haist.farm/renovate-alerts
+    //
+    module.exports = {
+      // *** REPLACE ALL VALUES BELOW — this is a planning stub ***
+      platform: "forgejo",
+      endpoint: "https://forgejo.208.haist.farm",
+      token: process.env.RENOVATE_TOKEN,
+      // PLACEHOLDER — fill in execution child issue:
+      autodiscover: true,
+      autodiscoverFilter: ["PLACEHOLDER-sentinel-admin/*"],
+      onboarding: true,
+      requireConfig: "optional",
+      dryRun: "full",
+    };

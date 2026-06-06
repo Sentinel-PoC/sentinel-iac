@@ -1,0 +1,10 @@
+[Unit]
+Description=Vault Data Backup to MinIO
+After=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vault-backup.env
+ExecStart=/usr/local/bin/vault-backup.sh
+StandardOutput=journal
+StandardError=journal

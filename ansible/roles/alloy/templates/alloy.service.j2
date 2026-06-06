@@ -1,0 +1,18 @@
+[Unit]
+Description=Grafana Alloy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ alloy_user }}
+Group={{ alloy_group }}
+ExecStart={{ alloy_binary_path }} run {{ alloy_config_dir }}/config.alloy --storage.path={{ alloy_data_dir }}
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alloy
+
+[Install]
+WantedBy=multi-user.target

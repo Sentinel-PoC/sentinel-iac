@@ -1,0 +1,19 @@
+---
+# sigma-deploy.yml — Deploy SIGMA-compiled Wazuh rules (OPS-574)
+#
+# Called by:
+#   - sentinel-sigma-rules/.forgejo/workflows/sigma-pipeline.yml (deploy job)
+#   - Manual: ansible-playbook ansible/playbooks/sigma-deploy.yml \
+#               -e "sigma_compiled_src=/path/to/compiled/sigma_rules.xml"
+#
+# This playbook is separate from wazuh-server.yml to allow rule-only deploys
+# without touching the full Wazuh server configuration.
+
+- name: Deploy SIGMA-compiled detection rules to Wazuh manager
+  hosts: wazuh
+  become: true
+  vars:
+    sigma_compiled_src: "{{ lookup('env', 'SIGMA_COMPILED_SRC') | default('') }}"
+  roles:
+    - role: wazuh-sigma-deploy
+      tags: [sigma, wazuh-sigma, detection-rules]

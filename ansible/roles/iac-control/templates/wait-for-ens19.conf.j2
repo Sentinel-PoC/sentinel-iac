@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# Wait for secondary interface before starting dnsmasq
+[Unit]
+After=sys-subsystem-net-devices-{{ okd_interface }}.device
+Wants=sys-subsystem-net-devices-{{ okd_interface }}.device
